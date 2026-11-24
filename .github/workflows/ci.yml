@@ -46,13 +46,13 @@ jobs:
           if-no-files-found: error
 
   transport:
-    name: Testy ISO-TP (hostitel)
+    name: Testy ISO-TP a diagnostiky (hostitel)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Zadna LVGL, zadne stahovani - jen libc a src/can/isotp.c,
-      # takze tenhle job dobehne v radu sekund.
+      # Zadna LVGL, zadne stahovani - jen libc a par souboru z
+      # src/can a src/diag, takze tenhle job dobehne v radu sekund.
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
 
@@ -62,8 +62,12 @@ jobs:
       - name: Build
         run: cmake --build test/build -j"$(nproc)"
 
-      - name: Run
+      - name: ISO-TP
         run: ./test/build/isotp_test
+
+      # UDS, stary protokol Renault a detekce pripojeni k vozidlu.
+      - name: Diagnosticka vrstva
+        run: ./test/build/uds_test
 
   screenshots:
     name: Nahledy obrazovek
