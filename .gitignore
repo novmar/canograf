@@ -1,0 +1,30 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.clang_complete
+.gcc-flags.json
+
+# simulator / CI build
+sim/build/
+sim/third_party/lvgl/
+*.png.tmp
+
+# python venv pouzite pro platformio
+.pio-venv/
+.venv/
+__pycache__/
+
+# lokalni data, ktera do repa nepatri
+*.csv
+*.log
+secrets.h
+wifi_credentials.h
+*.bin
+*.elf
+*.map
+
+# OS
+.DS_Store
+Thumbs.db
