@@ -65,10 +65,77 @@ python3 -m venv .pio-venv
 Versions in `platformio.ini` are pinned on purpose - see
 [CLAUDE.md](CLAUDE.md) for why.
 
+## Writing to the vehicle
+
+Reading is safe and never restricted - live values, fault memory and stored
+records can be read as often as you like and nothing in the vehicle changes.
+
+Writing is different. The device can reset service data, reconfigure the energy
+module and start a particulate filter regeneration, which heats the exhaust past
+600 C. A wrong value can leave a vehicle unable to start. So a write has to get
+through three gates, and a mis-tap cannot open any of them:
+
+1. **The build.** The default firmware has no write code in it at all. Not
+   hidden, not disabled - not compiled in. This is what you get if you just
+   build and flash.
+2. **A switch in Settings**, "Enable write functions", off every time the device
+   starts. It is never stored: a restart locks it again.
+3. **A sequence.** Turning the switch on shows a short page explaining what
+   writing can do, then plays a five step pattern on four shapes which you
+   repeat back. Three tries, then a minute's wait. Shapes and digits, not just
+   colours, so it works for colour-blind users too.
+
+Once unlocked it stays unlocked until the device restarts - the sequence is a
+captcha, not something you repeat for every write. Each individual write still
+asks for a plain confirmation showing what is about to be sent.
+
+**The same gate covers the planned web interface and ELM327 emulation.** A
+remote client can never unlock anything; while the device is locked its writes
+are refused in the transport layer, wherever they came from. Only a person at
+the touchscreen can open the gate.
+
+### Building without the protection
+
+If you work on control units all day, repeating a sequence gets old. The gate
+can be compiled out:
+
+```sh
+# writing compiled in, still behind the sequence
+PLATFORMIO_BUILD_FLAGS=-DCANOGRAF_ALLOW_WRITE=1 .pio-venv/bin/pio run
+
+# writing compiled in, no gate at all
+PLATFORMIO_BUILD_FLAGS="-DCANOGRAF_ALLOW_WRITE=1 -DCANOGRAF_WRITE_UNLOCKED=1" \
+  .pio-venv/bin/pio run
+```
+
+What you take on with the second one: **any touch on a write control acts
+immediately**, with no sequence in the way, and so does any request from the web
+interface or from a tool connected to the ELM327 emulation - including from a
+script that is not watching what the vehicle is doing. Such a build shows a
+permanent `WRITE UNLOCKED` badge so it cannot be mistaken for a normal one after
+it has been left in a vehicle. Do not hand it to anyone else and do not leave it
+installed.
+
+The reasoning, and the full list of which requests are gated and which are not,
+is in [`docs/safety.md`](docs/safety.md).
+
+## Languages
+
+The interface speaks **English** (default), **Czech** and **German**. The
+button on the settings page cycles between them and the choice survives a
+reboot.
+
+Every string lives in one file per language in [`lang/`](lang/). Adding a
+language is one new file and one line in a table - no other code changes - and
+a translation-only pull request is welcome. The fonts already carry Czech and
+German diacritics; other scripts need the fonts regenerated, which is one
+command. See [`lang/README.md`](lang/README.md).
+
 ## Screen previews
 
 CI builds the UI for the host and renders every screen to PNG, so changes are
 visible in a pull request without owning the board. See [`sim/`](sim/).
+`lv_shot` takes a language code, so a translation can be checked the same way.
 
 ## Documentation
 
@@ -79,10 +146,20 @@ visible in a pull request without owning the board. See [`sim/`](sim/).
 | [`docs/vehicles/`](docs/vehicles/) | Per-vehicle data identifier maps |
 | [`docs/hardware/`](docs/hardware/) | Per-board pinouts and measurements |
 | [`docs/ui.md`](docs/ui.md) | Why the interface looks the way it does |
+| [`docs/safety.md`](docs/safety.md) | The gate between reading and writing, and why it is built that way |
+| [`lang/README.md`](lang/README.md) | How to add a language |
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+**GPLv3.** See [LICENSE](LICENSE).
+
+Chosen deliberately: anyone may use, study and modify this, but a derivative
+has to stay open too. The vehicle knowledge in `docs/` was expensive to gather
+and should not end up locked inside somebody's closed product.
 
 **No warranty.** Writing to a control unit can disable your vehicle. Reading is
-safe, writing is not. Everything in this project that writes is marked as such.
+safe, writing is not.
+
+Write access is **not in the default build at all** - it has to be compiled in
+deliberately, and even then it stays locked until somebody unlocks it on the
+device itself. See [`docs/safety.md`](docs/safety.md).

@@ -12,9 +12,45 @@ Ordered roughly by dependency. Nothing here is a promise.
 - [x] Settings: units, display blanking, WiFi
 - [x] WiFi station mode plus OTA, so further updates need no cable
 - [x] Values animated at 50 Hz from a 20 Hz source so gauges flow
+- [x] UI split from board code, so it builds on a host and CI renders previews
 - [ ] Back gesture from the left edge - implemented, **not yet confirmed on hardware**
-- [ ] Font with Czech diacritics (built-in Montserrat has none)
+- [x] Font with Czech and German diacritics, generated from Montserrat
+- [x] Interface translated: English (default), Czech, German, switchable on
+      the settings page and remembered in NVS. Adding a language is one file
+      in `lang/`, see `lang/README.md`
 - [ ] Font larger than 48 px for true driver-glance sizing
+- [ ] **Reset buttons** in settings. Each behind a confirmation:
+  - [ ] Restart the device
+  - [ ] Settings back to defaults
+  - [ ] Forget stored WiFi networks
+  - [ ] Clear the display blanking and unit preferences only
+
+## Debug panel and profiles
+
+- [ ] **Debug tile** in the pull-up grid, bottom row, second from the right
+  - [ ] FPS and CPU overlay toggle. Note: LVGL's built-in `LV_USE_PERF_MONITOR`
+        is a compile-time switch, so a runtime toggle needs our own label with
+        its own frame timing. The built-in one cannot be turned on from a menu
+  - [ ] Show raw values next to scaled ones, for checking a vehicle profile
+  - [ ] Bus statistics: frames per second, error counters, timeouts
+  - [ ] Log level
+- [ ] **Three settings profiles** plus "reset to default"
+  - [ ] Stored in NVS. The partition here is 20 kB and a profile is a few
+        hundred bytes, so **no SD card is needed** - keep the card for trip logs
+  - [ ] Name each profile, so they are not just 1 / 2 / 3
+  - [ ] Profile covers units, blanking, language, debug flags
+
+## Known bugs
+
+- [ ] **Closing the WiFi scan dialog sometimes crashes.** `wifi_list` is left
+      pointing at a deleted object; if the scan finishes afterwards,
+      `wifi_poll()` writes into freed memory. Null the pointers and reset the
+      scan state when the dialog closes
+- [ ] Left edge swipe does not go back from the password dialog - the keyboard
+      swallows the gesture, the handler sits on the screen below
+- [ ] **Remembered networks.** Picking a network that was already connected
+      asks for the password again. Store several known networks, connect
+      without asking, and show them as a list
 
 ## Next - talk to the car
 
@@ -29,23 +65,56 @@ Ordered roughly by dependency. Nothing here is a promise.
 - [ ] Replace simulated values with real ones
 - [ ] Measure the achievable sample rate and put it on screen
 
-## Then - logging and remote
+## Vehicle presence and actuator tests
 
-- [ ] Log to the TF card with timestamps from the on-board RTC (PCF85063)
-- [ ] **WiFi + web server** - live values in a browser on a phone
-  - [ ] Access point mode, so it works with no infrastructure
+- [ ] **Detect whether the device is connected to a vehicle.** Bus traffic is
+      the honest signal - an active terminated bus looks nothing like an open
+      pair of wires. Replace the DEMO badge in the status strip with it
+- [ ] **Test page with actuators.** Each one behind a confirmation, each a
+      single shot:
+  - [ ] Flash the hazard lights once
+  - [ ] Turn a single lamp on and off
+  - [ ] Lock and unlock the doors
+  - [ ] Lower and raise a window
+
+  These are body module functions, so they need the legacy Renault transport,
+  not UDS. Useful as a self-test and as a way to confirm that a parameter
+  change did what it was supposed to.
+- [ ] The same actuator tests reachable remotely
+
+## Remote access - work on the car from a desk
+
+The feature that changes how the device is used: leave it in the vehicle and
+develop without sitting in the driver's seat.
+
+- [ ] **Remote diagnostic gateway over WiFi**
+  - [ ] Tunnel CAN and ISO-TP requests from a PC to the vehicle
+  - [ ] **Emulate an ELM327 on a TCP port.** DDT4All, pyren and most other
+        tools already know how to talk to a WiFi ELM327. Expose that interface
+        and every existing tool works remotely with no changes on their side.
+        Our implementation can handle multi-frame properly, which the real
+        dongle cannot
+  - [ ] Authentication with a key or password. **Not an open port** - a device
+        that can unlock the doors must not be reachable by anyone on the network
+  - [ ] Choose between a plain socket, SSH or TLS. SSH brings key auth for free
+- [ ] **Web server** - live values in a browser on a phone
+  - [ ] Access point mode, so it works with no infrastructure around
   - [ ] Station mode, already done for OTA
   - [ ] Mode switch in settings
-  - [ ] Server-sent events for live data
+  - [ ] Server-sent events for live values
   - [ ] CSV download of the current session
+
+## Logging and fault memory
+
+- [ ] Log to the TF card with timestamps from the on-board RTC (PCF85063)
 - [ ] Fault memory page with status bit decoding
 - [ ] Freeze frame page (`19 04`)
 - [ ] Extended records page (`19 06`): occurrence counter, odometer stamps
 
 ## Later - careful territory
 
-Everything in this block writes to the vehicle. Each needs a confirmation
-dialog, a precondition check and a backup of what it overwrites.
+Everything here writes to the vehicle. Each needs a confirmation dialog, a
+precondition check and a backup of whatever it overwrites.
 
 - [ ] Forced particulate filter regeneration (`31 01 02 0D`)
 - [ ] Service interval reset
@@ -55,6 +124,10 @@ dialog, a precondition check and a backup of what it overwrites.
 
 - [ ] Ignition sensing on `DI0` so the device sleeps with the vehicle.
       At about 3 W it will flatten a healthy battery in under a week
+- [ ] **Ambient light sensor** for adaptive backlight. Pointless on this board
+      as it stands, because the backlight is a switch and not a dimmer, but
+      worth having ready for a board where it is not, or together with the
+      GPIO6 modification below
 - [ ] Optional: cut `EXIO2` and drive the backlight from `GPIO6` for real PWM
       dimming. See the closed experiment in CLAUDE.md
 - [ ] Support a second board with a different pinout, to prove the abstraction
@@ -63,15 +136,18 @@ dialog, a precondition check and a backup of what it overwrites.
 ## Deliberately not doing
 
 - **Software PWM on the backlight.** Measured and closed, see CLAUDE.md.
-- **Driving the ECU through an ELM327.** The 7-byte limit and the serial
-  bottleneck are the reason this project exists.
+- **Driving the ECU through an ELM327 dongle.** The 7-byte limit and the serial
+  bottleneck are the reason this project exists. Emulating one so that other
+  tools can connect to us is a different thing and is on the list above.
 - **Clearing fault memory as a convenience button.** It destroys the extended
   records, which are often the only evidence of what happened.
 
 ## Open questions
 
-- Operating range of the board is 0 to 65 C. A vehicle cabin leaves that in both
-  directions. Permanent installation needs a different board or a different
-  place to put it.
+- Operating range of the board is 0 to 65 C. A vehicle cabin leaves that range
+  in both directions. Permanent installation needs a different board or a
+  sheltered place to put it.
 - Only one CAN interface. Enough for a platform where everything sits on one
   500 kbit/s bus, not enough in general.
+- How much of the body module command set is safe to expose. Lowering a window
+  remotely is useful for testing and unpleasant when triggered by accident.

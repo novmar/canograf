@@ -21,8 +21,13 @@ Keep the two apart. The UI must not know which car it is looking at.
 ```
 src/main.cpp        board bring-up, WiFi, OTA, NVS, backlight  (board specific)
 src/ui.*            the whole interface                        (portable)
+src/i18n.*          string table, one entry per visible text   (portable)
+src/font_ui.h       UI_FONT_xx aliases for the generated fonts
+src/font_ui_*.c     generated fonts, do not edit by hand
 src/lv_conf.h       LVGL config, 800x480, LV_COLOR_DEPTH 16
 src/lvgl_v8_port.*  LVGL <-> panel glue, from Espressif         (board specific)
+lang/               one file per language, plus how to add one
+tools/gen_fonts.sh  regenerates src/font_ui_*.c
 sim/                host build that renders screens to PNG
 boards/             PlatformIO board definition
 docs/vehicles/      per-vehicle data identifier maps
@@ -50,10 +55,28 @@ Reference for all of the above:
 
 ## Conventions
 
-**No diacritics in source strings.** The built-in Montserrat font has no Czech
-glyphs. A single `o` with an acute in a label made LVGL log
-`glyph dsc. not found for U+F3` thirty times a second. If localisation is
-wanted, generate a font with the needed code points first - see ROADMAP.
+**No hard-coded visible strings.** Everything the user can read goes through
+`T(STR_...)` from `src/i18n.h`; the translations live in `lang/`. A new label
+means a new enum entry and a line in every language file - a missing line is a
+compile error (`_Static_assert` in `src/i18n.c`), never a silent fallback.
+
+**Diacritics are fine now, but only in `lang/`.** `src/font_ui_*.c` are
+generated from the same Montserrat the built-ins use, extended with Czech and
+German accented letters, the degree sign, the bullet and the eight FontAwesome
+icons that LVGL widgets draw themselves. So `lang/cs.h` is written with proper
+accents. The `.c` and `.h` files outside `lang/` stay pure ASCII.
+
+**Never use `lv_font_montserrat_*`.** They are all switched off in `lv_conf.h`
+precisely because they have no accented glyphs, and a single missing glyph
+makes LVGL log `glyph dsc. not found for U+XXXX` thirty times a second. Use the
+`UI_FONT_xx` aliases from `src/font_ui.h`. Sizes available: 14, 16, 20, 24, 28,
+32, 36, 40, 48. A language that needs more characters adds them to `SYMBOLS` in
+`tools/gen_fonts.sh` and reruns it.
+
+**Changing the language rebuilds the whole screen.** `ui_rebuild()` in `ui.c`
+loads a fresh screen and calls `ui_build()` again instead of walking a list of
+labels. It is less code and it cannot forget a label; measured values survive
+because they sit in static variables, not in LVGL objects.
 
 **Comments in Czech without diacritics**, matching the existing code.
 
@@ -72,11 +95,12 @@ Derived from the physical panel, not from taste. Active area is
 | 76 dp minimum | Android Auto | comfortably exceeded |
 | 5-10 mm between targets | capacitive panels | 4 px gap plus border |
 | readable in one glance, under 2 s | automotive HMI | three key values always on top |
-| avoid text under 6.5 mm | visual load research | main numbers Montserrat 40-48 |
+| avoid text under 6.5 mm | visual load research | main numbers `UI_FONT_48` |
 
-Known shortfall: the largest built-in Montserrat is 48 px, cap height about
-4.1 mm, below the 6.5 mm guidance. A custom font is needed for true
-driver-glance sizing.
+Known shortfall: the largest generated size is 48 px, cap height about 4.1 mm,
+below the 6.5 mm guidance. The font generator takes any size, so this is now a
+matter of adding one line to `tools/gen_fonts.sh` and finding the flash for it,
+not of missing tooling.
 
 **Shape language.** Panels are square with a hairline border - an instrument
 panel, not floating cards. Buttons get a 6 px radius, just enough to read as

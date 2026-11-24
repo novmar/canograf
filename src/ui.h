@@ -6,7 +6,7 @@
  * Vse, co umi jen deska, se predava pres ui_host_t. Simulator necha
  * ukazatele NULL a ui.c to musi snest.
  *
- * Pozn.: vestaveny Montserrat nema ceskou diakritiku -> texty bez hacku.
+ * Pozn.: fonty UI maji ceskou i nemeckou diakritiku, viz src/font_ui.h.
  */
 #ifndef UI_H
 #define UI_H
@@ -22,8 +22,8 @@ typedef struct {
     /* podsviceni: tvrde zap/vyp */
     void (*backlight)(bool on);
 
-    /* trvale ulozeni nastaveni (NVS) */
-    void (*save_cfg)(bool mph, bool fahrenheit, uint32_t blank_s);
+    /* trvale ulozeni nastaveni (NVS); lang je index jazyka z i18n.c */
+    void (*save_cfg)(bool mph, bool fahrenheit, uint32_t blank_s, int lang);
 
     /* WiFi */
     void        (*wifi_scan_start)(void);
@@ -48,8 +48,9 @@ typedef struct {
 /* Ukazatel si UI jen pamatuje, struktura musi prezit cely beh. */
 void ui_set_host(const ui_host_t *h);
 
-/* Nastaveni nactene z NVS; volat pred ui_build(). */
-void ui_set_cfg(bool mph, bool fahrenheit, uint32_t blank_s);
+/* Nastaveni nactene z NVS; volat pred ui_build(). Neplatny lang spadne
+ * na vychozi jazyk (0 = English). */
+void ui_set_cfg(bool mph, bool fahrenheit, uint32_t blank_s, int lang);
 
 void        ui_build(void);       /* postavi celou UI do lv_scr_act() */
 void        ui_tick(void);        /* jeden krok obnovy, volat ~50 Hz */

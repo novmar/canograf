@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    name: Firmware (ESP32-S3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Platforma, toolchain a knihovny se stahuji do ~/.platformio
+      # a do .pio/libdeps - bez cache trva prvni build pres deset minut.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio/libdeps
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build
+        run: pio run
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            .pio/build/waveshare43b/firmware.bin
+            .pio/build/waveshare43b/firmware.elf
+          if-no-files-found: error
+
+  screenshots:
+    name: Nahledy obrazovek
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+      # LVGL si stahuje FetchContent do sim/build/_deps
+      - name: Cache LVGL
+        uses: actions/cache@v4
+        with:
+          path: sim/build/_deps
+          key: lvgl-${{ runner.os }}-${{ hashFiles('sim/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S sim -B sim/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build sim/build -j
+
+      - name: Render
+        run: ./sim/build/lv_shot shots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/*.png
+          if-no-files-found: error

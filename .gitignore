@@ -16,6 +16,10 @@ sim/third_party/lvgl/
 .venv/
 __pycache__/
 
+# nejvyssi vrstva konfigurace buildu - plati jen pro tenhle stroj.
+# Vzor, ktery v repu zustava, je local.env.example. Viz config/README.md.
+local.env
+
 # lokalni data, ktera do repa nepatri
 *.csv
 *.log
@@ -28,3 +32,6 @@ wifi_credentials.h
 # OS
 .DS_Store
 Thumbs.db
+
+# fotky desky - do repa jdou jen orezane a popsane v docs/hardware/img/
+pics/
