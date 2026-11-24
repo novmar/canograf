@@ -163,8 +163,30 @@ precondition check and a backup of whatever it overwrites.
 
 ## Hardware
 
-- [ ] Ignition sensing on `DI0` so the device sleeps with the vehicle.
-      At about 3 W it will flatten a healthy battery in under a week
+- [ ] Ignition sensing so the device sleeps with the vehicle. At about 3 W it
+      will flatten a healthy battery in under a week. **Blocked by the pin
+      conflict below**: `DI0` is on the I2C expander, and I2C is dead in deep
+      sleep, so the ignition signal has to reach a real GPIO to wake anything
+
+### One free pin, three claims on it
+
+`GPIO6` is the only ESP32-S3 pin this board leaves unused, and three separate
+features want it. Only one can have it at a time:
+
+| claim | state | what it buys |
+|---|---|---|
+| backlight dimming | **done, measured** | full-range brightness, see `docs/hardware/backlight.md` |
+| RTC alarm wake | available | wake at a set time; `PCF85063` `INT` is wired to `GPIO6` and the board doc calls it the only wake path |
+| ignition wake | wanted | sleep with the vehicle, which is the one that saves the battery |
+
+Everything else the RTC does - holding time across a power cut on the CR927
+cell, timestamps for the log - works over I2C and needs no interrupt line. The
+interrupt is only worth a pin for waking a sleeping processor, because that is
+the one case where nothing can be asked over a bus.
+
+`EXIO6` and `EXIO7` on the expander are unrouted and could carry a second
+modification, but that means soldering to the package rather than to a pad put
+there for the purpose - and an expander line still cannot wake the chip.
 - [x] **Backlight dimming through `GPIO6`** - done and measured on hardware.
       One wire from `GPIO6` to the `BL` pad, no cut, nothing removed. The pad
       feeds the driver's feedback node through a 10 k / 1 uF filter, so a
