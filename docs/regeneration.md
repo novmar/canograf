@@ -411,7 +411,8 @@ quarter-tank figure is literature, the Renault manual only says "too low".
 | 15 | `211B` oil dilution rate | show it; no threshold is readable | today | "Oil dilution is 6.2 %. Each regeneration adds to it. Check the oil level and consider a change first." [LIT reasoning] |
 | 16 | `2492` CSF diagnosis inhibitions state | `0` not inhibited | add | "Filter diagnostics are currently inhibited in the unit - readings may not be trustworthy." |
 | 17 | `20DE` ambient temperature | plausible, flag extremes | add | "Outside temperature -18 C. The manual says regeneration is not possible in extreme cold." [DOC] |
-| 18 | `2557` / `2558` time and distance since last regeneration end | informational | today | "Last regeneration ended 42 km ago. Another one now will not achieve much." |
+| 18 | `2557` time since last regeneration end | informational | today | "Last regeneration ended 18 minutes ago. Another one now will not achieve much." |
+| 19 | `2558` distance since last regeneration end | informational | add | "Last regeneration ended 42 km ago." |
 
 ### 4.3 Live during the run, and the refusal path
 
