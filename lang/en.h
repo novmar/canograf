@@ -26,6 +26,12 @@ static const char *const LANG_EN[] = {
 
     /* top bar */
     "COOLANT",
+    "NO BUS",
+    "LISTEN",
+    "NO ECU",
+    "ECU",
+    "none",
+    "AP",
 
     /* main page */
     "rpm",
@@ -33,7 +39,7 @@ static const char *const LANG_EN[] = {
     /* engine page */
     "BOOST PRESSURE",
     "DEMAND",
-    "simulated data",
+    "INTAKE AIR C",
 
     /* boost chart page */
     "DEFICIT mbar",
@@ -42,35 +48,84 @@ static const char *const LANG_EN[] = {
 
     /* faults page */
     "No CAN connection",
-    "19 02 FF    every stored code",
-    "19 02 01    only what is failing now",
-    "19 04       freeze frame",
-    "19 06       distance and occurrences",
+    "fault memory not read",
+    "no stored faults",
+    "%u faults",
+    "first %u shown",
+    "tap a fault for its records",
+    "CONFIRMED",
+    "THIS CYCLE",
+    "PENDING",
+    "LAMP",
+    "EXTENDED RECORDS",
+    "FREEZE FRAME",
+    "reading...",
+    "unit holds nothing for this one",
+    "ODOMETER km",
+    "odometer at occurrence",
+    "aging counter",
+    "occurrences",
+    "odometer when cleared",
+    "driven with the fault",
+    "odometer at first",
+    "not set",
 
     /* DPF page */
-    "TEMP BEFORE",
-    "TEMP AFTER",
-    "FORCE REGEN",
-    "no vehicle yet",
-    "DPF regeneration",
-    "No vehicle is connected.\n\nOnce one is, this button sends "
-    "31 01 02 0D. Exhaust temperature goes past 600 C. Stationary "
-    "vehicle outdoors only, engine warm, and it must not be interrupted.",
-    "REGEN STATE",
-    "OFF",
-    "REQUESTED",
-    "RUNNING",
-    "RUNNING %",
+    "TEMP BEFORE C",
+    "TEMP AFTER C",
+    "TARGET C",
+    "SOOT g",
+    "LOAD g",
+    "SINCE LAST REGEN",
+    "Starting a regeneration writes to the ECU (31 01 02 0D). This "
+    "build only reads, so the button is not here - see docs/safety.md.",
+    "REGEN",
+    "off",
+    "running",
 
     /* settings */
     "SPEED",
     "TEMPERATURE",
-    "BLANK AFTER",
+    "DIM AFTER",
     "BRIGHTNESS",
     "PROFILE",
     "LANGUAGE",
     "SERVICE",
     "never",
+
+    /* dimming after inactivity */
+    "Dim after inactivity",
+    "AFTER",
+    "TO",
+    "This board cannot dim - the wire from GPIO6 to the BL pad is missing, so after this time the display switches off instead.",
+    "off",
+
+    /* the dimming wire can still be added; stated, not recommended */
+    "CAN BE\nADDED",
+    "Dimming can be added",
+    "One wire from GPIO6 to the BL pad next to the LCD ribbon connector. "
+    "Nothing is cut and nothing is unsoldered, so it can be undone.\n\n"
+    "Ground does not have to be soldered - the module and the backlight "
+    "driver already share the board ground.\n\n"
+    "It gives the full brightness range; measured on a real board.\n\n"
+    "The price: GPIO6 is also the interrupt output of the PCF85063 clock, "
+    "so while the wire is there the RTC interrupt cannot be used. This "
+    "firmware does not use it.\n\n"
+    "Described in detail, with the measurements:\n"
+    "docs/hardware/backlight.md",
+
+    /* bus mode */
+    "LISTEN ONLY",
+    "NORMAL",
+    "no CAN on this board",
+    "Transmit on the bus",
+    "The board is listening only. Nothing can be read that way - every "
+    "request is a transmission.\n\nIn normal mode this board STARTS "
+    "TRANSMITTING on the vehicle bus: diagnostic requests and the "
+    "acknowledge bit of every frame it receives.\n\nOnly do this once "
+    "the bus speed and the wiring are confirmed - the top bar has to "
+    "read LISTEN, not NO BUS.",
+    "the controller did not come up - still listening only",
 
     /* setting profiles */
     "BENCH",
@@ -79,8 +134,6 @@ static const char *const LANG_EN[] = {
     "a profile holds brightness and blanking; units and language are shared",
 
     /* WiFi */
-    "not connected",
-    "PICK NETWORK",
     "DISPLAY OFF",
     "WiFi networks",
     "scanning...",
@@ -139,8 +192,10 @@ static const char *const LANG_EN[] = {
     "FPS + MEMORY",
     "RAW VALUES  (target / shown, x100)",
     "CAN BUS",
-    "not connected - no data yet",
+    "POLLING  (measured)",
     "MEMORY AND UPTIME",
+    "SAVE TO %s",
+    "DEFAULTS",
 };
 
 #endif /* LANG_EN_H */

@@ -24,6 +24,12 @@ static const char *const LANG_DE[] = {
 
     /* Kopfzeile */
     "KÜHLMITTEL",
+    "KEIN BUS",
+    "HÖRE ZU",
+    "KEINE ANTWORT",
+    "ECU",
+    "keine",
+    "AP",
 
     /* Hauptseite */
     "U/min",
@@ -31,7 +37,7 @@ static const char *const LANG_DE[] = {
     /* Motorseite */
     "LADEDRUCK",
     "SOLLWERT",
-    "simulierte Daten",
+    "ANSAUGLUFT C",
 
     /* Druckverlauf */
     "DEFIZIT mbar",
@@ -40,36 +46,87 @@ static const char *const LANG_DE[] = {
 
     /* Fehlerseite */
     "Keine CAN-Verbindung",
-    "19 02 FF    alle gespeicherten Codes",
-    "19 02 01    nur aktuell anliegende",
-    "19 04       Umgebungsbedingungen",
-    "19 06       km und Häufigkeit",
+    "Fehlerspeicher nicht gelesen",
+    "kein Fehler gespeichert",
+    "%u Fehler",
+    "erste %u gezeigt",
+    "Fehler antippen zeigt die Einträge",
+    "BESTÄTIGT",
+    "DIESER ZYKLUS",
+    "WARTEND",
+    "LAMPE",
+    "ERWEITERTE EINTRÄGE",
+    "UMGEBUNGSDATEN",
+    "lese...",
+    "das Steuergerät hat dazu nichts",
+    "KILOMETERSTAND km",
+    "Stand beim Auftreten",
+    "Alterungszähler",
+    "Häufigkeit",
+    "Stand beim Verschwinden",
+    "mit dem Fehler gefahren",
+    "Stand beim ersten Mal",
+    "nicht gesetzt",
 
     /* DPF-Seite */
-    "TEMP. VOR",
-    "TEMP. NACH",
-    "REGEN. STARTEN",
-    "noch ohne Fahrzeug",
-    "DPF-Regeneration",
-    "Kein Fahrzeug verbunden.\n\nSobald eines da ist, sendet diese "
-    "Taste 31 01 02 0D. Die Abgastemperatur übersteigt dabei 600 C. "
-    "Nur am stehenden Fahrzeug im Freien, bei warmem Motor, und sie "
-    "darf nicht unterbrochen werden.",
-    "REGEN.-STATUS",
-    "AUS",
-    "GESENDET",
-    "LÄUFT",
-    "LÄUFT %",
+    "TEMP. VOR C",
+    "TEMP. NACH C",
+    "ZIEL C",
+    "RUSS g",
+    "BELADUNG g",
+    "SEIT LETZTER REGEN.",
+    "Eine Regeneration zu starten schreibt ins Steuergerät "
+    "(31 01 02 0D). Dieser Stand liest nur, deshalb gibt es die Taste "
+    "hier nicht - siehe docs/safety.md.",
+    "REGEN.",
+    "aus",
+    "läuft",
 
     /* Einstellungen */
     "TEMPO",
     "TEMPERATUR",
-    "DUNKEL NACH",
+    "DIMMEN NACH",
     "HELLIGKEIT",
     "PROFIL",
     "SPRACHE",
     "WARTUNG",
     "nie",
+
+    /* Dimmen nach Untaetigkeit */
+    "Dimmen nach Untätigkeit",
+    "NACH",
+    "AUF",
+    "Diese Platine kann nicht dimmen - der Draht von GPIO6 zum BL-Pad fehlt, deshalb schaltet das Display nach dieser Zeit stattdessen ab.",
+    "aus",
+
+    /* Der Dimm-Draht laesst sich nachruesten; Feststellung, kein Rat */
+    "NACH-\nRÜSTBAR",
+    "Dimmen lässt sich nachrüsten",
+    "Ein Draht von GPIO6 zum BL-Pad neben dem LCD-Flachbandstecker. "
+    "Nichts wird durchtrennt und nichts abgelötet, es ist also "
+    "umkehrbar.\n\n"
+    "Masse muss nicht gelötet werden - Modul und Backlight-Treiber "
+    "teilen sich bereits die Masse der Platine.\n\n"
+    "Das ergibt den vollen Helligkeitsbereich; an einer echten Platine "
+    "gemessen.\n\n"
+    "Der Preis: GPIO6 ist zugleich der Interrupt-Ausgang der Uhr "
+    "PCF85063, solange der Draht dran ist, lässt sich der RTC-Interrupt "
+    "also nicht nutzen. Diese Firmware nutzt ihn nicht.\n\n"
+    "Ausführlich und mit den Messwerten:\n"
+    "docs/hardware/backlight.md",
+
+    /* Busmodus */
+    "NUR HÖREN",
+    "NORMAL",
+    "kein CAN auf dieser Platine",
+    "Auf dem Bus senden",
+    "Die Platine hört nur zu. So lässt sich nichts lesen - jede "
+    "Anfrage ist ein Senden.\n\nIm Normalmodus SENDET diese Platine "
+    "auf dem Fahrzeugbus: Diagnoseanfragen und das Quittungsbit zu "
+    "jedem empfangenen Rahmen.\n\nErst tun, wenn Busgeschwindigkeit "
+    "und Verdrahtung sicher sind - in der Kopfzeile muss HÖRE ZU "
+    "stehen, nicht KEIN BUS.",
+    "der Controller kam nicht hoch - weiterhin nur Hören",
 
     /* Profile der Einstellungen */
     "WERKSTATT",
@@ -79,8 +136,6 @@ static const char *const LANG_DE[] = {
     "gelten für alle",
 
     /* WLAN */
-    "nicht verbunden",
-    "NETZ WÄHLEN",
     "DISPLAY AUS",
     "WLAN-Netze",
     "suche...",
@@ -139,8 +194,10 @@ static const char *const LANG_DE[] = {
     "FPS + SPEICHER",
     "ROHWERTE  (Soll / angezeigt, x100)",
     "CAN-BUS",
-    "nicht verbunden - noch keine Daten",
+    "ABFRAGE  (gemessen)",
     "SPEICHER UND LAUFZEIT",
+    "IN %s SICHERN",
+    "STANDARD",
 };
 
 #endif /* LANG_DE_H */

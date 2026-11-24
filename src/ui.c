@@ -47,6 +47,15 @@
 #define RAIL_W  64
 #define CONT_W  (800 - RAIL_W)
 
+/* Sloupce stavoveho radku. Vejit se musi vsechno a nic se nesmi
+ * prekryt: prepinac profilu zacina na 628 px (DN_X), takze stav
+ * vozidla ma 150 px - dost i na nejdelsi preklad, "KEINE ANTWORT". */
+#define TOP_WIFI_X  12      /* carky signalu */
+#define TOP_SSID_X  52      /* jmeno site */
+#define TOP_TEMP_X  270     /* teplota chladici kapaliny */
+#define TOP_XFER_X  440     /* sipky prenosu po sbernici */
+#define TOP_STATE_X 478     /* stav pripojeni k vozidlu */
+
 /* Stranky maji vzdy plnou vysku pod horni listou. Navigace je prekryv:
  * vysouva se pres obsah, nic nepostrkuje a nic nezmensuje. Diky tomu
  * obsah pri hrani s navigaci nikam neposkakuje a ukazatele maji porad
@@ -75,27 +84,39 @@ static const int PAGE_STR[N_PAGES] = {
     STR_PAGE_FAULTS, STR_PAGE_DPF, STR_PAGE_SETUP,
 };
 
+/* Ktery pohled diagnostiky kazda stranka potrebuje. Vrstva podle toho
+ * cte jen to, co je opravdu videt - viz src/diag/poller.h. */
+static const diag_view_t PAGE_VIEW[N_PAGES] = {
+    DIAG_VIEW_MAIN, DIAG_VIEW_ENGINE, DIAG_VIEW_BOOST,
+    DIAG_VIEW_FAULTS, DIAG_VIEW_DPF, DIAG_VIEW_OTHER,
+};
+
 static lv_obj_t *page[N_PAGES], *navbtn[N_PAGES];
 static lv_obj_t *rail;
 static int cur_page = PG_HLAVNI;
 
 /* ---------------- trvale prvky ---------------- */
-static lv_obj_t *lbl_temp, *lbl_state, *rail_bar, *rail_val;
+static lv_obj_t *lbl_temp, *lbl_state, *lbl_state_age, *rail_bar, *rail_val;
 static lv_obj_t *rail_rule, *rail_tick[4];
 /* naposled nastavene pozadi sloupce; prekresluje se jen pri zmene */
 static uint32_t rail_bg_shown = C_INK;
 /* hlavni */
 static lv_obj_t *arc_speed, *arc_rpm, *lbl_speed_v, *lbl_rpm_v, *lbl_speed_u, *lbl_rpm_u;
 /* motor */
-static lv_obj_t *arc_boost, *lbl_boost, *lbl_boost_sp, *lbl_vnt, *lbl_railp;
+static lv_obj_t *arc_boost, *lbl_boost, *lbl_boost_sp, *lbl_vnt;
+static lv_obj_t *lbl_railp, *lbl_rail_sp, *lbl_maf, *lbl_maf_sp, *lbl_egr, *lbl_iat;
 /* tlak */
 static lv_obj_t *chart, *lbl_gap;
 static lv_chart_series_t *ser_sp, *ser_act;
+/* chyby */
+#define DTC_ROWS 4
+static lv_obj_t *dtc_head, *dtc_odo, *dtc_row[DTC_ROWS], *dtc_hint;
+static lv_obj_t *dtc_ext, *dtc_ff;
 /* nastaveni */
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
-static lv_obj_t *btn_bright, *btn_profile;
+static lv_obj_t *btn_bright, *btn_profile, *btn_canmode, *btn_wifi;
 /* DPF */
-static lv_obj_t *btn_regen_state;
+static lv_obj_t *lbl_dpf[6], *lbl_regen;
 /* horni lista: prepinac profilu - jmeno a tri rysky vedle sebe */
 static lv_obj_t *prof_btn, *prof_name, *prof_mark[UI_PROFILES];
 /* diagnostika: prekryv s FPS a pameti zije porad, jen byva schovany */
@@ -143,6 +164,29 @@ static unsigned host_psram_kb(void)
     return (host && host->psram_kb) ? host->psram_kb() : 0u;
 }
 
+/* Prepinani rezimu sbernice. Kdyz deska jednu z dvojice nema, UI
+ * prepinani vubec nenabidne - predstirat ovladani, ktere nic nedela,
+ * je horsi nez ho nemit. */
+static bool host_can_mode(void)
+{
+    return host && host->can_is_normal && host->can_set_normal;
+}
+
+static bool host_can_normal(void)
+{
+    return host_can_mode() ? host->can_is_normal() : false;
+}
+
+/* ---------------------------------------------------------------------
+ * Diagnostika
+ *
+ * Jediny zdroj cisel v cele UI. Dokud je NULL, nema UI co ukazat a
+ * nikde se neobjevi zadna hodnota - to je spravne chovani, ne chyba.
+ * ------------------------------------------------------------------- */
+static diag_poller_t *dp = NULL;
+
+void ui_set_diag(diag_poller_t *p) { dp = p; }
+
 /* ---------------------------------------------------------------------
  * Nastaveni
  *
@@ -189,15 +233,22 @@ static int bl_clamp(int p)
 
 ui_profile_t ui_profile_default(int i)
 {
-    /* DILNA zhasina po deseti minutach: deska na stole bezi cele
-     * hodiny a vetsinu z nich u ni nikdo nestoji. DEN a NOC zhasinani
-     * vypnute maji schvalne - zhasinani se pocita od posledniho DOTEKU
-     * a za jizdy se displeje nikdo nedotyka, takze by zhaslo prave
-     * uprostred jizdy. */
+    /* DILNA ztlumi po deseti minutach: deska na stole bezi cele hodiny
+     * a vetsinu z nich u ni nikdo nestoji. DEN a NOC maji ztlumeni
+     * vypnute schvalne - pocita se od posledniho DOTEKU a za jizdy se
+     * displeje nikdo nedotyka, takze by se ztlumilo prave uprostred
+     * jizdy, kdy je cteni nejpotrebnejsi.
+     *
+     * Ztlumena uroven je nejnizsi nabizena (BL_MIN): cilem je prestat
+     * svitit do kabiny, ne setrit proud, a cokoliv vyssiho uz je v noci
+     * videt v cele kabine. */
     static const ui_profile_t def[UI_PROFILES] = {
-        [UI_PROF_SHOP]  = { .bright = 100, .blank_s = 600 },
-        [UI_PROF_DAY]   = { .bright = 100, .blank_s = 0 },
-        [UI_PROF_NIGHT] = { .bright = 35,  .blank_s = 0 },
+        [UI_PROF_SHOP]  = { .bright = 100, .dim_s = 600, .dim_bright = BL_MIN,
+                            .perf = false },
+        [UI_PROF_DAY]   = { .bright = 100, .dim_s = 0,   .dim_bright = BL_MIN,
+                            .perf = false },
+        [UI_PROF_NIGHT] = { .bright = 35,  .dim_s = 0,   .dim_bright = BL_MIN,
+                            .perf = false },
     };
     if (i < 0 || i >= UI_PROFILES) i = UI_PROF_DAY;
     return def[i];
@@ -207,8 +258,10 @@ void ui_set_cfg(const ui_cfg_t *c)
 {
     if (!c) return;
     cfg = *c;
-    for (int i = 0; i < UI_PROFILES; i++)
-        cfg.prof[i].bright = bl_clamp(cfg.prof[i].bright);
+    for (int i = 0; i < UI_PROFILES; i++) {
+        cfg.prof[i].bright     = bl_clamp(cfg.prof[i].bright);
+        cfg.prof[i].dim_bright = bl_clamp(cfg.prof[i].dim_bright);
+    }
     /* Profil mimo rozsah by indexoval mimo pole, takze se musi orezat
      * drive, nez se podle nej cokoliv nastavi. */
     if (cfg.profile < 0 || cfg.profile >= UI_PROFILES) cfg.profile = UI_PROF_DAY;
@@ -218,12 +271,68 @@ void ui_set_cfg(const ui_cfg_t *c)
     cfg.lang = i18n_get();
 }
 
-/* ---------------- hodnoty ---------------- */
-typedef struct { float target, shown; } val_t;
-static val_t v_speed, v_rpm, v_temp, v_boost, v_boost_sp, v_vnt, v_rail, v_soot;
-static float sim_t = 0;
-static uint32_t last_sample = 0;
-static inline void approach(val_t *v, float k) { v->shown += (v->target - v->shown) * k; }
+/* ---------------------------------------------------------------------
+ * Hodnoty
+ *
+ * Z vrstvy diagnostiky chodi nova hodnota desetkrat za vterinu (ta
+ * nejrychlejsi skupina), kdezto UI se prekresluje padesatkrat - proto
+ * se mezi zmerenymi body dojizdi. Vyhlazeni je POUZE kosmeticke: co
+ * se smi ukazat, rozhoduje vyhradne diag_poller_show(), a dokud ta
+ * rekne DIAG_SHOW_NONE, nenakresli se zadne cislo.
+ *
+ * Rychlost dojezdu se bere ze skupiny kanalu. Rychla skupina dojizdi
+ * za ctyri snimky, pomala za sedmnact - pomala velicina, ktera skace,
+ * vypada jako sum, a plynule se tak kresli i teplota ctena po vterine.
+ * ------------------------------------------------------------------- */
+static float   v_shown[DIAG_CH__COUNT];
+static bool    v_held[DIAG_CH__COUNT];   /* uz mame z ceho dojizdet */
+
+static const float TIER_K[DIAG_TIER__COUNT] = { 0.25f, 0.12f, 0.06f };
+
+/* Kratka jmena kanalu. Nejsou to texty pro uzivatele, ale oznaceni
+ * velicin ve stejnem tvaru, v jakem jsou v profilu vozidla
+ * (docs/vehicles, sloupec Key), takze nechodi pres i18n - stejne jako
+ * nazvy citacu sbernice v diagnostice. Cte je freeze frame na strance
+ * chyb a tabulka syrovych hodnot. */
+static const char *const CH_NAME[DIAG_CH__COUNT] = {
+    "rpm", "speed", "boost", "boost_sp", "rail", "rail_sp", "vnt",
+    "maf", "maf_sp", "egr", "iat", "coolant", "dpf_up", "dpf_dn",
+    "dpf_sp", "soot", "load", "rgn_dur", "rgn_end", "odo"
+};
+
+static diag_show_t ch_show(int ch)
+{
+    return dp ? diag_poller_show(dp, ch) : DIAG_SHOW_NONE;
+}
+
+/* true = hodnota existuje, tedy se SMI ukazat jako cislo. */
+static bool ch_has(int ch)
+{
+    diag_show_t s = ch_show(ch);
+
+    return s == DIAG_SHOW_LIVE || s == DIAG_SHOW_STALE;
+}
+
+static float ch_val(int ch) { return v_shown[ch]; }
+
+static void vals_step(void)
+{
+    for (int ch = 0; ch < DIAG_CH__COUNT; ch++) {
+        if (!ch_has(ch)) {
+            /* Bez hodnoty se nedojizdi nikam. Az nejaka prijde, zacne
+             * se od ni, ne od toho, co tu zbylo po minule jizde. */
+            v_held[ch] = false;
+            continue;
+        }
+        float t = diag_poller_value(dp, ch);
+        if (!v_held[ch]) {
+            v_held[ch] = true;
+            v_shown[ch] = t;
+        } else {
+            v_shown[ch] += (t - v_shown[ch]) * TIER_K[diag_poller_tier(ch)];
+        }
+    }
+}
 
 /* Pripojeni na konec bufferu, ktere nemuze prerust jeho velikost.
  * snprintf vraci delku, kterou by ZAPSAL, ne kolik zapsal - prosty soucet
@@ -240,6 +349,57 @@ static int str_add(char *b, int at, int n, const char *fmt, ...)
     if (w < 0) return at;
     at += w;
     return at > n - 1 ? n - 1 : at;
+}
+
+/* ---------------------------------------------------------------------
+ * Jak se kresli jedna hodnota
+ *
+ * Jedno misto pro vsechny stranky, aby se ctyri stavy nemohly nikde
+ * rozejit. Rozdil musi byt poznat na prvni pohled, ne po precteni:
+ *
+ *   ziva          cislo v jeho barve (kostena skutecnost, modra zadani)
+ *   stara         totez cislo, ale tlumene sede - uz to neni ted
+ *   neprectena    VAL_NONE, tedy pomlcky; ZADNE cislo, ani nula
+ *   odmitnuta     "7F xx" cervene, kde xx je duvod od jednotky
+ *
+ * Odmitnuti ma vlastni podobu zamerne. "Tenhle DID tahle verze
+ * softwaru nema" je uplne jina informace nez "jeste jsem se nezeptal",
+ * a kdo cte diagnostiku, ctyri znaky 7F 31 pozna rovnou. Cervena a
+ * sestnactkova soustava navic nejdou splest s merenou hodnotou.
+ *
+ * Format se vyhodnocuje jen tehdy, kdyz hodnota opravdu je. Volajici
+ * tedy muze pocitat prepocty do jednotek bez rozmysleni - kdyz neni
+ * co ukazat, nikdo se na jeho cislo nepodiva.
+ * ------------------------------------------------------------------- */
+#define VAL_NONE "---"
+
+static void val_fmt(lv_obj_t *l, int ch, uint32_t color, const char *fmt, ...)
+{
+    if (!l) return;
+
+    char b[24];
+    uint32_t c = color;
+
+    switch (ch_show(ch)) {
+    case DIAG_SHOW_LIVE:
+    case DIAG_SHOW_STALE: {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(b, sizeof(b), fmt, ap);
+        va_end(ap);
+        if (ch_show(ch) == DIAG_SHOW_STALE) c = C_LABEL;
+        break; }
+    case DIAG_SHOW_REFUSED:
+        snprintf(b, sizeof(b), "7F %02X", diag_poller_nrc(dp, ch));
+        c = C_DEFICIT;
+        break;
+    default:
+        snprintf(b, sizeof(b), VAL_NONE);
+        c = C_LABEL;
+        break;
+    }
+    lv_label_set_text(l, b);
+    lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
 }
 
 /* ---------------------------------------------------------------------
@@ -363,6 +523,49 @@ static lv_obj_t *mk_button(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
     return b;
 }
 
+/* ---------------------------------------------------------------------
+ * Tlacitko, ktere OTEVIRA dialog
+ *
+ * V nastaveni stoji vedle sebe dva druhy tlacitek a az dosud vypadaly
+ * stejne. Jedno tuknutim rovnou meni hodnotu (km/h <-> mph, jazyk,
+ * profil), druhe otevira dalsi obrazovku (jas, ztlumeni, WiFi, udrzba).
+ * Tlacitko JAS pritom ukazovalo "75 %", tedy presne to, co ukazuje
+ * tlacitko prepinaci - takze se cetlo jako prepinac procent.
+ *
+ * Rozlisuji se DVEMA vecmi najednou, protoze jedna by se na slunci v
+ * dilne ztratila:
+ *
+ *   - popisek konci trema teckami. Je to stara a srozumitelna znacka
+ *     "tohle jeste neco otevre" a prezije i preklad.
+ *   - obruba ma barvu akce misto vlasove linky, takze tlacitko ma
+ *     viditelny ramecek uz v klidu, ne az pri stisku.
+ *
+ * Hodnota na tlacitku zustava - rict "JAS" a neprozradit kolik by byla
+ * ztrata informace. Mluvi se tedy o tom, co je ted, a tecky rikaji,
+ * ze se to zmeni az jinde.
+ * ------------------------------------------------------------------- */
+static void dlg_btn_text(lv_obj_t *b, const char *text)
+{
+    char s[48];
+
+    if (!b) return;
+    snprintf(s, sizeof(s), "%s ...", text);
+    lv_label_set_text(lv_obj_get_child(b, 0), s);
+}
+
+static lv_obj_t *mk_dlg_button(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
+                               lv_coord_t w, lv_coord_t h, const char *text,
+                               const lv_font_t *font, uint32_t accent,
+                               lv_event_cb_t cb, void *user)
+{
+    lv_obj_t *b = mk_button(p, x, y, w, h, "", font, accent, cb, user);
+
+    lv_obj_set_style_border_color(b, lv_color_hex(accent), 0);
+    lv_obj_set_style_border_width(b, 2, 0);
+    dlg_btn_text(b, text);
+    return b;
+}
+
 static lv_obj_t *mk_arc(lv_obj_t *p, lv_coord_t x, lv_coord_t y, lv_coord_t d,
                         int32_t lo, int32_t hi, uint32_t color, lv_coord_t w)
 {
@@ -396,9 +599,16 @@ static lv_obj_t *mk_arc(lv_obj_t *p, lv_coord_t x, lv_coord_t y, lv_coord_t d,
  * nenabidne - viz build_nastav(). Predstirat ovladani, ktere nic
  * nedela, je horsi nez ho nemit.
  *
- * Pred zhasnutim po necinnosti se jas za pul vteriny stahne dolu a
- * teprve pak se vypne panel. Tvrdy skok z plneho jasu do tmy je v noci
- * rana do oka a clovek nepozna, jestli deska jeste zije.
+ * Po necinnosti se jas za pul vteriny STAHNE NA ZVOLENOU UROVEN a tam
+ * zustane. Displej se nevypina: zhasly displej za jizdy nerika nic -
+ * clovek nepozna, jestli deska bezi - kdezto ztlumeny je porad
+ * citelny a v noci dokonce prijemnejsi. Uplne zhasnout jde uz jen
+ * rucne (tlacitko ZHASNOUT DISPLEJ), coz je jina vec: to je zamer, ne
+ * setreni oci.
+ *
+ * Deska bez dratku na plosce BL stmivat neumi, takze na ni ztlumeni
+ * nema cim probehnout a zustava drivejsi zhasnuti. UI to u volby
+ * rekne; mlcet by znamenalo slibit uroven, ktera se nikde neprojevi.
  *
  * Probuzeni je zrcadlo toho sameho, jen pomalejsi: panel se zapina
  * jeste tmavy a jas najede na ulozenou uroven za vterinu, aby to v noci
@@ -412,10 +622,12 @@ static lv_obj_t *mk_arc(lv_obj_t *p, lv_coord_t x, lv_coord_t y, lv_coord_t d,
 #define BL_WAKE_MS 1000
 
 static bool backlight_on = true;
-static bool bl_fading = false;      /* stmivani pred zhasnutim */
-static bool bl_waking = false;      /* nabeh po probuzeni */
+static bool bl_dimmed = false;      /* jsme na ztlumene urovni */
+static bool bl_fading = false;      /* prejezd dolu na ztlumenou uroven */
+static bool bl_waking = false;      /* nabeh zpet na plnou */
 static uint32_t bl_fade_start = 0;
 static uint32_t bl_wake_start = 0;
+static int bl_fade_from = 0, bl_fade_to = 0;
 static int bl_wake_from = 0;        /* jas, ze ktereho nabeh zacal */
 static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
 
@@ -423,11 +635,24 @@ static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
  * dialogu, uklizi modal_forget() */
 static lv_obj_t *btn_bl_level[UI_PROFILES][BL_LEVELS];
 static lv_obj_t *btn_bl_prof[UI_PROFILES];
-static lv_obj_t *dbg_raw, *dbg_mem, *dbg_perf_btn;
+static lv_obj_t *dbg_raw, *dbg_mem, *dbg_bus, *dbg_poll;
+static lv_obj_t *dbg_perf_btn, *dbg_save_btn;
+#define DIM_STEPS 4
+static lv_obj_t *btn_dim_time[DIM_STEPS], *btn_dim_lvl[BL_LEVELS];
 
 static bool bl_can_dim(void) { return host && host->bl_set_percent; }
 
 static int bl_level(void) { return PROF.bright; }
+
+/* Uroven, na kterou se ztlumuje. Nikdy nesmi byt vyssi nez bezny jas
+ * profilu - ztlumeni, ktere pridava svetlo, by bylo proti smyslu slova
+ * i proti tomu, co clovek v noci ceka. */
+static int bl_dim_level(void)
+{
+    int d = PROF.dim_bright;
+
+    return (d > PROF.bright) ? PROF.bright : d;
+}
 
 static void bl_set(int percent)
 {
@@ -439,6 +664,8 @@ static void bl_set(int percent)
 static void bl_apply(void)
 {
     bl_waking = false;              /* rucni volba prebiji nabeh */
+    bl_fading = false;
+    bl_dimmed = false;
     bl_set(bl_level());
 }
 
@@ -446,6 +673,7 @@ static void backlight(bool on)
 {
     bl_fading = false;
     if (on) {
+        bl_dimmed = false;
         if (!bl_can_dim()) {
             bl_apply();             /* bez stmivani je zapnuti tvrde */
         } else {
@@ -463,27 +691,45 @@ static void backlight(bool on)
     if (host && host->backlight) host->backlight(on);
 }
 
-static void blank_begin(void)
+/* Zacatek ztlumeni po necinnosti. Na desce, ktera stmivat neumi, se
+ * misto nej zhasina - jina moznost tam neni a UI to u volby rika. */
+static void dim_begin(void)
 {
-    if (bl_fading) return;
+    if (bl_fading || bl_dimmed) return;
     if (!bl_can_dim()) { backlight(false); return; }
-    bl_waking = false;
-    bl_fading = true;
+    bl_waking    = false;
+    bl_fading    = true;
+    bl_fade_from = (bl_shown < 0) ? bl_level() : bl_shown;
+    bl_fade_to   = bl_dim_level();
     bl_fade_start = lv_tick_get();
 }
 
-/* Jeden krok prejezdu jasu, volany z ui_tick(). Zhasinani ma prednost:
- * kdyz se zhasina, nabeh uz nebezi. */
+/* Navrat na plny jas po doteku. */
+static void dim_end(void)
+{
+    if (!bl_dimmed && !bl_fading) return;
+    bl_fading    = false;
+    bl_dimmed    = false;
+    bl_wake_from = (bl_shown < 0) ? 0 : bl_shown;
+    bl_waking    = true;
+    bl_wake_start = lv_tick_get();
+}
+
+/* Jeden krok prejezdu jasu, volany z ui_tick(). Ztlumovani ma prednost:
+ * kdyz se stmiva, nabeh uz nebezi. */
 static void bl_step(void)
 {
     if (bl_fading) {
         uint32_t el = lv_tick_get() - bl_fade_start;
+
         if (el >= BL_FADE_MS) {
-            bl_set(0);              /* strida na doraz, LEDky uz nesviti */
-            backlight(false);       /* az ted vypnout panel */
+            bl_fading = false;
+            bl_dimmed = true;
+            bl_set(bl_fade_to);
             return;
         }
-        bl_set((int)((uint32_t)bl_level() * (BL_FADE_MS - el) / BL_FADE_MS));
+        bl_set(bl_fade_from +
+               (bl_fade_to - bl_fade_from) * (int)el / BL_FADE_MS);
         return;
     }
     if (!bl_waking) return;
@@ -602,7 +848,10 @@ uint32_t ui_bl_duty(int percent, uint32_t duty_max)
 #define NAV_TILE_H    ((NAV_FULL_H - NAV_BAR_H - NAV_CAP_H - \
                         (NAV_TILE_ROWS - 1) * NAV_TILE_GAP) / NAV_TILE_ROWS)
 #define NAV_TILE_Y(r) (NAV_BAR_H + NAV_CAP_H + (r) * (NAV_TILE_H + NAV_TILE_GAP))
-#define NAV_TILE_DEBUG 0                /* ktera dlazdice otevira diagnostiku */
+/* Ktera dlazdice otevira diagnostiku. Druha zprava v DOLNI rade:
+ * diagnostika je nastroj, ne hlavni funkce, takze nepatri na misto, na
+ * ktere padne oko jako na prvni. Index je radek * sloupce + sloupec. */
+#define NAV_TILE_DEBUG ((NAV_TILE_ROWS - 1) * NAV_TILE_COLS + NAV_TILE_COLS - 2)
 
 _Static_assert(NAV_TILE_H >= 120,
                "dlazdice klesly pod dotykovy cil 14 mm, lista je prilis vysoka");
@@ -691,12 +940,22 @@ void ui_show_page(int idx)
         lv_obj_set_style_bg_color(navbtn[i],
             lv_color_hex(i == idx ? C_RULE : C_PANEL), 0);
     }
+    /* Vrstva diagnostiky cte jen to, co je prave videt. Odejiti ze
+     * stranky tim zaroven uvolni rozpocet tem velicinam, ktere na te
+     * nove jsou. */
+    if (dp) diag_poller_set_view(dp, PAGE_VIEW[idx]);
+    /* Vyber chyby plati jen po dobu, co se na ni nekdo diva. */
+    if (dp && idx != PG_CHYBY) diag_poller_dtc_select(dp, -1);
 }
 
 static void nav_cb(lv_event_t *e)
 {
     ui_show_page((int)(intptr_t)lv_event_get_user_data(e));
-    nav_shown_ms = lv_tick_get();   /* prace s listou odklada jeji schovani */
+    /* Lista se po vyberu zasune. Kdo si rekl o stranku, chce ji videt,
+     * ne se na ni divat pres vysunute menu; drive se zasouvala az po
+     * peti vterinach necinnosti, takze prvni pohled na novou stranku
+     * byl vzdycky zpoza listy. */
+    set_nav_state(0);
 }
 
 static void handle_cb(lv_event_t *e) { (void)e; set_nav_state(1); }
@@ -861,13 +1120,16 @@ static void gest_release_cb(lv_event_t *e)
     gest_hint_show(false);
     if (!gest_armed) return;
     gest_armed = false;
+    /* Smer: tah DOLEVA posune na dalsi stranku, tah DOPRAVA na
+     * predchozi - obsah jde za prstem, jako kdyz se listuje papirem.
+     * Tah od LEVEHO OKRAJE je vyjimka a znamena zpet na hlavni
+     * obrazovku, takze se vyhodnocuje driv nez obycejny tah doprava. */
     switch (gest_dir_now()) {
         case LV_DIR_RIGHT:
-            /* tah od leveho okraje = zpet na hlavni obrazovku */
             if (press_x < GEST_EDGE && cur_page != PG_HLAVNI) ui_show_page(PG_HLAVNI);
-            else ui_show_page(cur_page + 1);
+            else ui_show_page(cur_page - 1);
             break;
-        case LV_DIR_LEFT: ui_show_page(cur_page - 1); break;
+        case LV_DIR_LEFT: ui_show_page(cur_page + 1); break;
         /* Kdyz tah zacal na navigaci, vyridilo si ho tazeni prstem -
          * jinak by se stav prepnul dvakrat. */
         case LV_DIR_TOP:    if (!nav_drag) set_nav_state(nav_state + 1); break;
@@ -913,11 +1175,16 @@ static void modal_forget(void)
     hold_done   = false;
     dbg_raw     = NULL;
     dbg_mem     = NULL;
+    dbg_bus     = NULL;
+    dbg_poll    = NULL;
     dbg_perf_btn = NULL;
+    dbg_save_btn = NULL;
     for (int m = 0; m < UI_PROFILES; m++) {
         btn_bl_prof[m] = NULL;
         for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[m][i] = NULL;
     }
+    for (int i = 0; i < DIM_STEPS; i++) btn_dim_time[i] = NULL;
+    for (int i = 0; i < BL_LEVELS; i++) btn_dim_lvl[i] = NULL;
     /* Timer odpoctu kresli do popisku v dialogu, takze musi skoncit tady.
      * Ukazatele uz jsou NULL, takze i kdyby se jeste jednou spustil,
      * nema do ceho psat. */
@@ -1165,77 +1432,26 @@ static void show_confirm(const char *title, const char *body,
 /* ---------------------------------------------------------------------
  * Regenerace DPF
  *
- * Stav se kresli na pravy sloupec, protoze ten je videt na kazde strance -
- * jedine misto, kde si bezici regenerace vsimne i ten, kdo je zrovna
- * jinde. Pokus o spusteni podkresli sloupec cervene, bezici regenerace
- * k tomu blika a napln ubyva shora dolu.
+ * Stav se kresli na pravy sloupec, protoze ten je videt na kazde
+ * strance - jedine misto, kde si bezici regenerace vsimne i ten, kdo
+ * je zrovna jinde. Bezici regenerace sloupec podkresli cervene a blika.
  *
- * Procenta, nebo pet kroku? Kdyz jednotka postup hlasi (31 03 02 0D
- * status, delka regenerace v DID 2487), jede se podle nej a vypln klesa
- * plynule od nasyceni k nule. Kdyz ho nehlasi, ubyva po petinach podle
- * odhadovane delky. Hrubost je zamer: plynuly pohyb se cte jako merena
- * hodnota, skoky jako odhad, cimz to v tom pripade je. Posledni petina
- * zustane stat, dokud regeneraci nekdo neukonci - UI si nevymysli, ze
- * je hotovo.
+ * Stav se nikde nenastavuje rucne: bere se z DID 2487, delky prave
+ * bezici regenerace. Nenulova delka znamena, ze bezi. Driv tu byl
+ * rucni prepinac a odhad postupu po petinach - oboje zmizelo, protoze
+ * jednotka postup nehlasi a vymyslet ho znamena kreslit cislo, ktere
+ * nikdo nezmeril.
+ *
+ * Tlacitko na spusteni regenerace tu neni. Je to zapis (31 01 02 0D),
+ * ten patri do src/write/ za branu z docs/safety.md a v tomhle obrazu
+ * neni prilinkovany; tlacitko, ktere nic neposle, by bylo horsi nez
+ * zadne. Na strance je misto nej vysvetleni.
  * ------------------------------------------------------------------- */
 #define RGN_BLINK_MS  500
-#define RGN_STEP_MS   180000    /* petina z odhadovanych 15 minut */
-#define RGN_SIM_MS    20000     /* rucni ukazka: 0 az 100 % za 20 s */
 
-static ui_regen_t regen_state = UI_REGEN_OFF;
-static int regen_pct = -1;      /* <0 = jednotka postup nehlasi */
-static uint32_t regen_since = 0;
-static float regen_soot0 = 0;   /* nasyceni ve chvili spusteni */
-static int regen_demo = 0;      /* 0 vyp, 1 odeslano, 2 bezi, 3 bezi s procenty */
-
-void ui_set_regen_state(ui_regen_t state, int percent)
+static bool regen_on(void)
 {
-    if (state != regen_state) {
-        regen_since = lv_tick_get();
-        regen_soot0 = v_soot.shown;
-    }
-    regen_state = state;
-    regen_pct = percent;
-}
-
-static void regen_demo_label(void)
-{
-    static const int S[4] = {
-        STR_REGEN_OFF, STR_REGEN_REQ, STR_REGEN_RUN, STR_REGEN_RUN_PCT
-    };
-    if (btn_regen_state)
-        lv_label_set_text(lv_obj_get_child(btn_regen_state, 0), T(S[regen_demo]));
-}
-
-static void regen_demo_set(int d)
-{
-    regen_demo = d & 3;
-    ui_set_regen_state(UI_REGEN_OFF, -1);   /* vzdy od nuly, at jde cyklit */
-    switch (regen_demo) {
-        case 1: ui_set_regen_state(UI_REGEN_REQUESTED, -1); break;
-        case 2: ui_set_regen_state(UI_REGEN_ACTIVE, -1); break;
-        case 3: ui_set_regen_state(UI_REGEN_ACTIVE, 0); break;
-        default: break;
-    }
-    regen_demo_label();
-}
-
-static void regen_state_cb(lv_event_t *e) { (void)e; regen_demo_set(regen_demo + 1); }
-
-static void regen_ok_cb(lv_event_t *e)
-{
-    (void)e;
-    /* Na CAN se zatim nic neposila - rozsviti se jen stav na sloupci, aby
-     * slo rozhrani odladit. Az bude vrstva CAN, prijde sem 31 01 02 0D
-     * a stav se bude prepinat podle odpovedi jednotky. */
-    regen_demo_set(1);
-    modal_close_cb(NULL);
-}
-
-static void regen_cb(lv_event_t *e)
-{
-    (void)e;
-    show_confirm(T(STR_REGEN_TITLE), T(STR_REGEN_BODY), C_DEFICIT, regen_ok_cb);
+    return ch_has(DIAG_CH_RGN_DUR) && ch_val(DIAG_CH_RGN_DUR) >= 1.0f;
 }
 
 /* ---------------------------------------------------------------------
@@ -1506,24 +1722,53 @@ static void units_t_cb(lv_event_t *e)
     lv_label_set_text(lv_obj_get_child(btn_units_t, 0), cfg.fahrenheit ? "F" : "C");
 }
 
-/* Doba necinnosti slovem. Je zvlast, protoze ji krome tlacitka
- * "ZHASNOUT PO" ukazuje i radek profilu v dialogu jasu. */
-static void blank_text(char *b, size_t n, uint32_t s)
+/* ---------------------------------------------------------------------
+ * Ztlumeni po necinnosti
+ *
+ * Dve volby, ktere spolu souvisi: ZA JAK DLOUHO a NA KOLIK. Proto maji
+ * jeden dialog a ne dve tlacitka v nastaveni - "ztlumit po minute" bez
+ * udaje na kolik je polovina informace a druha polovina by byla o dve
+ * obrazovky dal.
+ *
+ * Obe volby patri PROFILU, stejne jako jas: na stole, ve dne a v noci
+ * chce clovek jine. Dialog proto meni prave platny profil a jmeno
+ * profilu je v jeho nadpisu.
+ * ------------------------------------------------------------------- */
+static const uint32_t DIM_STEP_S[DIM_STEPS] = { 0, 30, 120, 600 };
+
+/* Doba necinnosti slovem. Je zvlast, protoze ji krome tlacitka v
+ * nastaveni ukazuje i radek profilu v dialogu jasu a seznam profilu
+ * pred resetem. */
+static void dim_time_text(char *b, size_t n, uint32_t s)
 {
     if (s == 0)      snprintf(b, n, "%s", T(STR_BLANK_NEVER));
     else if (s < 60) snprintf(b, n, "%u s", (unsigned)s);
     else             snprintf(b, n, "%u min", (unsigned)(s / 60));
 }
 
-/* Popisek tlacitka "ZHASNOUT PO". Vola ho i build_nastav() a prepnuti
+/* Cele nastaveni ztlumeni jednou vetou: "2 min / 25 %", nebo jen
+ * "nikdy". Na desce bez stmivani se misto urovne rekne, ze se zhasina
+ * - uroven by tam byla slib naprazdno. */
+static void dim_text(char *b, size_t n, const ui_profile_t *p)
+{
+    char t[24];
+
+    dim_time_text(t, sizeof(t), p->dim_s);
+    if (p->dim_s == 0)   snprintf(b, n, "%s", t);
+    else if (bl_can_dim()) snprintf(b, n, "%s / %d %%", t, p->dim_bright);
+    else                 snprintf(b, n, "%s / %s", t, T(STR_DIM_OFF_ONLY));
+}
+
+/* Popisek tlacitka ZTLUMIT. Vola ho i build_nastav() a prepnuti
  * profilu, aby tlacitko ukazovalo hodnotu toho profilu, ktery prave
  * plati, a ne tu, co pri stavbe nahodou byla. */
-static void blank_btn_paint(void)
+static void dim_btn_paint(void)
 {
+    char b[40];
+
     if (!btn_blank) return;
-    char b[24];
-    blank_text(b, sizeof(b), PROF.blank_s);
-    lv_label_set_text(lv_obj_get_child(btn_blank, 0), b);
+    dim_text(b, sizeof(b), &PROF);
+    dlg_btn_text(btn_blank, b);
 }
 
 /* Zhasne podsviceni okamzite, bez cekani na timeout. Hlavni duvod existence:
@@ -1539,15 +1784,191 @@ static void display_off_cb(lv_event_t *e)
     blank_guard_ms = lv_tick_get();
 }
 
-static void blank_cb(lv_event_t *e)
+/* Vybrana volba nese obrubu, ne vypln: modra a kostena maji v teto
+ * aplikaci pevny vyznam (zadano / skutecnost) a vyber mezi ne nepatri.
+ * Stejne jako v dialogu jasu, aby se oba dialogy cetly stejne. */
+static void dim_rows_paint(void)
+{
+    for (int i = 0; i < DIM_STEPS; i++) {
+        if (!btn_dim_time[i]) continue;
+        bool on = PROF.dim_s == DIM_STEP_S[i];
+        lv_obj_set_style_border_color(btn_dim_time[i],
+            lv_color_hex(on ? C_ACTUAL : C_RULE), 0);
+        lv_obj_set_style_border_width(btn_dim_time[i], on ? 3 : 1, 0);
+    }
+    for (int i = 0; i < BL_LEVELS; i++) {
+        if (!btn_dim_lvl[i]) continue;
+        bool on = PROF.dim_bright == BL_LEVEL[i];
+        lv_obj_set_style_border_color(btn_dim_lvl[i],
+            lv_color_hex(on ? C_ACTUAL : C_RULE), 0);
+        lv_obj_set_style_border_width(btn_dim_lvl[i], on ? 3 : 1, 0);
+    }
+}
+
+static void dim_time_cb(lv_event_t *e)
+{
+    PROF.dim_s = DIM_STEP_S[(int)(intptr_t)lv_event_get_user_data(e)];
+    save_cfg();
+    dim_rows_paint();
+    dim_btn_paint();
+    /* Zmena doby se musi projevit hned: kdyz uz jsme ztlumeni a
+     * uzivatel ztlumeni vypne, nesmi displej zustat tmavy. */
+    if (PROF.dim_s == 0) dim_end();
+}
+
+static void dim_lvl_cb(lv_event_t *e)
+{
+    PROF.dim_bright = BL_LEVEL[(int)(intptr_t)lv_event_get_user_data(e)];
+    save_cfg();
+    dim_rows_paint();
+    dim_btn_paint();
+}
+
+#define DIM_T_W   160
+#define DIM_T_X(i) (30 + (i) * (DIM_T_W + 10))
+#define DIM_L_W   120
+#define DIM_L_X(i) (30 + (i) * (DIM_L_W + 10))
+#define DIM_ROW_H 120
+#define DIM_ROW1  120
+#define DIM_ROW2  300
+
+_Static_assert(DIM_ROW2 + DIM_ROW_H <= 480,
+               "druha rada dialogu ztlumeni by prelezla spodni hranu");
+_Static_assert(DIM_L_X(BL_LEVELS - 1) + DIM_L_W <= 800,
+               "urovne ztlumeni by prelezly pravou hranu");
+
+/* Male tlacitko vedle vysvetleni, proc deska stmivat neumi. Kresba je
+ * mala zamerne - je to poznamka, ne nabidka - ale dotykovy cil musi
+ * zustat 120 px, takze obalova oblast je vetsi nez pismo. */
+#define DIM_HW_W  150
+#define DIM_HW_H  120
+#define DIM_HW_X  (800 - 30 - DIM_HW_W)
+
+/* ---------------------------------------------------------------------
+ * "Stmivani jde dodelat"
+ *
+ * Ukaze se JEN na desce, ktera stmivat neumi, tedy pri
+ * CANOGRAF_BL_PWM_PIN = -1 (ui_host_t.bl_set_percent == NULL). Kde uz
+ * dratek je, nema co radit a tlacitko tam proto vubec nevznikne.
+ *
+ * Je to KONSTATOVANI MOZNOSTI, ne navod a ne doporuceni. Kdo na desku
+ * sahne, ma si precist docs/hardware/backlight.md - tam je cely rozbor
+ * i s merenim. Text proto rika, co to je, co to stoji a kde je zbytek,
+ * a nic vic.
+ * ------------------------------------------------------------------- */
+static void hw_dim_cb(lv_event_t *e)
 {
     (void)e;
-    static const uint32_t steps[] = {0, 30, 120, 600};
-    int i = 0;
-    for (int k = 0; k < 4; k++) if (PROF.blank_s == steps[k]) i = k;
-    PROF.blank_s = steps[(i + 1) % 4];
-    save_cfg();
-    blank_btn_paint();
+    lv_obj_t *m = modal_open(T(STR_HW_DIM_TITLE), C_LABEL);
+    lv_obj_t *b = mk_lbl(m, T(STR_HW_DIM_BODY), UI_FONT_20, C_BRIGHT, 30, 100);
+
+    lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(b, 740);
+}
+
+static void dim_cb(lv_event_t *e)
+{
+    (void)e;
+
+    char title[64];
+    snprintf(title, sizeof(title), "%s  %s", T(STR_DIM_TITLE),
+             T(PROF_STR[cfg.profile]));
+    lv_obj_t *m = modal_open(title, C_ACTUAL);
+
+    mk_lbl(m, T(STR_DIM_AFTER), UI_FONT_14, C_LABEL, 30, DIM_ROW1 - 22);
+    for (int i = 0; i < DIM_STEPS; i++) {
+        char b[24];
+        dim_time_text(b, sizeof(b), DIM_STEP_S[i]);
+        btn_dim_time[i] = mk_button(m, DIM_T_X(i), DIM_ROW1, DIM_T_W,
+                                    DIM_ROW_H, b, UI_FONT_24, C_ACTUAL,
+                                    dim_time_cb, (void *)(intptr_t)i);
+    }
+
+    if (!bl_can_dim()) {
+        /* Bez dratku na plosce BL se da jen zhasnout. Nabidnout tu
+         * urovne by znamenalo slibit neco, co se nikde neprojevi.
+         * Vedle vysvetleni ale stoji, ze to jde dodelat - mlcet o tom
+         * by znamenalo tvarit se, ze deska stmivat neumi natrvalo. */
+        lv_obj_t *na = mk_lbl(m, T(STR_DIM_NA), UI_FONT_20, C_LABEL,
+                              30, DIM_ROW2);
+        lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(na, DIM_HW_X - 30 - 20);
+        mk_dlg_button(m, DIM_HW_X, DIM_ROW2, DIM_HW_W, DIM_HW_H,
+                      T(STR_HW_DIM_BTN), UI_FONT_16, C_SAGE, hw_dim_cb, NULL);
+        dim_rows_paint();
+        return;
+    }
+
+    mk_lbl(m, T(STR_DIM_TO), UI_FONT_14, C_LABEL, 30, DIM_ROW2 - 22);
+    for (int i = 0; i < BL_LEVELS; i++) {
+        char b[16];
+        snprintf(b, sizeof(b), "%d %%", BL_LEVEL[i]);
+        btn_dim_lvl[i] = mk_button(m, DIM_L_X(i), DIM_ROW2, DIM_L_W,
+                                   DIM_ROW_H, b, UI_FONT_24, C_ACTUAL,
+                                   dim_lvl_cb, (void *)(intptr_t)i);
+    }
+    dim_rows_paint();
+}
+
+/* ---------------------------------------------------------------------
+ * Rezim sbernice
+ *
+ * Radic startuje v listen-only a v tom rezimu neodejde ani jeden bit -
+ * ani potvrzovaci. Nic se tedy neda precist, protoze kazdy dotaz je
+ * odeslani. Prepnuti do normalniho rezimu je jediny okamzik, kdy
+ * deska zacne na cizi vuz vysilat, takze:
+ *
+ *   - nikdy se nestane samo, ani po startu, ani po pripojeni kabelu,
+ *   - smerem NAHORU (zacit vysilat) je za potvrzenim drzenim, kde
+ *     stoji, co to znamena,
+ *   - smerem DOLU (prestat vysilat) jde hned. Ztisit se musi jit
+ *     okamzite; cekat tri vteriny na to, aby deska prestala rusit, by
+ *     bylo presne obracene.
+ *
+ * Kdyz se radic v novem rezimu nerozjede, can_set_mode() vrati puvodni
+ * nastaveni a tlacitko to rekne - nesmi zustat napsane NORMAL nad
+ * radicem, ktery posloucha.
+ * ------------------------------------------------------------------- */
+static void canmode_btn_paint(void)
+{
+    if (!btn_canmode) return;
+
+    bool normal = host_can_normal();
+    lv_obj_t *l = lv_obj_get_child(btn_canmode, 0);
+
+    lv_label_set_text(l, T(normal ? STR_CAN_NORMAL : STR_CAN_LISTEN));
+    lv_obj_set_style_text_color(l, lv_color_hex(normal ? C_DEFICIT : C_BRIGHT), 0);
+}
+
+static void canmode_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    bool ok = host->can_set_normal(true);
+
+    modal_close_cb(NULL);
+    canmode_btn_paint();
+    if (!ok) {
+        /* Tlacitko ukazuje skutecny rezim radice, takze by po neuspechu
+         * jen tise zustalo na JEN POSLECH a vypadalo to, jako by se
+         * tuknuti ztratilo. Duvod musi byt videt. */
+        lv_obj_t *m = modal_open(T(STR_CAN_TITLE), C_DEFICIT);
+        lv_obj_t *l = mk_lbl(m, T(STR_CAN_FAILED), UI_FONT_24, C_DEFICIT,
+                             30, 120);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(l, 740);
+    }
+}
+
+static void canmode_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!host_can_mode()) return;
+    if (host_can_normal()) {
+        host->can_set_normal(false);
+        canmode_btn_paint();
+        return;
+    }
+    show_confirm(T(STR_CAN_TITLE), T(STR_CAN_BODY), C_DEFICIT, canmode_ok_cb);
 }
 
 /* ---------------------------------------------------------------------
@@ -1592,13 +2013,26 @@ _Static_assert(BL_ROW_Y(UI_PROFILES - 1) + BL_ROW_H <= 480,
 #define BL_UD(m, p) ((void *)(intptr_t)((m) * 1000 + (p)))
 
 /* Popisek tlacitka JAS v nastaveni. Je i v build_nastav(), aby tlacitko
- * uz pri stavbe ukazovalo uroven z NVS a ne natvrdo zadanou. */
+ * uz pri stavbe ukazovalo uroven z NVS a ne natvrdo zadanou. Tecky na
+ * konci pridava dlg_btn_text() - tlacitko dialog otevira, nemeni
+ * hodnotu tuknutim. */
 static void bright_btn_paint(void)
 {
-    if (!btn_bright) return;
     char b[16];
+
+    if (!btn_bright) return;
     snprintf(b, sizeof(b), "%d %%", bl_level());
-    lv_label_set_text(lv_obj_get_child(btn_bright, 0), b);
+    dlg_btn_text(btn_bright, b);
+}
+
+/* Tlacitko WIFI ukazuje, na ktere siti deska je. "VYBRAT SIT" tam
+ * stalo porad a o stavu nerikalo nic - prave to byla otazka, kvuli
+ * ktere na nej clovek sahal. */
+static void wifi_btn_paint(void)
+{
+    if (!btn_wifi) return;
+    dlg_btn_text(btn_wifi, host_wifi_connected() ? host_wifi_ssid()
+                                                 : T(STR_NONE));
 }
 
 /* Tlacitko PROFIL v nastaveni rika, ktery profil prave plati. */
@@ -1617,10 +2051,10 @@ static void bl_rows_paint(void)
     for (int m = 0; m < UI_PROFILES; m++) {
         bool live = (m == cfg.profile);
         if (btn_bl_prof[m]) {
-            char blank[24], cap[64];
-            blank_text(blank, sizeof(blank), cfg.prof[m].blank_s);
+            char dim[40], cap[72];
+            dim_text(dim, sizeof(dim), &cfg.prof[m]);
             snprintf(cap, sizeof(cap), "%s\n%d %%\n%s",
-                     T(PROF_STR[m]), cfg.prof[m].bright, blank);
+                     T(PROF_STR[m]), cfg.prof[m].bright, dim);
             lv_label_set_text(lv_obj_get_child(btn_bl_prof[m], 0), cap);
             lv_obj_set_style_bg_color(btn_bl_prof[m],
                 lv_color_hex(live ? C_RULE : C_PANEL), 0);
@@ -1646,13 +2080,20 @@ static void prof_bar_paint(void);
  * dialogu, tlacitko v nastaveni nebo prepinac v horni liste. Vsechny
  * tri cesty tim delaji totez vcetne ulozeni do NVS a vsechna mista v
  * UI se prekresli, takze se nemuzou rozejit. */
+static void perf_apply(void);
+
 static void profile_apply(void)
 {
     bl_apply();                 /* jas noveho profilu plati hned */
+    /* Prekryv s FPS patri profilu stejne jako jas, takze se pri
+     * prepnuti prebira taky - jinak by zustal viset z profilu, ze
+     * ktereho se odchazi. */
+    perf_on = PROF.perf;
+    perf_apply();
     save_cfg();
     profile_btn_paint();
     prof_bar_paint();
-    blank_btn_paint();
+    dim_btn_paint();
     bl_rows_paint();
     bright_btn_paint();
 }
@@ -1777,10 +2218,10 @@ static void profiles_text(char *b, int n)
 {
     int at = 0;
     for (int i = 0; i < UI_PROFILES; i++) {
-        char blank[24];
-        blank_text(blank, sizeof(blank), cfg.prof[i].blank_s);
+        char dim[40];
+        dim_text(dim, sizeof(dim), &cfg.prof[i]);
         at = str_add(b, at, n, "%s   %d %%   %s\n",
-                     T(PROF_STR[i]), cfg.prof[i].bright, blank);
+                     T(PROF_STR[i]), cfg.prof[i].bright, dim);
     }
     /* Jednotky nepatri zadnemu profilu, takze stoji oddelene a
      * s popiskem - samotne "mph  C" by se cetlo jako dalsi profil. */
@@ -2003,21 +2444,42 @@ static void build_hlavni(lv_obj_t *scr)
     layout_hlavni();
 }
 
+/* Motor: vlevo plnici tlak jako ukazatel, uprostred to, co k nemu
+ * patri (zadani, lopatky, rail), vpravo vzduchova cesta. Dvojice
+ * skutecnost/zadani se kresli vedle sebe a barvou, ne popiskem -
+ * kostena je vzdycky skutecnost, modra vzdycky zadani, stejne jako v
+ * legende grafu. */
+#define ENG_C2   290
+#define ENG_C3   500
+#define ENG_ROW1 10
+#define ENG_ROW2 86
+#define ENG_ROW3 162
+
 static void build_motor(lv_obj_t *scr)
 {
     lv_obj_t *p = page[PG_MOTOR] = mk_page(scr);
     arc_boost = mk_arc(p, 14, 6, 230, 800, 2900, C_ACTUAL, 18);
-    lbl_boost = mk_lbl(p, "----", UI_FONT_40, C_ACTUAL, 62, 96);
+    lbl_boost = mk_lbl(p, VAL_NONE, UI_FONT_40, C_ACTUAL, 62, 96);
     mk_lbl(p, "mbar", UI_FONT_16, C_LABEL, 106, 142);
     mk_lbl(p, T(STR_BOOST_PRESSURE), UI_FONT_14, C_LABEL, 76, 240);
 
-    mk_lbl(p, T(STR_DEMAND), UI_FONT_14, C_LABEL, 290, 10);
-    lbl_boost_sp = mk_lbl(p, "----", UI_FONT_36, C_DEMAND, 290, 30);
-    mk_lbl(p, "VNT", UI_FONT_14, C_LABEL, 290, 90);
-    lbl_vnt = mk_lbl(p, "--", UI_FONT_36, C_BRIGHT, 290, 110);
-    mk_lbl(p, "RAIL bar", UI_FONT_14, C_LABEL, 290, 170);
-    lbl_railp = mk_lbl(p, "---", UI_FONT_36, C_BRIGHT, 290, 190);
-    mk_lbl(p, T(STR_SIM_DATA), UI_FONT_14, C_DEFICIT, 540, 10);
+    mk_lbl(p, T(STR_DEMAND), UI_FONT_14, C_LABEL, ENG_C2, ENG_ROW1);
+    lbl_boost_sp = mk_lbl(p, VAL_NONE, UI_FONT_36, C_DEMAND, ENG_C2, ENG_ROW1 + 18);
+    mk_lbl(p, "VNT %", UI_FONT_14, C_LABEL, ENG_C2, ENG_ROW2);
+    lbl_vnt = mk_lbl(p, VAL_NONE, UI_FONT_36, C_ACTUAL, ENG_C2, ENG_ROW2 + 18);
+    mk_lbl(p, "RAIL bar", UI_FONT_14, C_LABEL, ENG_C2, ENG_ROW3);
+    lbl_railp = mk_lbl(p, VAL_NONE, UI_FONT_36, C_ACTUAL, ENG_C2, ENG_ROW3 + 18);
+    lbl_rail_sp = mk_lbl(p, VAL_NONE, UI_FONT_20, C_DEMAND, ENG_C2 + 120,
+                         ENG_ROW3 + 34);
+
+    mk_lbl(p, "MAF mg", UI_FONT_14, C_LABEL, ENG_C3, ENG_ROW1);
+    lbl_maf = mk_lbl(p, VAL_NONE, UI_FONT_36, C_ACTUAL, ENG_C3, ENG_ROW1 + 18);
+    lbl_maf_sp = mk_lbl(p, VAL_NONE, UI_FONT_20, C_DEMAND, ENG_C3 + 120,
+                        ENG_ROW1 + 34);
+    mk_lbl(p, "EGR %", UI_FONT_14, C_LABEL, ENG_C3, ENG_ROW2);
+    lbl_egr = mk_lbl(p, VAL_NONE, UI_FONT_36, C_ACTUAL, ENG_C3, ENG_ROW2 + 18);
+    mk_lbl(p, T(STR_INTAKE_AIR), UI_FONT_14, C_LABEL, ENG_C3, ENG_ROW3);
+    lbl_iat = mk_lbl(p, VAL_NONE, UI_FONT_36, C_ACTUAL, ENG_C3, ENG_ROW3 + 18);
 }
 
 static void build_tlak(lv_obj_t *scr)
@@ -2048,36 +2510,95 @@ static void build_tlak(lv_obj_t *scr)
     mk_lbl(p, T(STR_LEGEND_ACTUAL), UI_FONT_14, C_ACTUAL, 560, 124);
 }
 
+/* ---------------------------------------------------------------------
+ * Chyby
+ *
+ * Vlevo seznam toho, co jednotka vydala na 19 02 s maskou 0x2F
+ * (klidovy stav 0x50 odfiltruje uz jednotka, jinak by jich prislo pres
+ * sto). Kazdy radek nese kod a rozlozeny stavovy bajt slovy - samotny
+ * kod rika CO, stavove bity rikaji JESTLI to hori ted.
+ *
+ * Vpravo detail vybrane chyby: rozsirene zaznamy (19 06) a freeze
+ * frame (19 04). Rozsirene zaznamy jsou nahore zamerne - prave ty
+ * zmizi, kdyz se chyba sama vyleci nebo ji nekdo smaze.
+ *
+ * Mazani pameti tu neni a nebude, viz ROADMAP.md: zahodilo by presne
+ * ty zaznamy, kvuli kterym se sem clovek diva.
+ *
+ * Radku je DTC_ROWS a vic se jich na stranku nevejde. Kolik chyb
+ * jednotka opravdu hlasi, stoji v hlavicce, takze se nic neschova
+ * potichu.
+ * ------------------------------------------------------------------- */
+#define DTC_ROW_H  48
+#define DTC_ROW_W  350
+#define DTC_ROW_Y(i) (44 + (i) * (DTC_ROW_H + 8))
+#define DTC_COL2   400
+
+_Static_assert(DTC_ROW_Y(DTC_ROWS - 1) + DTC_ROW_H <= PAGE_H - NAV_BAR_H,
+               "posledni radek chyb by zmizel pod vysunutou listou");
+
+static void dtc_row_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+
+    if (!dp) return;
+    /* Druhe tuknuti na tentyz radek vyber zrusi - jinak by se z detailu
+     * nedalo odejit jinak nez odchodem ze stranky. */
+    diag_poller_dtc_select(dp, (diag_poller_dtc_selected(dp) == i) ? -1 : i);
+}
+
 static void build_chyby(lv_obj_t *scr)
 {
     lv_obj_t *p = page[PG_CHYBY] = mk_page(scr);
-    mk_lbl(p, T(STR_NO_CAN), UI_FONT_28, C_BRIGHT, 20, 12);
-    mk_lbl(p, T(STR_DTC_ALL), UI_FONT_20, C_DEMAND, 20, 70);
-    mk_lbl(p, T(STR_DTC_CURRENT), UI_FONT_20, C_DEMAND, 20, 106);
-    mk_lbl(p, T(STR_DTC_FREEZE), UI_FONT_20, C_DEMAND, 20, 142);
-    mk_lbl(p, T(STR_DTC_STATS), UI_FONT_20, C_DEMAND, 20, 178);
+
+    dtc_head = mk_lbl(p, T(STR_DTC_UNREAD), UI_FONT_24, C_LABEL, 20, 8);
+    dtc_odo  = mk_lbl(p, "", UI_FONT_16, C_LABEL, DTC_COL2, 14);
+
+    for (int i = 0; i < DTC_ROWS; i++) {
+        dtc_row[i] = mk_button(p, 20, DTC_ROW_Y(i), DTC_ROW_W, DTC_ROW_H, "",
+                               UI_FONT_20, C_DEFICIT, dtc_row_cb,
+                               (void *)(intptr_t)i);
+        lv_obj_add_flag(dtc_row[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    dtc_hint = mk_lbl(p, T(STR_DTC_TAP), UI_FONT_14, C_LABEL, 20,
+                      DTC_ROW_Y(DTC_ROWS - 1) + DTC_ROW_H + 6);
+
+    mk_lbl(p, T(STR_DTC_EXT_T), UI_FONT_14, C_LABEL, DTC_COL2, 44);
+    dtc_ext = mk_lbl(p, "", UI_FONT_16, C_BRIGHT, DTC_COL2, 62);
+    mk_lbl(p, T(STR_DTC_FREEZE_T), UI_FONT_14, C_LABEL, DTC_COL2, 158);
+    dtc_ff = mk_lbl(p, "", UI_FONT_16, C_BRIGHT, DTC_COL2, 176);
 }
+
+/* DPF: sest hodnot ve dvou sloupcich, vpravo stav regenerace a
+ * vysvetleni, proc tu neni tlacitko na jeji spusteni. */
+#define DPF_C1   20
+#define DPF_C2   215
+#define DPF_C3   420
+#define DPF_RY(r) (6 + (r) * 68)
 
 static void build_dpf(lv_obj_t *scr)
 {
+    static const int CAP[6] = {
+        STR_DPF_TEMP_IN, STR_DPF_TEMP_OUT, STR_DPF_TEMP_TARGET,
+        STR_DPF_SOOT, STR_DPF_LOAD, STR_DPF_SINCE
+    };
     lv_obj_t *p = page[PG_DPF] = mk_page(scr);
-    mk_lbl(p, T(STR_DPF_TEMP_IN), UI_FONT_14, C_LABEL, 20, 10);
-    mk_lbl(p, "-- C", UI_FONT_36, C_BRIGHT, 20, 30);
-    mk_lbl(p, T(STR_DPF_TEMP_OUT), UI_FONT_14, C_LABEL, 240, 10);
-    mk_lbl(p, "-- C", UI_FONT_36, C_BRIGHT, 240, 30);
-    mk_button(p, 20, 110, 340, 130, T(STR_DPF_REGEN_BTN),
-              UI_FONT_24, C_DEFICIT, regen_cb, NULL);
 
-    /* Rucni prepinac stavu regenerace, dokud neni CAN: jinak by nebylo
-     * jak si stav na sloupci prohlednout a odladit. Az bude vrstva CAN,
-     * prepne stav jednotka a tohle tlacitko zmizi. */
-    mk_lbl(p, T(STR_REGEN_STATE), UI_FONT_14, C_LABEL, 390, 90);
-    btn_regen_state = mk_button(p, 390, 110, 300, 130, "", UI_FONT_24,
-                                C_ACTUAL, regen_state_cb, NULL);
-    regen_demo_label();
+    for (int i = 0; i < 6; i++) {
+        lv_coord_t x = (i & 1) ? DPF_C2 : DPF_C1;
+        lv_coord_t y = DPF_RY(i / 2);
+        mk_lbl(p, T(CAP[i]), UI_FONT_14, C_LABEL, x, y);
+        lbl_dpf[i] = mk_lbl(p, VAL_NONE, UI_FONT_32, C_ACTUAL, x, y + 18);
+    }
 
-    /* Vys nez driv: vysunuta lista stranek zacina uz na 264 px. */
-    mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 20, 242);
+    mk_lbl(p, T(STR_REGEN_STATE), UI_FONT_14, C_LABEL, DPF_C3, DPF_RY(0));
+    lbl_regen = mk_lbl(p, T(STR_REGEN_OFF), UI_FONT_32, C_LABEL,
+                       DPF_C3, DPF_RY(0) + 18);
+
+    lv_obj_t *na = mk_lbl(p, T(STR_DPF_REGEN_NA), UI_FONT_16, C_LABEL,
+                          DPF_C3, DPF_RY(1) + 10);
+    lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(na, 290);
 }
 
 /* Nastaveni ma tri rady. Prvni ctyri tlacitka prepinaji jednu hodnotu
@@ -2121,46 +2642,69 @@ static void build_nastav(lv_obj_t *scr)
     btn_units_t = mk_button(p, SET_X(1), SET_ROW1, BW, BH,
                             cfg.fahrenheit ? "F" : "C",
                             UI_FONT_24, C_DEMAND, units_t_cb, NULL);
-    /* ZHASNOUT PO patri profilu, takze popisek tlacitka dosadi az
-     * blank_btn_paint() podle toho, ktery profil prave plati. */
-    mk_lbl(p, T(STR_SET_BLANK), UI_FONT_14, C_LABEL, SET_X(2), 8);
-    btn_blank = mk_button(p, SET_X(2), SET_ROW1, BW, BH, "",
-                          UI_FONT_24, C_DEMAND, blank_cb, NULL);
-    blank_btn_paint();
+    /* ZTLUMENI patri profilu, takze popisek tlacitka dosadi az
+     * dim_btn_paint() podle toho, ktery profil prave plati. */
+    mk_lbl(p, T(STR_SET_DIM), UI_FONT_14, C_LABEL, SET_X(2), 8);
+    btn_blank = mk_dlg_button(p, SET_X(2), SET_ROW1, BW, BH, "",
+                              UI_FONT_20, C_ACTUAL, dim_cb, NULL);
+    dim_btn_paint();
     mk_lbl(p, T(STR_SET_LANG), UI_FONT_14, C_LABEL, SET_X(3), 8);
     mk_button(p, SET_X(3), SET_ROW1, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
               C_SAGE, lang_cb, NULL);
 
-    mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, 20, SET_ROW2 - 20);
-    mk_button(p, 20, SET_ROW2, 320, BH, T(STR_WIFI_PICK), UI_FONT_24,
-              C_DEMAND, wifi_scan_cb, NULL);
+    /* WIFI je uzsi nez driv: vedle nej je ted rezim sbernice. Rezim je
+     * nejdulezitejsi prepinac na cele strance - bez nej se neprecte nic
+     * - takze patri do rady, ktera je videt, ne do dialogu.
+     *
+     * Tlacitka s teckami otviraji dalsi obrazovku, tlacitka bez tecek
+     * meni hodnotu rovnou. Viz mk_dlg_button(). */
+    mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, SET_X(0), SET_ROW2 - 20);
+    btn_wifi = mk_dlg_button(p, SET_X(0), SET_ROW2, BW, BH, "", UI_FONT_20,
+                             C_DEMAND, wifi_scan_cb, NULL);
+    wifi_btn_paint();
 
-    mk_lbl(p, T(STR_SET_PROFILE), UI_FONT_14, C_LABEL, 360, SET_ROW2 - 20);
-    btn_profile = mk_button(p, 360, SET_ROW2, BW, BH, "", UI_FONT_24,
+    mk_lbl(p, "CAN", UI_FONT_14, C_LABEL, SET_X(1), SET_ROW2 - 20);
+    btn_canmode = NULL;
+    if (host_can_mode()) {
+        /* Tecky tu jsou kvuli smeru, ktery je dulezity: zacit vysilat
+         * jde jen pres potvrzovaci dialog. Zpet do poslechu se vraci
+         * rovnou, protoze ztisit se musi dat okamzite. */
+        btn_canmode = mk_dlg_button(p, SET_X(1), SET_ROW2, BW, BH, "",
+                                    UI_FONT_20, C_DEFICIT, canmode_cb, NULL);
+        canmode_btn_paint();
+    } else {
+        lv_obj_t *na = mk_lbl(p, T(STR_CAN_NA), UI_FONT_14, C_LABEL,
+                              SET_X(1), SET_ROW2);
+        lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(na, SET_BW);
+    }
+
+    mk_lbl(p, T(STR_SET_PROFILE), UI_FONT_14, C_LABEL, SET_X(2), SET_ROW2 - 20);
+    btn_profile = mk_button(p, SET_X(2), SET_ROW2, BW, BH, "", UI_FONT_24,
                             C_SAGE, profile_cycle_cb, NULL);
     profile_btn_paint();
 
-    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, 540, SET_ROW2 - 20);
+    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, SET_X(3), SET_ROW2 - 20);
     btn_bright = NULL;
     if (bl_can_dim()) {
-        btn_bright = mk_button(p, 540, SET_ROW2, 170, BH, "", UI_FONT_24,
-                               C_ACTUAL, bright_cb, NULL);
+        btn_bright = mk_dlg_button(p, SET_X(3), SET_ROW2, BW, BH, "",
+                                   UI_FONT_20, C_ACTUAL, bright_cb, NULL);
         bright_btn_paint();
     } else {
         lv_obj_t *na = mk_lbl(p, T(STR_BRIGHT_NA), UI_FONT_14, C_LABEL,
-                              540, SET_ROW2);
+                              SET_X(3), SET_ROW2);
         lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(na, 176);
+        lv_obj_set_width(na, SET_BW);
     }
 
-    lbl_wifi = mk_lbl(p, T(STR_WIFI_NOT_CONN), UI_FONT_20, C_LABEL,
-                      20, SET_ROW3);
+    lbl_wifi = mk_lbl(p, "", UI_FONT_20, C_LABEL, 20, SET_ROW3);
     lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, SET_ROW3 + 32);
 
-    /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne jako
-     * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
-     * Zhasina natvrdo, bez stmivani: hlavni duvod existence je merit na
-     * ploskach BL/GND a tam je potreba znamy stav, ne prejezd. */
+    /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne
+     * jako po ztlumeni - resi to ui_tick() pres necinnost LVGL.
+     * Zhasina natvrdo, bez prejezdu: hlavni duvod existence je merit na
+     * ploskach BL/GND a tam je potreba znamy stav. Neni to dialog ani
+     * prepinac hodnoty, je to akce, takze nema tecky ani je mit nema. */
     mk_button(p, 360, SET_ROW3, 170, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
               C_ACTUAL, display_off_cb, NULL);
 
@@ -2168,8 +2712,102 @@ static void build_nastav(lv_obj_t *scr)
      * dialogem - nemuze se na nej sahnout omylem pri hrani s jednotkami.
      * Vic nez po 716 px nesmi nic sahnout: od 736 px je pravy sloupec
      * DPF a stranka je od tam orezana. */
-    mk_button(p, 546, SET_ROW3, 170, BH, T(STR_SET_MAINT), UI_FONT_24,
-              C_DEFICIT, reset_cb, NULL);
+    mk_dlg_button(p, 546, SET_ROW3, 170, BH, T(STR_SET_MAINT), UI_FONT_20,
+                  C_DEFICIT, reset_cb, NULL);
+}
+
+/* ---------------------------------------------------------------------
+ * Dotek na sloupci DPF
+ *
+ * Z jednoho stisku na sloupci vedou tri cesty a kazda konci jinde:
+ *
+ *   stisk              sloupec se OZNACI - delici linka zesili a zmodra
+ *   pusteni bez pohybu nestane se NIC, oznaceni za chvili zmizi
+ *   pohyb              oznaceni i odpocet se rusi a je z toho obycejny
+ *                      tah na dalsi stranku
+ *   podrzeni           skok na stranku DPF
+ *
+ * PROC SE TO NEPLETE. Sloupec lezi u praveho okraje a prave odtud
+ * clovek zacina tah na dalsi stranku, takze vsechny tri veci zacinaji
+ * uplne stejne. Rozhoduje az to, co se stane potom:
+ *
+ *   - tah ma EVENT_BUBBLE a vyhodnocuje ho obrazovka az pri PUSTENI,
+ *     tedy uplne jinou cestou,
+ *   - CLICKED projde jen tehdy, kdyz was_drag() rekne, ze prst nikam
+ *     neslo (hlidac drag_guard_cb, stejny jako na vsech tlacitkach),
+ *   - ODPOCET PODRZENI SE RUSI POHYBEM. To je ta podstatna vec: bez ni
+ *     by zavahani uprostred tahu skocilo na stranku DPF a tah uz by
+ *     nikam nevedl. Proto se podrzeni nepocita pres LVGL
+ *     LV_EVENT_LONG_PRESSED (ten chodi podle casu bez ohledu na pohyb),
+ *     ale rucne z LV_EVENT_PRESSING, ktery zaroven vi, kde prst je.
+ *
+ * DELKA PODRZENI je 1,2 s. Je to trojnasobek vychoziho dlouheho stisku
+ * LVGL (400 ms), takze obycejne zavahani na nej nedosahne, a zaroven
+ * polovina tri vterin od potvrzeni drzenim - ty patri necemu, co meni
+ * vuz, kdezto tohle je jen navigace, kterou vezme zpet jedno svihnuti.
+ * Protoze odpocet rusi pohyb, nic nestoji v ceste tomu, aby byl kratky;
+ * delsi uz by jen zdrzoval.
+ *
+ * CO JE VIDET. Delici linka sloupce je zaroven ukazatel postupu:
+ *
+ *   klid        1 px, barva vlasove linky
+ *   drzim       3 px, modra, roste odspodu nahoru podle odpoctu
+ *   tuknuto     3 px, modra, cela - na 800 ms, pak zpatky
+ *
+ * Je to jediny objekt, zadny dalsi prvek nevznika, a v 64 px sirokem
+ * sloupci je pres celou vysku stranky videt i periferne. Zmena je
+ * TVAROVA, ne ciselna, a modra je v teto palete barva zadane hodnoty -
+ * na sloupci se nikdy nepouziva (ten ma zelenou, kostenou a cervenou),
+ * takze ji nejde splest se zmenou namerene hodnoty.
+ * ------------------------------------------------------------------- */
+#define RAIL_HOLD_MS  1200
+#define RAIL_FLASH_MS 800
+
+static uint32_t rail_press_at = 0;    /* kdy zacal stisk */
+static bool     rail_hold_live = false;
+static bool     rail_hold_done = false;
+static uint32_t rail_flash_until = 0;
+/* Naposled nakreslena vyska delici linky. Po prestavbe UI (zmena
+ * jazyka) je rail_rule uz jiny objekt, takze se musi zneplatnit -
+ * jinak by se prekresleni preskocilo a linka zustala useknuta. */
+static lv_coord_t rail_rule_h = -1;
+
+static void rail_press_cb(lv_event_t *e)
+{
+    (void)e;
+    rail_press_at  = lv_tick_get();
+    rail_hold_live = true;
+    rail_hold_done = false;
+    rail_flash_until = 0;
+}
+
+/* Chodi pri kazdem cteni doteku, tedy i kdyz prst stoji. Odtud se
+ * podrzeni hlida i rusi - obe veci potrebuji vedet, kde prst je. */
+static void rail_pressing_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!rail_hold_live) return;
+    if (was_drag()) {               /* uz to neni podrzeni, je to tah */
+        rail_hold_live = false;
+        return;
+    }
+    if (lv_tick_get() - rail_press_at < RAIL_HOLD_MS) return;
+    rail_hold_live = false;
+    rail_hold_done = true;          /* at nasledny CLICKED uz nic nedela */
+    ui_show_page(PG_DPF);
+}
+
+static void rail_release_cb(lv_event_t *e)
+{
+    (void)e;
+    rail_hold_live = false;
+}
+
+static void rail_click_cb(lv_event_t *e)
+{
+    (void)e;
+    if (rail_hold_done) return;     /* uz to vyridilo podrzeni */
+    rail_flash_until = lv_tick_get() + RAIL_FLASH_MS;
 }
 
 /* Sloupec je vysoky jako stranka, ale jeho obsah musi zustat nad uchytem
@@ -2185,6 +2823,7 @@ static void layout_rail(void)
     lv_coord_t bh = h - RAIL_TOP - RAIL_BOT - RAIL_VAL_H;
     if (bh < 40) bh = 40;
     lv_obj_set_size(rail_rule, 1, PAGE_H);      /* vlasova linka po cele vysce */
+    rail_rule_h = -1;                           /* viz rail_paint() */
     lv_obj_set_pos(rail_bar, RAIL_BAR_X, RAIL_TOP);
     lv_obj_set_size(rail_bar, RAIL_BAR_W, bh);
     lv_obj_set_pos(rail_val, 0, h - RAIL_VAL_H);
@@ -2308,12 +2947,11 @@ static void prof_build(lv_obj_t *bar)
  * neukazat.
  * ------------------------------------------------------------------- */
 #define PERF_WIN_MS 1000
-#define DBG_COL2    400
-
-static const char *const DBG_BUS_ROW[] = {
-    "rx", "tx", "tx_fail", "rx_lost", "ring_lost", "bus_err", "arb_lost", "bus_off"
-};
-#define DBG_BUS_ROWS ((int)(sizeof(DBG_BUS_ROW) / sizeof(DBG_BUS_ROW[0])))
+/* Tri sloupce: vlevo hodnoty vsech kanalu, uprostred sbernice a merena
+ * rychlost vycitani, vpravo pamet a prepinac prekryvu s FPS. */
+#define DBG_C1 30
+#define DBG_C2 260
+#define DBG_C3 500
 
 static void perf_monitor_cb(lv_disp_drv_t *drv, uint32_t time, uint32_t px)
 {
@@ -2359,6 +2997,24 @@ static void perf_tick(uint32_t now)
     if (perf_on) perf_paint();
 }
 
+/* ---------------------------------------------------------------------
+ * Nastaveni diagnostiky prezije restart
+ *
+ * Prekryv s FPS patri PROFILU, stejne jako jas: na stole si ho clovek
+ * necha svitit cele hodiny, za jizdy ho videt nechce. Ulozeni je ale
+ * zvlast tlacitko a ne automaticke - zapnout si prekryv na dve minuty
+ * pri hledani zadrhnuti je bezna vec a nemelo by to znamenat, ze ho
+ * deska bude mit i priste.
+ * ------------------------------------------------------------------- */
+static void perf_apply(void)
+{
+    if (!perf_lbl) return;
+    if (perf_on) lv_obj_clear_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+    else         lv_obj_add_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void dbg_btn_paint(void);
+
 static void dbg_perf_paint(void)
 {
     if (!dbg_perf_btn) return;
@@ -2372,39 +3028,120 @@ static void dbg_perf_cb(lv_event_t *e)
 {
     (void)e;
     perf_on = !perf_on;
-    if (perf_lbl) {
-        if (perf_on) lv_obj_clear_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
-        else         lv_obj_add_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
-    }
+    perf_apply();
     perf_paint();
     dbg_perf_paint();
+    dbg_btn_paint();
 }
 
-/* Hodnoty jsou syrove: zadne jednotky, zadne zaokrouhleni na ukazatele,
- * jen cilova a zobrazena hodnota v setinach, jak je UI drzi. */
-static int dbg_val(char *b, int at, int n, const char *name, const val_t *v)
+static void dbg_save_cb(lv_event_t *e)
 {
-    return str_add(b, at, n, "%s %d %d\n", name,
-                   (int)(v->target * 100.0f), (int)(v->shown * 100.0f));
+    (void)e;
+    PROF.perf = perf_on;
+    save_cfg();
+    dbg_btn_paint();
+}
+
+static void dbg_default_cb(lv_event_t *e)
+{
+    (void)e;
+    PROF.perf = ui_profile_default(cfg.profile).perf;
+    perf_on   = PROF.perf;
+    perf_apply();
+    perf_paint();
+    save_cfg();
+    dbg_perf_paint();
+    dbg_btn_paint();
+}
+
+/* Tlacitko ulozeni rika, do ktereho profilu se uklada, a jestli uz se
+ * ulozene od zobrazeneho lisi - jinak by nebylo poznat, ze je co
+ * ukladat. */
+static void dbg_btn_paint(void)
+{
+    char b[64];
+
+    if (!dbg_save_btn) return;
+    snprintf(b, sizeof(b), T(STR_DBG_SAVE), T(PROF_STR[cfg.profile]));
+    lv_label_set_text(lv_obj_get_child(dbg_save_btn, 0), b);
+    lv_obj_set_style_border_color(dbg_save_btn,
+        lv_color_hex(PROF.perf == perf_on ? C_RULE : C_ACTUAL), 0);
+    lv_obj_set_style_border_width(dbg_save_btn, PROF.perf == perf_on ? 1 : 3, 0);
+}
+
+/* Syrove hodnoty: stav kanalu a cislo v setinach, jak ho UI drzi.
+ * Jmena jsou vyvojarska, ne pro uzivatele - stejne jako nazvy citacu
+ * sbernice o kus dal - takze nejdou pres i18n.
+ *
+ * Stav je jedno pismeno a je to to nejdulezitejsi na cele tabulce:
+ *   -  nic neprislo       L  ziva
+ *   S  stara              X  jednotka DID odmitla
+ * Kdyz je na strance pomlcka, musi tu byt '-'; kdyz je na strance
+ * cislo, musi tu byt L nebo S. Jinak UI kresli neco, co nezmerilo. */
+static const char *const DBG_CH_NAME[DIAG_CH__COUNT] = {
+    "rpm", "speed", "boost", "boost_sp", "rail", "rail_sp", "vnt",
+    "maf", "maf_sp", "egr", "iat", "coolant", "dpf_up", "dpf_dn",
+    "dpf_sp", "soot", "load", "rgn_dur", "rgn_end", "odo"
+};
+
+static char dbg_show_char(int ch)
+{
+    switch (ch_show(ch)) {
+    case DIAG_SHOW_LIVE:    return 'L';
+    case DIAG_SHOW_STALE:   return 'S';
+    case DIAG_SHOW_REFUSED: return 'X';
+    default:                return '-';
+    }
 }
 
 static void dbg_paint(void)
 {
     if (!dbg_raw) return;
 
-    char b[384];
+    char b[768];
     int n = (int)sizeof(b);
-    int at = str_add(b, 0, n, "page %d  nav %d  regen %d %d\n",
-                     cur_page, nav_state, (int)regen_state, regen_pct);
-    at = dbg_val(b, at, n, "speed", &v_speed);
-    at = dbg_val(b, at, n, "rpm", &v_rpm);
-    at = dbg_val(b, at, n, "temp", &v_temp);
-    at = dbg_val(b, at, n, "boost", &v_boost);
-    at = dbg_val(b, at, n, "boost_sp", &v_boost_sp);
-    at = dbg_val(b, at, n, "vnt", &v_vnt);
-    at = dbg_val(b, at, n, "rail", &v_rail);
-    dbg_val(b, at, n, "soot", &v_soot);
+    int at = str_add(b, 0, n, "page %d  nav %d\n", cur_page, nav_state);
+
+    for (int ch = 0; ch < DIAG_CH__COUNT; ch++)
+        at = str_add(b, at, n, "%-8s %c %d\n", DBG_CH_NAME[ch],
+                     dbg_show_char(ch), (int)(v_shown[ch] * 100.0f));
     lv_label_set_text(dbg_raw, b);
+
+    if (dbg_bus) {
+        char s[256];
+        int sn = (int)sizeof(s);
+        const can_stats_t *cs = (host && host->can_stats) ? host->can_stats()
+                                                          : NULL;
+        if (!cs) {
+            str_add(s, 0, sn, "%s", VAL_NONE);
+        } else {
+            at = str_add(s, 0, sn, "rx %u\ntx %u\ntx_fail %u\nrx_lost %u\n",
+                         cs->rx, cs->tx, cs->tx_fail, cs->rx_lost);
+            str_add(s, at, sn, "ring_lost %u\nbus_err %u\narb_lost %u\n"
+                               "bus_off %u", cs->ring_lost, cs->bus_err,
+                    cs->arb_lost, cs->bus_off);
+        }
+        lv_label_set_text(dbg_bus, s);
+    }
+
+    if (dbg_poll) {
+        char s[256];
+        int sn = (int)sizeof(s);
+        if (!dp) {
+            str_add(s, 0, sn, "%s", VAL_NONE);
+        } else {
+            uint32_t r = diag_poller_rate_x100(dp);
+            at = str_add(s, 0, sn, "%s\n%u.%02u req/s\n",
+                         diag_poller_armed(dp) ? "normal" : "listen-only",
+                         r / 100u, r % 100u);
+            at = str_add(s, at, sn, "rtt %u ms\npozadavku %u\n",
+                         diag_poller_rtt_ms(dp), diag_poller_requests(dp));
+            str_add(s, at, sn, "vzorku %u\nchyb %u\nramcu %u",
+                    diag_poller_samples(dp), diag_poller_failures(dp),
+                    diag_poller_link(dp)->n_frames);
+        }
+        lv_label_set_text(dbg_poll, s);
+    }
 
     if (!dbg_mem) return;
     char m[192];
@@ -2426,35 +3163,218 @@ static void debug_cb(lv_event_t *e)
     (void)e;
     lv_obj_t *m = modal_open(T(STR_DBG_TITLE), C_DEMAND);
 
-    dbg_perf_btn = mk_button(m, 30, 96, 300, 120, "", UI_FONT_20,
+    mk_lbl(m, T(STR_DBG_RAW), UI_FONT_14, C_LABEL, DBG_C1, 96);
+    dbg_raw = mk_lbl(m, "", UI_FONT_14, C_BRIGHT, DBG_C1, 114);
+
+    mk_lbl(m, T(STR_DBG_BUS), UI_FONT_14, C_LABEL, DBG_C2, 96);
+    dbg_bus = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_C2, 114);
+
+    mk_lbl(m, T(STR_DBG_POLL), UI_FONT_14, C_LABEL, DBG_C2, 274);
+    dbg_poll = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_C2, 292);
+
+    dbg_perf_btn = mk_button(m, DBG_C3, 96, 260, 100, "", UI_FONT_20,
                              C_ACTUAL, dbg_perf_cb, NULL);
     dbg_perf_paint();
 
-    mk_lbl(m, T(STR_DBG_RAW), UI_FONT_14, C_LABEL, 30, 232);
-    dbg_raw = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, 30, 254);
+    mk_lbl(m, T(STR_DBG_MEM), UI_FONT_14, C_LABEL, DBG_C3, 214);
+    dbg_mem = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_C3, 232);
 
-    mk_lbl(m, T(STR_DBG_BUS), UI_FONT_14, C_LABEL, DBG_COL2, 96);
-    mk_lbl(m, T(STR_DBG_BUS_NA), UI_FONT_20, C_DEFICIT, DBG_COL2, 116);
-    char rows[192];
-    int at = 0;
-    for (int i = 0; i < DBG_BUS_ROWS; i++)
-        at += snprintf(rows + at, sizeof(rows) - (size_t)at, "%s  -\n",
-                       DBG_BUS_ROW[i]);
-    mk_lbl(m, rows, UI_FONT_16, C_LABEL, DBG_COL2, 150);
-
-    mk_lbl(m, T(STR_DBG_MEM), UI_FONT_14, C_LABEL, DBG_COL2, 322);
-    dbg_mem = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_COL2, 344);
+    /* Ulozeni do profilu a navrat do vychoziho stavu. Jsou vedle sebe
+     * pod pameti, protoze patri k sobe: jedno zapisuje to, co je prave
+     * nastavene, druhe to zahazuje. Levy sloupec je cely zabrany
+     * tabulkou hodnot, takze sem. */
+    dbg_save_btn = mk_button(m, DBG_C3, 356, 128, 100, "", UI_FONT_16,
+                             C_ACTUAL, dbg_save_cb, NULL);
+    dbg_btn_paint();
+    mk_button(m, DBG_C3 + 136, 356, 128, 100, T(STR_DBG_DEFAULT), UI_FONT_16,
+              C_DEFICIT, dbg_default_cb, NULL);
     dbg_paint();
 }
 
-/* ---------------- chrome ---------------- */
+/* ---------------------------------------------------------------------
+ * Sila signalu WiFi
+ *
+ * Pet carek, jak je zvykem z telefonu. Prevod z dBm je skokovy a
+ * prahy jsou tyhle:
+ *
+ *     >= -55 dBm   5 carek   silnejsi signal uz nic nezlepsi
+ *     >= -64 dBm   4
+ *     >= -73 dBm   3
+ *     >= -82 dBm   2
+ *     >= -90 dBm   1         posledni, co jeste drzi spojeni
+ *      < -90 dBm   0
+ *
+ * Proc zrovna takhle: -55 dBm je saturace - od te urovne vys uz se
+ * propustnost nezlepsuje, takze plny stav ma zacinat tam a ne u nuly.
+ * Pod -90 dBm spojeni na 2,4 GHz prakticky nestoji. Mezi temi dvema
+ * cisly je 35 dB a ty jsou rozdelene na ctyri stejne kroky po 9 dB.
+ * Devet decibelu je zhruba osminasobek vykonu - tedy rozdil, se kterym
+ * se da neco udelat (posunout desku, prejit blit k AP), coz je jediny
+ * duvod, proc carky vubec kreslit. Jemnejsi deleni by jen poskakovalo.
+ *
+ * Kresli se z obycejnych obdelniku, ne ze znaku fontu: Montserrat
+ * zadne takove znaky nema a jeden chybejici glyf znamena, ze LVGL
+ * tricetkrat za vterinu hlasi "glyph dsc. not found".
+ * ------------------------------------------------------------------- */
+#define WIFI_BARS    5
+#define WIFI_BAR_W   4
+#define WIFI_BAR_G   3
+#define WIFI_BAR_B   42                  /* spolecna spodni hrana */
+#define WIFI_BAR_H(i) (8 + (i) * 3)
+
+static lv_obj_t *wifi_bar[WIFI_BARS], *lbl_ssid;
+
+static int host_wifi_rssi(void)
+{
+    return (host && host->wifi_rssi) ? host->wifi_rssi() : 0;
+}
+
+static bool host_wifi_ap(void)
+{
+    return (host && host->wifi_ap) ? host->wifi_ap() : false;
+}
+
+static int wifi_bars_from_rssi(int rssi)
+{
+    static const int STEP[WIFI_BARS] = { -55, -64, -73, -82, -90 };
+
+    if (rssi == 0) return 0;            /* radic nic nehlasi */
+    for (int i = 0; i < WIFI_BARS; i++)
+        if (rssi >= STEP[i]) return WIFI_BARS - i;
+    return 0;
+}
+
+static void wifi_status_build(lv_obj_t *bar)
+{
+    for (int i = 0; i < WIFI_BARS; i++)
+        wifi_bar[i] = mk_shape(bar, TOP_WIFI_X + i * (WIFI_BAR_W + WIFI_BAR_G),
+                               WIFI_BAR_B - WIFI_BAR_H(i),
+                               WIFI_BAR_W, WIFI_BAR_H(i), 1, C_RULE);
+    lbl_ssid = mk_lbl(bar, "", UI_FONT_16, C_LABEL, TOP_SSID_X, 22);
+    lv_label_set_long_mode(lbl_ssid, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_ssid, TOP_TEMP_X - TOP_SSID_X - 12);
+}
+
+static void wifi_status_paint(void)
+{
+    if (!lbl_ssid) return;
+
+    bool ap = host_wifi_ap();
+    bool on = host_wifi_connected();
+    int  n  = (ap || !on) ? 0 : wifi_bars_from_rssi(host_wifi_rssi());
+
+    /* Pristupovy bod neni pripojeni k cizi siti, takze sila signalu v
+     * nem nic neznamena a carky zustanou tmave. */
+    lv_label_set_text(lbl_ssid, ap ? T(STR_WIFI_AP)
+                                   : (on ? host_wifi_ssid() : T(STR_NONE)));
+    lv_obj_set_style_text_color(lbl_ssid,
+        lv_color_hex((ap || on) ? C_BRIGHT : C_LABEL), 0);
+    for (int i = 0; i < WIFI_BARS; i++)
+        lv_obj_set_style_bg_color(wifi_bar[i],
+            lv_color_hex(i < n ? C_SAGE : C_RULE), 0);
+}
+
+/* ---------------------------------------------------------------------
+ * Sipky prenosu
+ *
+ * Dve sipky nad sebou: nahoru vysilame, dolu prijimame. Kresli se
+ * vektorem (lv_line), ne znakem - Montserrat sipky nema.
+ *
+ * Jsou o SBERNICI, ne o WiFi. Pro WiFi zadny skutecny zdroj dat nemame
+ * (Arduino citace bajtu nevystavuje) a blikat necim, co se nemeri, je
+ * presne to, co tahle aplikace delat nesmi. Citace ramcu CAN naopak
+ * mame a je to prave ten prenos, ktery clovek u diagnostiky hleda:
+ * dolni sipka rika, ze vuz mluvi, horni ze mluvime my. V listen-only
+ * zustane horni tmava vzdycky - a to je spravne, nic neposilame.
+ * ------------------------------------------------------------------- */
+#define XFER_W   18
+#define XFER_H   11
+#define XFER_LW  3
+
+static lv_obj_t *xfer_tx, *xfer_rx;
+static uint32_t xfer_rx_seen, xfer_tx_seen;    /* posledni stav citacu */
+static uint32_t xfer_rx_at, xfer_tx_at;        /* kdy se naposled zmenily */
+
+static lv_obj_t *mk_chevron(lv_obj_t *p, lv_coord_t x, lv_coord_t y, bool up)
+{
+    /* Body musi prezit cely beh - lv_line si je jen zapamatuje. */
+    static lv_point_t up_pts[3], dn_pts[3];
+    lv_point_t *pts = up ? up_pts : dn_pts;
+
+    pts[0].x = 0;          pts[0].y = up ? XFER_H : 0;
+    pts[1].x = XFER_W / 2; pts[1].y = up ? 0 : XFER_H;
+    pts[2].x = XFER_W;     pts[2].y = pts[0].y;
+
+    lv_obj_t *l = lv_line_create(p);
+    lv_line_set_points(l, pts, 3);
+    lv_obj_set_pos(l, x, y);
+    lv_obj_set_style_line_width(l, XFER_LW, 0);
+    lv_obj_set_style_line_rounded(l, true, 0);
+    lv_obj_set_style_line_color(l, lv_color_hex(C_RULE), 0);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    return l;
+}
+
+static void xfer_build(lv_obj_t *bar)
+{
+    xfer_tx = mk_chevron(bar, TOP_XFER_X, 14, true);
+    xfer_rx = mk_chevron(bar, TOP_XFER_X, 38, false);
+}
+
+/* Jak dlouho sipka sviti po poslednim ramci. Kratsi nez 200 ms uz oko
+ * nestihne, delsi by splynulo v trvale svetlo a prestalo by rozlisovat
+ * zivy provoz od toho, ktery prave skoncil. */
+#define XFER_HOLD_MS 300
+
+static void xfer_paint(uint32_t now)
+{
+    if (!xfer_tx) return;
+
+    const can_stats_t *cs = (host && host->can_stats) ? host->can_stats() : NULL;
+
+    if (cs) {
+        if (cs->rx != xfer_rx_seen) { xfer_rx_seen = cs->rx; xfer_rx_at = now; }
+        if (cs->tx != xfer_tx_seen) { xfer_tx_seen = cs->tx; xfer_tx_at = now; }
+    }
+    bool rx = cs && xfer_rx_at && (now - xfer_rx_at) < XFER_HOLD_MS;
+    bool tx = cs && xfer_tx_at && (now - xfer_tx_at) < XFER_HOLD_MS;
+
+    lv_obj_set_style_line_color(xfer_rx, lv_color_hex(rx ? C_SAGE : C_RULE), 0);
+    lv_obj_set_style_line_color(xfer_tx, lv_color_hex(tx ? C_ACTUAL : C_RULE), 0);
+}
+
+/* ---------------- horni lista ---------------- */
+
+/* Horni lista neni nadpis, je to STAVOVY RADEK. Zleva doprava:
+ *
+ *   carky + jmeno site   jsme na WiFi, a na ktere
+ *   teplota              jediny mereny udaj, ktery je videt porad
+ *   sipky                jede neco po sbernici, a kterym smerem
+ *   stav vozidla         jsou cisla na obrazovce z auta?
+ *   profil               ktery profil plati
+ *
+ * Slovo TALENTO odtud zmizelo. Jmeno vyrobku si clovek za jizdy
+ * precte jednou za zivot, kdezto tyhle ctyri veci potrebuje porad, a
+ * 110 px na nadpis byla ta nejdrazsi plocha na cele obrazovce.
+ * ------------------------------------------------------------------- */
 static void build_chrome(lv_obj_t *scr)
 {
     lv_obj_t *bar = mk_panel(scr, 0, 0, 800, TOP_H);
-    mk_lbl(bar, "TALENTO", UI_FONT_20, C_BRIGHT, 16, 20);
-    mk_lbl(bar, T(STR_TOP_TEMP), UI_FONT_14, C_LABEL, 320, 8);
-    lbl_temp = mk_lbl(bar, "--", UI_FONT_32, C_BRIGHT, 320, 24);
-    lbl_state = mk_lbl(bar, "DEMO", UI_FONT_16, C_DEFICIT, 560, 22);
+
+    wifi_status_build(bar);
+
+    mk_lbl(bar, T(STR_TOP_TEMP), UI_FONT_14, C_LABEL, TOP_TEMP_X, 8);
+    lbl_temp = mk_lbl(bar, VAL_NONE, UI_FONT_32, C_BRIGHT, TOP_TEMP_X, 24);
+
+    xfer_build(bar);
+
+    /* Misto drivejsiho natvrdo napsaneho DEMO: dva radky, ktere rikaji,
+     * jestli jsou cisla na obrazovce z auta. Nahore uroven pripojeni,
+     * pod ni stari nejmladsiho udaje od jednotky. */
+    lbl_state     = mk_lbl(bar, T(STR_LINK_NO_BUS), UI_FONT_16, C_DEFICIT,
+                           TOP_STATE_X, 8);
+    lbl_state_age = mk_lbl(bar, VAL_NONE, UI_FONT_14, C_LABEL,
+                           TOP_STATE_X, 32);
     prof_build(bar);
 
     /* Zadny panel: stejne pozadi jako obsah, zadny ramecek. Oddeluje
@@ -2467,10 +3387,20 @@ static void build_chrome(lv_obj_t *scr)
     lv_obj_set_style_border_width(rail, 0, 0);
     lv_obj_set_style_radius(rail, 0, 0);
     lv_obj_set_style_pad_all(rail, 0, 0);
-    /* Sloupec je ukazatel, ne ovladaci prvek. Na dotek nereaguje ani on,
-     * ani nic v nem, takze tah zacaty u praveho okraje je porad gesto
-     * obrazovky - a tam zacina svihnuti na dalsi stranku. */
-    lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    /* Sloupec je ukazatel, ale DA SE NA NEJ SAHNOUT: stisk ho oznaci,
+     * podrzeni prejde na stranku DPF, pohyb z toho udela obycejny tah.
+     * Lezi u praveho okraje, odkud tah na dalsi stranku zacina, takze
+     * ma EVENT_BUBBLE (tah dojde obrazovce) a obe obsluhy se ptaji
+     * was_drag(). Viz rail_press_cb() a spol. */
+    lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(rail, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(rail, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(rail, rail_press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(rail, rail_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(rail, rail_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(rail, rail_release_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(rail, drag_guard_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(rail, rail_click_cb, LV_EVENT_CLICKED, NULL);
 
     rail_rule = lv_obj_create(rail);
     lv_obj_set_pos(rail_rule, 0, 0);
@@ -2578,7 +3508,9 @@ static void build_chrome(lv_obj_t *scr)
     lv_obj_set_style_border_color(perf_lbl, lv_color_hex(C_RULE), 0);
     lv_obj_set_style_border_width(perf_lbl, 1, 0);
     lv_obj_set_style_pad_all(perf_lbl, 6, 0);
-    if (!perf_on) lv_obj_add_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+    /* Prekryv patri profilu, takze stav z NVS plati od prvniho snimku. */
+    perf_on = PROF.perf;
+    perf_apply();
     perf_paint();
 
     gest_hint_build();
@@ -2586,103 +3518,353 @@ static void build_chrome(lv_obj_t *scr)
 }
 
 /* ---------------- obnovovani ---------------- */
-static void sample(void)
+
+/* Stari udaje slovem. Do sta vterin i s desetinou, pak uz jen cele -
+ * po dvou minutach nikoho desetina nezajima a cislo by jen blikalo. */
+static void age_text(char *b, size_t n, uint32_t ms)
 {
-    sim_t += 0.05f;
-    v_speed.target    = 55 + 45 * sinf(sim_t * 0.35f);
-    v_rpm.target      = 1500 + 1300 * (0.5f + 0.5f * sinf(sim_t * 0.6f));
-    v_temp.target     = 86 + 2 * sinf(sim_t * 0.1f);
-    v_boost_sp.target = 1000 + 1700 * (0.5f + 0.5f * sinf(sim_t * 0.6f));
-    v_vnt.target      = 45 + 35 * (0.5f + 0.5f * sinf(sim_t * 0.6f));
-    v_rail.target     = 400 + 1600 * (0.5f + 0.5f * sinf(sim_t * 0.6f));
-    v_soot.target     = 876 + 120 * sinf(sim_t * 0.08f);
-    v_boost.target   += (v_boost_sp.target - v_boost.target) * 0.10f;
+    if (ms == UINT32_MAX)   snprintf(b, n, "%s", VAL_NONE);
+    else if (ms < 100000u)  snprintf(b, n, "%u.%u s", ms / 1000u,
+                                     (ms / 100u) % 10u);
+    else                    snprintf(b, n, "%u s", ms / 1000u);
 }
 
-void ui_tick(void)
+/* Stav pripojeni k vozidlu. Ctyri stavy, ne dva - rozdil mezi "nikdo
+ * neodpovida" a "neptam se" je to hlavni, co tam clovek hleda:
+ *
+ *   BEZ SBERNICE  cervene   nic nejezdi; vypnute zapalovani, spatna
+ *                           rychlost, prohozene piny, deska na stole
+ *   POSLOUCHAM    jantarove sbernice zije, ale jsme jen posluchac, takze
+ *                           cisla na obrazovce nemuzou byt ziva
+ *   BEZ ODPOVEDI  cervene   ptame se a nikdo neodpovida
+ *   JEDNOTKA      zelene    jednotka odpovida, cisla jsou z auta
+ *
+ * Pod tim stari nejmladsiho udaje. Dokud neni ani jeden, jsou tam
+ * pomlcky - nula by tvrdila, ze prave ted neco prislo. */
+static void link_state_paint(void)
 {
-    uint32_t now = lv_tick_get();
-    if (now - last_sample >= 50) {
-        last_sample = now;
-        sample();
-        lv_chart_set_next_value(chart, ser_sp, (lv_coord_t)v_boost_sp.target);
-        lv_chart_set_next_value(chart, ser_act, (lv_coord_t)v_boost.target);
+    diag_link_state_t ls = dp ? diag_link_state(diag_poller_link(dp))
+                              : DIAG_LINK_DOWN;
+    bool armed = dp && diag_poller_armed(dp);
+    int  s;
+    uint32_t c;
+
+    if (ls == DIAG_LINK_ECU) {
+        s = STR_LINK_ECU;    c = C_SAGE;
+    } else if (ls == DIAG_LINK_DOWN) {
+        s = STR_LINK_NO_BUS; c = C_DEFICIT;
+    } else if (armed) {
+        s = STR_LINK_NO_ECU; c = C_DEFICIT;
+    } else {
+        s = STR_LINK_LISTEN; c = C_ACTUAL;
     }
-    approach(&v_speed, .25f); approach(&v_rpm, .25f); approach(&v_temp, .10f);
-    approach(&v_boost, .30f); approach(&v_boost_sp, .30f);
-    approach(&v_vnt, .25f);   approach(&v_rail, .25f); approach(&v_soot, .05f);
+    lv_label_set_text(lbl_state, T(s));
+    lv_obj_set_style_text_color(lbl_state, lv_color_hex(c), 0);
 
-    float sp = cfg.mph ? v_speed.shown * 0.621371f : v_speed.shown;
-    float tp = cfg.fahrenheit ? v_temp.shown * 1.8f + 32.0f : v_temp.shown;
-    lv_label_set_text_fmt(lbl_temp, "%d", (int)tp);
+    char age[16];
+    age_text(age, sizeof(age), dp ? diag_poller_fresh_ms(dp) : UINT32_MAX);
+    lv_label_set_text(lbl_state_age, age);
+}
 
-    /* ----- pravy sloupec: nasyceni DPF a stav regenerace ----- */
-    int soot = (int)v_soot.shown;
+/* Cely stavovy radek jednim volanim, at se jeho casti nemuzou rozejit. */
+static void status_bar_paint(uint32_t now)
+{
+    wifi_status_paint();
+    xfer_paint(now);
+    link_state_paint();
+}
+
+/* Pravy sloupec: nasyceni filtru a bezici regenerace. Bez prectenych
+ * sazi se vypln vubec nekresli - prazdny obrys s pomlckami znamena
+ * "nevim", kdezto vypln na nule by znamenala "nula gramu". */
+static void rail_paint(uint32_t now)
+{
+    bool has = ch_has(DIAG_CH_SOOT);
+    int  soot = has ? (int)(ch_val(DIAG_CH_SOOT) * 100.0f) : 0;
     uint32_t sc = soot > 1800 ? C_DEFICIT : (soot > 1200 ? C_ACTUAL : C_SAGE);
     uint32_t bg = C_INK;
 
-    if (regen_state != UI_REGEN_OFF) {
-        uint32_t el = now - regen_since;
-        bg = C_REGEN_DIM;               /* pokus o spusteni: jen podkres */
-        if (regen_state == UI_REGEN_ACTIVE) {
-            if (regen_demo == 3) {      /* rucni ukazka misto dat z CAN */
-                /* Cas se orezava PRED nasobenim: el * 100 pretece po
-                 * necelych dvanacti hodinach a orez az na vysledku by
-                 * to nezachranil - vypln by skocila na nahodnou uroven,
-                 * ktera vypada jako namerene cislo. Prepinac zapnuty
-                 * pres noc je presne to pouziti, pro ktere existuje. */
-                uint32_t t = el > RGN_SIM_MS ? RGN_SIM_MS : el;
-                regen_pct = (int)(t * 100 / RGN_SIM_MS);
-            }
-            int done = regen_pct;
-            if (done < 0) {
-                int step = (int)(el / RGN_STEP_MS);
-                done = (step > 4 ? 4 : step) * 20;
-            } else if (done > 100) done = 100;
-            soot = (int)(regen_soot0 * (float)(100 - done) / 100.0f);
-            sc = C_DEFICIT;
-            if ((el / RGN_BLINK_MS) & 1) bg = C_REGEN_HOT;
-        }
+    if (regen_on()) {
+        sc = C_DEFICIT;
+        bg = ((now / RGN_BLINK_MS) & 1u) ? C_REGEN_HOT : C_REGEN_DIM;
     }
     if (bg != rail_bg_shown) {          /* prekreslovat jen pri zmene */
         rail_bg_shown = bg;
         lv_obj_set_style_bg_color(rail, lv_color_hex(bg), 0);
     }
     lv_bar_set_value(rail_bar, soot, LV_ANIM_OFF);
-    lv_label_set_text_fmt(rail_val, "%d.%d", soot / 100, (soot / 10) % 10);
+    lv_obj_set_style_bg_opa(rail_bar, has ? LV_OPA_COVER : LV_OPA_TRANSP,
+                            LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(rail_bar, lv_color_hex(sc), LV_PART_INDICATOR);
-    lv_obj_set_style_text_color(rail_val, lv_color_hex(sc), 0);
+    val_fmt(rail_val, DIAG_CH_SOOT, sc, "%d.%d", soot / 100, (soot / 10) % 10);
+
+    /* Delici linka sloupce je zaroven odezva na dotek a ukazatel
+     * postupu podrzeni. Tri podoby, viz komentar u rail_press_cb():
+     * vlasova v klidu, modra rostouci pri drzeni, modra cela po
+     * tuknuti. Prekresluje se jen pri zmene vysky nebo barvy - kazdy
+     * snimek by to byla prace pro nic. */
+    lv_coord_t h = 0;
+
+    if (rail_hold_live) {
+        uint32_t el = now - rail_press_at;
+        if (el > RAIL_HOLD_MS) el = RAIL_HOLD_MS;
+        h = (lv_coord_t)((uint32_t)PAGE_H * el / RAIL_HOLD_MS);
+        if (h < 2) h = 2;           /* at je oznaceni videt hned */
+    } else if ((int32_t)(rail_flash_until - now) > 0) {
+        h = PAGE_H;
+    }
+
+    if (h != rail_rule_h) {
+        rail_rule_h = h;
+        /* Roste odspodu nahoru: zacatek u palce, ktery drzi, a smer
+         * nahoru je tentyz jako u vyplne sazi vedle. */
+        lv_obj_set_size(rail_rule, h ? 3 : 1, h ? h : PAGE_H);
+        lv_obj_set_pos(rail_rule, 0, h ? PAGE_H - h : 0);
+        lv_obj_set_style_bg_color(rail_rule,
+            lv_color_hex(h ? C_DEMAND : C_RULE), 0);
+    }
+}
+
+static void dtc_tags(char *b, int n, uint8_t st)
+{
+    int at = 0;
+
+    b[0] = '\0';
+    if (st & UDS_DTC_CONFIRMED)    at = str_add(b, at, n, "%s ", T(STR_DTC_CONF));
+    if (st & UDS_DTC_FAILED_CYCLE) at = str_add(b, at, n, "%s ", T(STR_DTC_CYCLE));
+    if (st & UDS_DTC_PENDING)      at = str_add(b, at, n, "%s ", T(STR_DTC_PEND));
+    if (st & UDS_DTC_WARNING)      str_add(b, at, n, "%s", T(STR_DTC_LAMP));
+}
+
+static int rec_str(uint8_t kind)
+{
+    switch (kind) {
+    case DIAG_REC_ODO_AT:     return STR_REC_ODO_AT;
+    case DIAG_REC_AGING:      return STR_REC_AGING;
+    case DIAG_REC_COUNT:      return STR_REC_COUNT;
+    case DIAG_REC_ODO_HEALED: return STR_REC_ODO_HEALED;
+    case DIAG_REC_DIST_WITH:  return STR_REC_DIST_WITH;
+    default:                  return STR_REC_ODO_FIRST;
+    }
+}
+
+static void dtc_paint(void)
+{
+    if (!dtc_head) return;
+
+    uint16_t n = dp ? diag_poller_dtc_count(dp) : 0u;
+    int sel = dp ? diag_poller_dtc_selected(dp) : -1;
+    char b[192];
+
+    /* Hlavicka. "Zadna chyba" se smi napsat az po odpovedi jednotky -
+     * prazdny seznam a neprectena pamet vypadaji stejne jen tomu, kdo
+     * se neptal. */
+    if (!dp || !diag_poller_dtc_known(dp)) {
+        bool ecu = dp && diag_link_state(diag_poller_link(dp)) == DIAG_LINK_ECU;
+        lv_label_set_text(dtc_head, T(ecu ? STR_DTC_UNREAD : STR_NO_CAN));
+        lv_obj_set_style_text_color(dtc_head, lv_color_hex(C_LABEL), 0);
+    } else if (n == 0u) {
+        lv_label_set_text(dtc_head, T(STR_DTC_NONE));
+        lv_obj_set_style_text_color(dtc_head, lv_color_hex(C_SAGE), 0);
+    } else {
+        snprintf(b, sizeof(b), T(STR_DTC_SOME), (unsigned)n);
+        lv_label_set_text(dtc_head, b);
+        lv_obj_set_style_text_color(dtc_head, lv_color_hex(C_DEFICIT), 0);
+    }
+
+    val_fmt(dtc_odo, DIAG_CH_ODO, C_LABEL, "%s %u", T(STR_ODOMETER),
+            (unsigned)ch_val(DIAG_CH_ODO));
+
+    for (int i = 0; i < DTC_ROWS; i++) {
+        const diag_dtc_t *d = dp ? diag_poller_dtc_at(dp, (uint16_t)i) : NULL;
+
+        if (!d) {
+            lv_obj_add_flag(dtc_row[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_clear_flag(dtc_row[i], LV_OBJ_FLAG_HIDDEN);
+
+        char code[12], tags[96];
+        diag_dtc_text(d->dtc, code, sizeof(code));
+        dtc_tags(tags, (int)sizeof(tags), d->status);
+        snprintf(b, sizeof(b), "%s\n%s", code, tags);
+        lv_label_set_text(lv_obj_get_child(dtc_row[i], 0), b);
+        lv_obj_set_style_border_color(dtc_row[i],
+            lv_color_hex(i == sel ? C_DEFICIT : C_RULE), 0);
+    }
+
+    if (n > DTC_ROWS) {
+        snprintf(b, sizeof(b), T(STR_DTC_SHOWN), (unsigned)DTC_ROWS);
+        lv_label_set_text(dtc_hint, b);
+    } else {
+        lv_label_set_text(dtc_hint, T(STR_DTC_TAP));
+    }
+
+    /* Detail vybrane chyby. */
+    if (sel < 0) {
+        lv_label_set_text(dtc_ext, "");
+        lv_label_set_text(dtc_ff, "");
+        return;
+    }
+    int at = 0;
+    if (!diag_poller_rec_known(dp)) {
+        str_add(b, 0, (int)sizeof(b), "%s", T(STR_DTC_WAIT));
+    } else if (diag_poller_rec_count(dp) == 0u) {
+        str_add(b, 0, (int)sizeof(b), "%s", T(STR_DTC_EMPTY));
+    } else {
+        for (uint8_t i = 0; i < diag_poller_rec_count(dp); i++) {
+            const diag_rec_t *r = diag_poller_rec_at(dp, i);
+
+            at = r->unset
+                 ? str_add(b, at, (int)sizeof(b), "%s %s\n",
+                           T(rec_str(r->kind)), T(STR_REC_UNSET))
+                 : str_add(b, at, (int)sizeof(b), "%s %u\n",
+                           T(rec_str(r->kind)), r->val);
+        }
+    }
+    lv_label_set_text(dtc_ext, b);
+
+    at = 0;
+    if (!diag_poller_ff_known(dp)) {
+        str_add(b, 0, (int)sizeof(b), "%s", T(STR_DTC_WAIT));
+    } else if (diag_poller_ff_count(dp) == 0u) {
+        str_add(b, 0, (int)sizeof(b), "%s", T(STR_DTC_EMPTY));
+    } else {
+        for (uint8_t i = 0; i < diag_poller_ff_count(dp); i++) {
+            const diag_ff_t *f = diag_poller_ff_at(dp, i);
+
+            at = str_add(b, at, (int)sizeof(b), "%-9s %d\n",
+                         CH_NAME[f->ch], (int)f->val);
+        }
+    }
+    lv_label_set_text(dtc_ff, b);
+}
+
+static void dpf_paint(void)
+{
+    val_fmt(lbl_dpf[0], DIAG_CH_DPF_UP, C_ACTUAL, "%d",
+            (int)ch_val(DIAG_CH_DPF_UP));
+    val_fmt(lbl_dpf[1], DIAG_CH_DPF_DN, C_ACTUAL, "%d",
+            (int)ch_val(DIAG_CH_DPF_DN));
+    val_fmt(lbl_dpf[2], DIAG_CH_DPF_SP, C_DEMAND, "%d",
+            (int)ch_val(DIAG_CH_DPF_SP));
+    int soot = (int)(ch_val(DIAG_CH_SOOT) * 100.0f);
+    val_fmt(lbl_dpf[3], DIAG_CH_SOOT, C_ACTUAL, "%d.%d",
+            soot / 100, (soot / 10) % 10);
+    int load = (int)(ch_val(DIAG_CH_CSF_LOAD) * 10.0f);
+    val_fmt(lbl_dpf[4], DIAG_CH_CSF_LOAD, C_ACTUAL, "%d.%d",
+            load / 10, load % 10);
+    val_fmt(lbl_dpf[5], DIAG_CH_RGN_END, C_ACTUAL, "%d",
+            (int)(ch_val(DIAG_CH_RGN_END) / 60.0f));
+
+    if (!ch_has(DIAG_CH_RGN_DUR)) {
+        lv_label_set_text(lbl_regen, VAL_NONE);
+        lv_obj_set_style_text_color(lbl_regen, lv_color_hex(C_LABEL), 0);
+    } else if (regen_on()) {
+        lv_label_set_text_fmt(lbl_regen, "%s %d s", T(STR_REGEN_RUN),
+                              (int)ch_val(DIAG_CH_RGN_DUR));
+        lv_obj_set_style_text_color(lbl_regen, lv_color_hex(C_DEFICIT), 0);
+    } else {
+        lv_label_set_text(lbl_regen, T(STR_REGEN_OFF));
+        lv_obj_set_style_text_color(lbl_regen, lv_color_hex(C_LABEL), 0);
+    }
+}
+
+void ui_tick(void)
+{
+    uint32_t now = lv_tick_get();
+
+    vals_step();
+    status_bar_paint(now);
+
+    /* Graf plnici tlaku je casova osa, ne seznam poslednich hodnot:
+     * bod se pridava kazdych DIAG_FAST_MS bez ohledu na to, jestli
+     * neco prislo. Kdyz jednotka prestane odpovidat, prazdne body
+     * posunou caru pryc a je na prvni pohled videt dira - zmrzla cara
+     * by vypadala jako ustaleny stav. */
+    static uint32_t chart_at = 0;
+    if (now - chart_at >= DIAG_FAST_MS) {
+        chart_at = now;
+        bool ok = ch_show(DIAG_CH_BOOST) == DIAG_SHOW_LIVE &&
+                  ch_show(DIAG_CH_BOOST_SP) == DIAG_SHOW_LIVE;
+        lv_chart_set_next_value(chart, ser_sp, ok ?
+            (lv_coord_t)diag_poller_value(dp, DIAG_CH_BOOST_SP)
+            : LV_CHART_POINT_NONE);
+        lv_chart_set_next_value(chart, ser_act, ok ?
+            (lv_coord_t)diag_poller_value(dp, DIAG_CH_BOOST)
+            : LV_CHART_POINT_NONE);
+    }
+
+    float tp = cfg.fahrenheit ? ch_val(DIAG_CH_COOLANT) * 1.8f + 32.0f
+                              : ch_val(DIAG_CH_COOLANT);
+    val_fmt(lbl_temp, DIAG_CH_COOLANT, C_BRIGHT, "%d", (int)tp);
+
+    rail_paint(now);
 
     switch (cur_page) {
-    case PG_HLAVNI:
-        lv_arc_set_value(arc_speed, (int)sp);
-        lv_arc_set_value(arc_rpm, (int)v_rpm.shown);
-        lv_label_set_text_fmt(lbl_speed_v, "%d", (int)sp);
-        lv_label_set_text_fmt(lbl_rpm_v, "%d", (int)v_rpm.shown);
-        break;
-    case PG_MOTOR:
-        lv_arc_set_value(arc_boost, (int)v_boost.shown);
-        lv_label_set_text_fmt(lbl_boost, "%d", (int)v_boost.shown);
-        lv_label_set_text_fmt(lbl_boost_sp, "%d", (int)v_boost_sp.shown);
-        lv_label_set_text_fmt(lbl_vnt, "%d %%", (int)v_vnt.shown);
-        lv_label_set_text_fmt(lbl_railp, "%d", (int)v_rail.shown);
-        break;
-    case PG_TLAK: {
-        int gap = (int)(v_boost_sp.shown - v_boost.shown);
-        lv_label_set_text_fmt(lbl_gap, "%d", gap);
-        lv_obj_set_style_text_color(lbl_gap,
-            lv_color_hex(gap > 300 ? C_DEFICIT : C_SAGE), 0);
+    case PG_HLAVNI: {
+        float sp = cfg.mph ? ch_val(DIAG_CH_SPEED) * 0.621371f
+                           : ch_val(DIAG_CH_SPEED);
+        lv_arc_set_value(arc_speed, ch_has(DIAG_CH_SPEED) ? (int)sp : 0);
+        lv_arc_set_value(arc_rpm, ch_has(DIAG_CH_RPM)
+                                  ? (int)ch_val(DIAG_CH_RPM) : 0);
+        val_fmt(lbl_speed_v, DIAG_CH_SPEED, C_ACTUAL, "%d", (int)sp);
+        val_fmt(lbl_rpm_v, DIAG_CH_RPM, C_DEMAND, "%d",
+                (int)ch_val(DIAG_CH_RPM));
         break; }
-    case PG_NASTAV:
-        lv_label_set_text_fmt(lbl_heap, "heap %u kB   PSRAM %u kB   %s",
-            host_heap_kb(), host_psram_kb(), host_wifi_ip());
-        if (host_wifi_connected()) {
-            lv_label_set_text(lbl_wifi, host_wifi_ssid());
-            lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(C_SAGE), 0);
+    case PG_MOTOR:
+        lv_arc_set_value(arc_boost, ch_has(DIAG_CH_BOOST)
+                                    ? (int)ch_val(DIAG_CH_BOOST) : 800);
+        val_fmt(lbl_boost, DIAG_CH_BOOST, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_BOOST));
+        val_fmt(lbl_boost_sp, DIAG_CH_BOOST_SP, C_DEMAND, "%d",
+                (int)ch_val(DIAG_CH_BOOST_SP));
+        val_fmt(lbl_vnt, DIAG_CH_VNT, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_VNT));
+        val_fmt(lbl_railp, DIAG_CH_RAIL, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_RAIL));
+        val_fmt(lbl_rail_sp, DIAG_CH_RAIL_SP, C_DEMAND, "%d",
+                (int)ch_val(DIAG_CH_RAIL_SP));
+        val_fmt(lbl_maf, DIAG_CH_MAF, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_MAF));
+        val_fmt(lbl_maf_sp, DIAG_CH_MAF_SP, C_DEMAND, "%d",
+                (int)ch_val(DIAG_CH_MAF_SP));
+        val_fmt(lbl_egr, DIAG_CH_EGR, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_EGR));
+        val_fmt(lbl_iat, DIAG_CH_IAT, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_IAT));
+        break;
+    case PG_TLAK:
+        /* Schodek ma smysl jen z dvojice, kterou mame OBOU. Jedna
+         * chybejici hodnota znamena, ze schodek nikdo nezmeril. */
+        if (ch_has(DIAG_CH_BOOST) && ch_has(DIAG_CH_BOOST_SP)) {
+            int gap = (int)(ch_val(DIAG_CH_BOOST_SP) - ch_val(DIAG_CH_BOOST));
+            bool fresh = ch_show(DIAG_CH_BOOST) == DIAG_SHOW_LIVE &&
+                         ch_show(DIAG_CH_BOOST_SP) == DIAG_SHOW_LIVE;
+            lv_label_set_text_fmt(lbl_gap, "%d", gap);
+            lv_obj_set_style_text_color(lbl_gap, lv_color_hex(
+                !fresh ? C_LABEL : (gap > 300 ? C_DEFICIT : C_SAGE)), 0);
         } else {
-            lv_label_set_text(lbl_wifi, T(STR_WIFI_NOT_CONN));
-            lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(C_LABEL), 0);
+            lv_label_set_text(lbl_gap, VAL_NONE);
+            lv_obj_set_style_text_color(lbl_gap, lv_color_hex(C_LABEL), 0);
         }
+        break;
+    case PG_CHYBY:
+        dtc_paint();
+        break;
+    case PG_DPF:
+        dpf_paint();
+        break;
+    case PG_NASTAV:
+        /* Jmeno site uz nese tlacitko WIFI, takze radek pod nim rika
+         * to, co se na tlacitko nevejde: adresu a pamet. */
+        lv_label_set_text(lbl_wifi, host_wifi_ip());
+        lv_obj_set_style_text_color(lbl_wifi,
+            lv_color_hex(host_wifi_connected() ? C_SAGE : C_LABEL), 0);
+        lv_label_set_text_fmt(lbl_heap, "heap %u kB   PSRAM %u kB",
+                              host_heap_kb(), host_psram_kb());
+        wifi_btn_paint();
+        if (btn_canmode) canmode_btn_paint();
         break;
     }
 
@@ -2697,18 +3879,25 @@ void ui_tick(void)
         if (now - nav_shown_ms > NAV_IDLE_MS) set_nav_state(0);
     }
 
-    /* Zhasinani displeje po necinnosti. lv_disp_get_inactive_time pocita
-     * od posledni akce uzivatele, takze resi probuzeni i usnuti jednim
-     * merenim. Kdyz jde jas regulovat, zhasnuti zacina pulvterinovym
-     * stahnutim jasu (blank_begin/blank_step) a teprve pak padne panel;
-     * probuzeni je naopak okamzite, bez jakehokoli prejezdu. */
+    /* Ztlumeni po necinnosti. lv_disp_get_inactive_time pocita od
+     * posledni akce uzivatele, takze resi probuzeni i ztlumeni jednim
+     * merenim.
+     *
+     * Tri stavy, ktere se nesmi plest: panel vypnuty (to udelal clovek
+     * tlacitkem ZHASNOUT DISPLEJ), ztlumeny, a plny jas. Dotek vraci
+     * vzdycky na plny jas, jen z vypnuteho panelu az po ochranne
+     * lhute - jinak by displej probudil tentyz dotek, kterym se
+     * zhasinalo. */
     uint32_t idle = lv_disp_get_inactive_time(NULL);
-    if (idle < 300 && (!backlight_on || bl_fading)) {
-        /* ochranna lhuta po rucnim zhasnuti - jinak by displej probudil
-         * tentyz dotek, kterym se zhasinalo */
-        if (now - blank_guard_ms > 1500) backlight(true);
-    } else if (PROF.blank_s && backlight_on && idle > PROF.blank_s * 1000UL) {
-        blank_begin();
+    if (idle < 300) {
+        if (!backlight_on) {
+            if (now - blank_guard_ms > 1500) backlight(true);
+        } else {
+            dim_end();
+        }
+    } else if (PROF.dim_s && backlight_on && !bl_dimmed && !bl_fading &&
+               idle > PROF.dim_s * 1000UL) {
+        dim_begin();
     }
     bl_step();
 }
@@ -2755,13 +3944,4 @@ void ui_build(void)
      * do nastaveni. Deska uz PWM nastavenou ma, tohle do ni jen posle
      * ulozenou uroven prislusneho rezimu. */
     bl_apply();
-
-    /* Jen pri prvni stavbe. Po zmene jazyka se UI stavi znovu a namerene
-     * hodnoty si musi zustat tam, kde byly - jinak by plnici tlak skocilo
-     * zpatky na vychozi a graf by melo zub. */
-    static bool first = true;
-    if (first) {
-        first = false;
-        v_boost.shown = v_boost.target = 1000;
-    }
 }

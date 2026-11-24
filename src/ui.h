@@ -6,10 +6,10 @@
  * Vse, co umi jen deska, se predava pres ui_host_t. Simulator necha
  * ukazatele NULL a ui.c to musi snest.
  *
- * Vyjimka je can/twai.h: je to cisty C bez ESP-IDF (to je az v
- * twai.c), takze se prelozi i na hostiteli. Bere se z nej jen typ
- * can_stats_t - vlastni citace chodi pres ukazatel v ui_host_t, aby UI
- * nemusela znat zadnou funkci z CAN.
+ * Vyjimka jsou can/twai.h a diag/poller.h: oba jsou cisty C bez ESP-IDF
+ * (to je az v twai.c), takze se prelozi i na hostiteli. Z prvniho se
+ * bere typ can_stats_t, z druheho cely pristup k namerenym hodnotam -
+ * UI se pta vrstvy diagnostiky, ne vozidla, a nezna jediny DID.
  *
  * Pozn.: fonty UI maji ceskou i nemeckou diakritiku, viz src/font_ui.h.
  */
@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include "can/twai.h"
+#include "diag/poller.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,9 +55,26 @@ extern "C" {
 
 enum { UI_PROF_SHOP = 0, UI_PROF_DAY, UI_PROF_NIGHT };
 
+/* ---------------------------------------------------------------------
+ * Co profil drzi.
+ *
+ * ZTLUMENI, NE ZHASNUTI. Drive se displej po case cely zhasl. Zhasly
+ * displej za jizdy nic nerika - clovek nevi, jestli deska bezi, a
+ * musi na ni sahnout, aby se to dozvedel. Ztlumeny displej je porad
+ * citelny, v noci dokonce prijemnejsi, a pritom neoslnuje. Zustava
+ * jen RUCNI vypnuti (tlacitko ZHASNOUT DISPLEJ), protoze to je jedina
+ * cesta k uplne tme a pouziva se pri mereni na ploskach.
+ *
+ * Deska BEZ dratku z GPIO6 na plosku BL stmivat neumi (ui_host_t
+ * .bl_set_percent == NULL). Tam zustava drivejsi chovani, tedy
+ * zhasnuti, a UI u toho rekne proc - nabidnout uroven ztlumeni na
+ * desce, ktera zna jen zap/vyp, by byl slib naprazdno.
+ * ------------------------------------------------------------------- */
 typedef struct {
     int      bright;        /* jas 0..100 % */
-    uint32_t blank_s;       /* zhasnout po tolika vterinach; 0 = nikdy */
+    uint32_t dim_s;         /* ztlumit po tolika vterinach; 0 = nikdy */
+    int      dim_bright;    /* na jakou uroven ztlumit, 0..100 % */
+    bool     perf;          /* prekryv s FPS a pameti, viz dlazdice DEBUG */
 } ui_profile_t;
 
 typedef struct {
@@ -92,6 +110,16 @@ typedef struct {
     const char *(*wifi_ssid)(void);         /* "" kdyz nepripojeno */
     const char *(*wifi_ip)(void);           /* "" kdyz nepripojeno */
 
+    /* Sila signalu v dBm, jak ji hlasi radic. Kresli se z ni carky ve
+     * stavovem radku. NULL nebo hodnota 0 znamena "nevim" - carky pak
+     * nesviti vubec, misto aby predstiraly plny signal.
+     *
+     * wifi_ap() rika, jestli deska bezi jako pristupovy bod. To neni
+     * pripojeni k cizi siti, takze sila signalu v tom rezimu nic
+     * neznamena a stavovy radek misto carek napise, ze je to AP. */
+    int  (*wifi_rssi)(void);
+    bool (*wifi_ap)(void);
+
     /* Zapamatovane site. Hesla drzi deska, UI je nikdy nevidi - jen se
      * pta, jestli uz sit zna, a rekne, kterou pouzit nebo zapomenout.
      * wifi_connect() ulozeni obstara sam, takze dalsi funkce na to neni. */
@@ -111,6 +139,18 @@ typedef struct {
      * CAN nema a UI nulovani citacu vubec nenabidne. */
     const can_stats_t *(*can_stats)(void);
     void               (*can_stats_reset)(void);
+
+    /* Rezim sbernice. Po startu je radic v listen-only a dotaz je
+     * odeslani, takze bez prepnuti do normalniho rezimu se nic neprecte.
+     * Prepnuti je VEDOME rozhodnuti uzivatele, nikdy ne vychozi stav:
+     * v normalnim rezimu deska na cizi sbernici vysila.
+     *
+     * NULL u kterekoliv z dvojice znamena, ze deska CAN nema nebo rezim
+     * prepnout neumi - UI pak prepinani vubec nenabidne a netvari se,
+     * ze jde. set_normal() vraci false, kdyz se rezim nepodarilo zmenit;
+     * radic v tom pripade zustava tam, kde byl. */
+    bool (*can_is_normal)(void);
+    bool (*can_set_normal)(bool normal);
 
     /* Restart desky. NULL = deska restartovat neumi, tlacitko nevznikne. */
     void (*reboot)(void);
@@ -155,21 +195,22 @@ void        ui_show_page(int i);
 const char *ui_page_name(int i);
 
 /* ---------------------------------------------------------------------
- * Stav regenerace DPF.
+ * Vrstva diagnostiky.
  *
- * Kresli se na pravy sloupec, ktery je videt na kazde strance. Dokud
- * neni CAN, prepina stav rucne stranka DPF; az bude, zavola tohle
- * diagnostika podle odpovedi jednotky (31 03 02 0D status, DID 2487).
- * percent < 0 znamena, ze jednotka postup nehlasi - UI si ho nevymysli
- * a ubyva po hrubych krocich, aby bylo poznat, ze je to odhad.
+ * Odsud bere UI vsechny namerene hodnoty i stav pripojeni. Ukazatel
+ * musi prezit cely beh; NULL znamena, ze deska diagnostiku nema - UI
+ * pak nikde neukaze zadne cislo, protoze zadne nema.
+ *
+ * Neni const: UI vrstve hlasi, ktera stranka je prave videt
+ * (diag_poller_set_view), a na strance chyb vybira zaznam, ke kteremu
+ * se maji docist 19 04 a 19 06.
+ *
+ * Stav regenerace DPF si UI odvozuje samo z kanalu DIAG_CH_RGN_DUR -
+ * drive to byl rucni prepinac, protoze nebylo odkud cist. Spusteni
+ * regenerace je zapis (31 01 02 0D) a ten do tohoto obrazu nepatri,
+ * viz docs/safety.md.
  * ------------------------------------------------------------------- */
-typedef enum {
-    UI_REGEN_OFF = 0,       /* nic nebezi */
-    UI_REGEN_REQUESTED,     /* odeslano, jednotka jeste nepotvrdila */
-    UI_REGEN_ACTIVE,        /* regenerace bezi */
-} ui_regen_t;
-
-void ui_set_regen_state(ui_regen_t state, int percent);
+void ui_set_diag(diag_poller_t *p);
 
 #ifdef __cplusplus
 }

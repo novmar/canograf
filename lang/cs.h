@@ -24,6 +24,12 @@ static const char *const LANG_CS[] = {
 
     /* horni lista */
     "CHLADICÍ KAPALINA",
+    "BEZ SBĚRNICE",
+    "POSLOUCHÁM",
+    "BEZ ODPOVĚDI",
+    "JEDNOTKA",
+    "žádná",
+    "AP",
 
     /* hlavni stranka */
     "ot/min",
@@ -31,7 +37,7 @@ static const char *const LANG_CS[] = {
     /* stranka motoru */
     "PLNICÍ TLAK",
     "ŽÁDÁNO",
-    "simulovaná data",
+    "NASÁVANÝ VZDUCH C",
 
     /* stranka s grafem tlaku */
     "SCHODEK mbar",
@@ -40,35 +46,81 @@ static const char *const LANG_CS[] = {
 
     /* stranka chyb */
     "Bez připojení na CAN",
-    "19 02 FF    seznam všech kódů",
-    "19 02 01    jen to, co právě selhává",
-    "19 04       freeze frame",
-    "19 06       km a počet výskytů",
+    "paměť chyb nepřečtena",
+    "žádná uložená chyba",
+    "chyb: %u",
+    "zobrazeno prvních %u",
+    "ťuknutím na chybu se načtou záznamy",
+    "POTVRZENÁ",
+    "V TOMTO CYKLU",
+    "ČEKÁ",
+    "KONTROLKA",
+    "ROZŠÍŘENÉ ZÁZNAMY",
+    "FREEZE FRAME",
+    "čtu...",
+    "jednotka k ní nic nemá",
+    "TACHOMETR km",
+    "tachometr při výskytu",
+    "čítač stárnutí",
+    "počet výskytů",
+    "tachometr při vymizení",
+    "ujeto se závadou",
+    "tachometr při prvním",
+    "nenastaveno",
 
     /* stranka DPF */
-    "TEPLOTA PŘED",
-    "TEPLOTA ZA",
-    "SPUSTIT REGENERACI",
-    "zatím bez vozidla",
-    "Regenerace DPF",
-    "Vozidlo není připojeno.\n\nAž bude, tohle tlačítko odešle "
-    "31 01 02 0D. Teplota výfuku přitom překročí 600 C. Jen na "
-    "stojícím voze venku, se zahřátým motorem, a nesmí se přerušit.",
-    "STAV REGENERACE",
-    "VYPNUTO",
-    "ODESLÁNO",
-    "BĚŽÍ",
-    "BĚŽÍ %",
+    "TEPLOTA PŘED C",
+    "TEPLOTA ZA C",
+    "CÍL C",
+    "SAZE g",
+    "ZATÍŽENÍ g",
+    "OD POSLEDNÍ REGENERACE",
+    "Spuštění regenerace je zápis do jednotky (31 01 02 0D). Tenhle "
+    "obraz umí jen číst, takže tu tlačítko není - viz docs/safety.md.",
+    "REGENERACE",
+    "neběží",
+    "běží",
 
     /* nastaveni */
     "RYCHLOST",
     "TEPLOTA",
-    "ZHASNOUT PO",
+    "ZTLUMIT PO",
     "JAS",
     "PROFIL",
     "JAZYK",
     "ÚDRŽBA",
     "nikdy",
+
+    /* ztlumeni po necinnosti */
+    "Ztlumení po nečinnosti",
+    "PO",
+    "NA",
+    "Tato deska stmívat neumí - chybí drátek z GPIO6 na plošku BL, takže po této době místo ztlumení zhasne.",
+    "zhasne",
+
+    /* drátek na stmívání jde dodělat; konstatování, ne doporučení */
+    "JDE\nDODĚLAT",
+    "Stmívání jde dodělat",
+    "Jeden drátek z GPIO6 na plošku BL vedle konektoru LCD pásku. "
+    "Nic se neřeže a nic se neodpájí, takže je to vratné.\n\n"
+    "Zem se pájet nemusí - modul i budič podsvícení sdílejí zem desky.\n\n"
+    "Dá to plný rozsah jasu; ověřeno na skutečné desce.\n\n"
+    "Cena: GPIO6 je zároveň budicí výstup hodin PCF85063, takže dokud "
+    "tam ten drátek je, nejde použít přerušení z RTC. Tento firmware ho "
+    "nepoužívá.\n\n"
+    "Podrobně i s měřením:\ndocs/hardware/backlight.md",
+
+    /* rezim sbernice */
+    "JEN POSLECH",
+    "NORMÁLNÍ",
+    "tato deska CAN nemá",
+    "Vysílání na sběrnici",
+    "Deska jen poslouchá. Tak se nedá nic přečíst - každý dotaz je "
+    "odeslání.\n\nV normálním režimu deska ZAČNE VYSÍLAT na sběrnici "
+    "vozu: diagnostické dotazy a potvrzovací bit ke každému přijatému "
+    "rámci.\n\nDělejte to až tehdy, když je jistá rychlost sběrnice i "
+    "zapojení - v horní liště musí stát POSLOUCHÁM, ne BEZ SBĚRNICE.",
+    "řadič se nerozjel - pořád jen poslouchám",
 
     /* profily nastaveni */
     "DÍLNA",
@@ -77,8 +129,6 @@ static const char *const LANG_CS[] = {
     "profil drží jas a zhasínání; jednotky a jazyk platí pro všechny",
 
     /* WiFi */
-    "nepřipojeno",
-    "VYBRAT SÍŤ",
     "DISPLEJ VYP",
     "WiFi sítě",
     "hledám...",
@@ -137,8 +187,10 @@ static const char *const LANG_CS[] = {
     "FPS + PAMĚŤ",
     "SYROVÉ HODNOTY  (cíl / zobrazeno, x100)",
     "SBĚRNICE CAN",
-    "nepřipojeno - zatím bez dat",
+    "VYČÍTÁNÍ  (měřeno)",
     "PAMĚŤ A DOBA BĚHU",
+    "ULOŽIT DO %s",
+    "VÝCHOZÍ",
 };
 
 #endif /* LANG_CS_H */

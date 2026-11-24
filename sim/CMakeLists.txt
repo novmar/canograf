@@ -64,10 +64,19 @@ target_compile_options(lvgl PRIVATE -w)
 file(GLOB UI_FONTS CONFIGURE_DEPENDS "${FW_SRC_DIR}/font_ui_*.c")
 set_source_files_properties(${UI_FONTS} PROPERTIES COMPILE_OPTIONS "-w")
 
+# Vrstvy CAN a diagnostiky se do hostitelskeho buildu pridavaji schvalne:
+# ui.c z nich bere VSECHNY hodnoty, takze bez nich nejde prelozit a hlavne
+# by nebylo jak zkouset, co se stane, kdyz jednotka neodpovida nebo DID
+# odmitne. Zadna z nich nezna ESP-IDF - to je az v can/twai.c, ktery tu
+# proto neni.
 add_executable(lv_shot
   "${CMAKE_CURRENT_SOURCE_DIR}/lv_shot.c"
   "${FW_SRC_DIR}/ui.c"
   "${FW_SRC_DIR}/i18n.c"
+  "${FW_SRC_DIR}/can/isotp.c"
+  "${FW_SRC_DIR}/diag/uds.c"
+  "${FW_SRC_DIR}/diag/link.c"
+  "${FW_SRC_DIR}/diag/poller.c"
   ${UI_FONTS}
 )
 target_include_directories(lv_shot PRIVATE

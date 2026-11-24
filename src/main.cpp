@@ -2,7 +2,7 @@
  * Talento HMI - testovaci firmware v3
  * Waveshare ESP32-S3-Touch-LCD-4.3B, 800x480, GT911 (kapacitni), CH422G
  *
- * JESTE NECTE VOZIDLO - hodnoty jsou simulovane.
+ * Hodnoty cte z vozidla vrstva src/diag/poller.c; UI si zadnou nevymysli.
  *
  * Tenhle soubor uz obsahuje jen veci vazane na desku: panel, LVGL port,
  * WiFi, OTA, NVS, podsviceni. Cele uzivatelske rozhrani je v src/ui.c,
@@ -132,12 +132,14 @@ static bool bl_pwm_init(void)
  * Nastaveni v NVS
  *
  * Spolecna cast ma klice "mph", "fahr", "lang" a "prof" (cislo prave
- * platneho profilu). Kazdy profil ma dva: "p<i>bl" jas a "p<i>bk"
- * zhasnuti. Tri profily tedy stoji sest polozek po 32 B = 192 B, cela
- * sekce nastaveni 320 B z 20 kB oddilu.
+ * platneho profilu). Kazdy profil ma ctyri: "p<i>bl" jas, "p<i>dt" dobu
+ * do ztlumeni, "p<i>db" uroven ztlumeni a "p<i>pf" prekryv s FPS. Tri
+ * profily tedy stoji dvanact polozek po 32 B = 384 B, cela sekce
+ * nastaveni asi 512 B z 20 kB oddilu.
  *
  * Klice "blank", "blday", "blnight", "blnight_on" a "tbdn" patrily
- * dvojici jasu den/noc, kterou profily nahradily. Cte je uz jen
+ * dvojici jasu den/noc, kterou profily nahradily; "p<i>bk" drzel dobu
+ * do ZHASNUTI, nez se ze zhasinani stalo ztlumeni. Cte je uz jen
  * migrace v setup() a po prvnim ulozeni z NVS zmizi.
  * ------------------------------------------------------------------- */
 static void prof_key(char *b, size_t n, int i, const char *what)
@@ -155,10 +157,14 @@ static void host_save_cfg(const ui_cfg_t *c)
     for (int i = 0; i < UI_PROFILES; i++) {
         char k[8];
         prof_key(k, sizeof(k), i, "bl"); prefs.putInt(k, c->prof[i].bright);
-        prof_key(k, sizeof(k), i, "bk"); prefs.putUInt(k, c->prof[i].blank_s);
+        prof_key(k, sizeof(k), i, "dt"); prefs.putUInt(k, c->prof[i].dim_s);
+        prof_key(k, sizeof(k), i, "db"); prefs.putInt(k, c->prof[i].dim_bright);
+        prof_key(k, sizeof(k), i, "pf"); prefs.putBool(k, c->prof[i].perf);
+        /* Doba do zhasnuti. Maze se az tady, aby mela migrace v setup()
+         * co cist i po restartu, ktery nic neulozil. */
+        prof_key(k, sizeof(k), i, "bk"); prefs.remove(k);
     }
-    /* Pozustatky po dvojici den/noc. Mazou se az tady, aby mela migrace
-     * v setup() co cist i po restartu, ktery nic neulozil. */
+    /* Totez pro pozustatky po dvojici jasu den/noc. */
     for (const char *old : {"blank", "blday", "blnight", "blnight_on", "tbdn"})
         prefs.remove(old);
     prefs.end();
@@ -396,6 +402,20 @@ static void host_wifi_forget_all(void)
 static const can_stats_t *host_can_stats(void) { return can_stats(); }
 static void host_can_stats_reset(void) { can_stats_reset(); }
 
+/* Rezim radice. Prepnuti do normalniho rezimu znamena, ze deska zacne
+ * na cizi sbernici vysilat, takze o nej musi rict uzivatel; tady se jen
+ * provede. Vraci se true, kdyz radic opravdu v zadanem rezimu skoncil. */
+static bool host_can_is_normal(void) { return can_mode() == CAN_MODE_NORMAL; }
+
+static bool host_can_set_normal(bool normal)
+{
+    can_mode_t want = normal ? CAN_MODE_NORMAL : CAN_MODE_LISTEN_ONLY;
+
+    if (can_mode() == want) return true;
+    can_set_mode(want);
+    return can_mode() == want;
+}
+
 static void host_reboot(void) { ESP.restart(); }
 
 static bool host_wifi_connected(void) { return WiFi.status() == WL_CONNECTED; }
@@ -413,9 +433,54 @@ static const char *host_wifi_ip(void)
     return ip_buf;
 }
 
+/* Sila signalu v dBm. Mimo pripojeni nema co hlasit, takze vraci 0 a UI
+ * carky vubec nerozsviti - predstirany plny signal by byl horsi nez
+ * zadny. */
+static int host_wifi_rssi(void)
+{
+    if (WiFi.status() != WL_CONNECTED) return 0;
+    return (int)WiFi.RSSI();
+}
+
+/* Deska bezi jako STA, pristupovy bod se nikde nezaklada. Funkce tu je
+ * proto, aby se stavovy radek ptal radice a ne nasi predstavy o nem. */
+static bool host_wifi_ap(void)
+{
+    return (WiFi.getMode() & WIFI_MODE_AP) != 0;
+}
+
 /* ---------------- diagnostika ---------------- */
 static unsigned host_heap_kb(void)  { return (unsigned)(ESP.getFreeHeap() / 1024); }
 static unsigned host_psram_kb(void) { return (unsigned)(ESP.getFreePsram() / 1024); }
+
+/* ---------------------------------------------------------------------
+ * Vrstva diagnostiky
+ *
+ * Cela logika cteni je v src/diag/poller.c a nezna ani hodiny, ani
+ * hardware - cas i ramce dostava v parametrech. Deska tedy obstarava
+ * jen dve veci: preklopit ramce z kruhoveho zasobniku do vrstvy a
+ * pravidelne ji dat cas.
+ *
+ * Vlastni kurzor do zasobniku: UI si drzi svuj (odposlech na strance
+ * ladeni), takze si ctenari ramce neberou.
+ *
+ * Vysilat se smi JEN v normalnim rezimu. Nestaci spolehnout se na to,
+ * ze can_send() v listen-only vrati false - vrstva se podle rezimu
+ * chova sama, takze se v listen-only ani nezacne ptat.
+ * ------------------------------------------------------------------- */
+static diag_poller_t g_diag;
+static uint32_t      g_diag_cursor = 0;
+
+static void diag_pump(void)
+{
+    can_frame_t f;
+
+    can_poll();
+    while (can_next(&g_diag_cursor, &f))
+        diag_poller_on_frame(&g_diag, f.id, f.data, f.dlc, f.tx, f.ts_ms);
+    diag_poller_arm(&g_diag, can_mode() == CAN_MODE_NORMAL);
+    diag_poller_poll(&g_diag, can_now_ms());
+}
 
 /* Neni const: kdyz se PWM nerozjede, musi se bl_set_percent za behu
  * vynulovat, at UI stmivani nenabizi.
@@ -439,6 +504,8 @@ static ui_host_t UI_HOST = {
     .wifi_connected     = host_wifi_connected,
     .wifi_ssid          = host_wifi_ssid,
     .wifi_ip            = host_wifi_ip,
+    .wifi_rssi          = host_wifi_rssi,
+    .wifi_ap            = host_wifi_ap,
     .wifi_known         = host_wifi_known,
     .wifi_connect_known = host_wifi_connect_known,
     .wifi_forget        = host_wifi_forget,
@@ -447,6 +514,8 @@ static ui_host_t UI_HOST = {
     .wifi_forget_all    = host_wifi_forget_all,
     .can_stats          = host_can_stats,
     .can_stats_reset    = host_can_stats_reset,
+    .can_is_normal      = host_can_is_normal,
+    .can_set_normal     = host_can_set_normal,
     .reboot             = host_reboot,
     .heap_kb            = host_heap_kb,
     .psram_kb           = host_psram_kb,
@@ -483,14 +552,33 @@ void setup()
         cfg.prof[UI_PROF_DAY].bright   = prefs.getInt("blday", 100);
         cfg.prof[UI_PROF_NIGHT].bright = prefs.getInt("blnight", 35);
         uint32_t blank = prefs.getUInt("blank", 0);
-        for (int i = 0; i < UI_PROFILES; i++) cfg.prof[i].blank_s = blank;
+        for (int i = 0; i < UI_PROFILES; i++) cfg.prof[i].dim_s = blank;
     } else {
         for (int i = 0; i < UI_PROFILES; i++) {
             char k[8];
             prof_key(k, sizeof(k), i, "bl");
             cfg.prof[i].bright = prefs.getInt(k, cfg.prof[i].bright);
+
+            /* Doba do ztlumeni je tataz doba, po ktere displej driv
+             * zhasl, takze stary klic "p<i>bk" slouzi jako vychozi
+             * hodnota pro novy "p<i>dt". Kdo mel zhasinani po dvou
+             * minutach, ztlumi se po dvou minutach.
+             *
+             * UROVEN ztlumeni z ceho vzit nejde - stare nastaveni
+             * zadnou nemelo, displej zhasinal cely. Zustane tedy ta
+             * vychozi z ui_profile_default(), tedy nejnizsi nabizena
+             * (BL_MIN = 25 %): je to nejblizsi citelny protejsek tmy a
+             * zaroven to sjednocuje desku po migraci s deskou po resetu
+             * nastaveni, takze se obe chovaji stejne. */
             prof_key(k, sizeof(k), i, "bk");
-            cfg.prof[i].blank_s = prefs.getUInt(k, cfg.prof[i].blank_s);
+            uint32_t blank = prefs.getUInt(k, cfg.prof[i].dim_s);
+            prof_key(k, sizeof(k), i, "dt");
+            cfg.prof[i].dim_s = prefs.getUInt(k, blank);
+
+            prof_key(k, sizeof(k), i, "db");
+            cfg.prof[i].dim_bright = prefs.getInt(k, cfg.prof[i].dim_bright);
+            prof_key(k, sizeof(k), i, "pf");
+            cfg.prof[i].perf = prefs.getBool(k, cfg.prof[i].perf);
         }
     }
     prefs.end();
@@ -519,6 +607,15 @@ void setup()
         Serial.printf("CAN: %s\n", can_start(&can) ? "listen-only" : "nejede");
     }
 
+    /* Vrstva diagnostiky. Zacina odzbrojena - radic je v listen-only a
+     * diag_pump() ji ozbroji az ve chvili, kdy uzivatel rezim prepne. */
+    {
+        diag_poller_cfg_t dc;
+        diag_poller_cfg_default(&dc);
+        dc.send = can_isotp_send;
+        diag_poller_init(&g_diag, &dc);
+    }
+
     WiFi.mode(WIFI_STA);
     saved_load();
     if (saved_n) {
@@ -531,6 +628,7 @@ void setup()
 
     lvgl_port_lock(-1);
     ui_set_host(&UI_HOST);
+    ui_set_diag(&g_diag);
     ui_set_cfg(&cfg);
     ui_build();
     lv_timer_create(tick_cb, 20, NULL);
@@ -543,8 +641,13 @@ void setup()
 void loop()
 {
     ArduinoOTA.handle();
-    /* Jediny zapisovatel do kruhoveho zasobniku ramcu. UI z nej cte
-     * svym vlastnim kurzorem, viz src/can/twai.h. */
-    can_poll();
+    /* Jediny zapisovatel do kruhoveho zasobniku ramcu, zaroven jediny,
+     * kdo dava cas vrstve diagnostiky. UI z zasobniku cte svym vlastnim
+     * kurzorem, viz src/can/twai.h.
+     *
+     * Rozestup 20 ms je pod mezi ISO-TP (150 ms) s rezervou skoro
+     * desetinasobnou a zaroven je to perioda lv_timeru, takze se obe
+     * pravidelne veci v teto smycce toci stejne rychle. */
+    diag_pump();
     delay(20);
 }

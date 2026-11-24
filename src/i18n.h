@@ -32,8 +32,18 @@ enum {
     STR_PAGE_DPF,
     STR_PAGE_SETUP,
 
-    /* horni lista */
+    /* stavovy radek
+     *
+     * Ctyri urovne pripojeni k vozidlu. Rozdil mezi "nikdo neodpovida"
+     * a "neptame se" je pro uzivatele zasadni: v prvnim pripade je
+     * neco spatne, v druhem si to sam vypnul. */
     STR_TOP_TEMP,
+    STR_LINK_NO_BUS,        /* na sbernici nic nejezdi */
+    STR_LINK_LISTEN,        /* sbernice zije, ale jsme jen posluchac */
+    STR_LINK_NO_ECU,        /* ptame se a nikdo neodpovida */
+    STR_LINK_ECU,           /* jednotka odpovida */
+    STR_NONE,               /* zadna sit; kratke, vejde se i na tlacitko */
+    STR_WIFI_AP,            /* deska sama je pristupovy bod */
 
     /* hlavni stranka */
     STR_UNIT_RPM,
@@ -41,7 +51,7 @@ enum {
     /* stranka motoru */
     STR_BOOST_PRESSURE,
     STR_DEMAND,
-    STR_SIM_DATA,
+    STR_INTAKE_AIR,
 
     /* stranka s grafem tlaku */
     STR_GAP_MBAR,
@@ -50,33 +60,79 @@ enum {
 
     /* stranka chyb */
     STR_NO_CAN,
-    STR_DTC_ALL,
-    STR_DTC_CURRENT,
-    STR_DTC_FREEZE,
-    STR_DTC_STATS,
+    STR_DTC_UNREAD,         /* pamet jeste nikdo necetl */
+    STR_DTC_NONE,           /* precteno a prazdne - to uz je vysledek */
+    STR_DTC_SOME,           /* jedno %u = pocet chyb */
+    STR_DTC_SHOWN,          /* jedno %u = kolik se jich veslo na stranku */
+    STR_DTC_TAP,
+    STR_DTC_CONF,           /* stavove bity, zkratky do radku seznamu */
+    STR_DTC_CYCLE,
+    STR_DTC_PEND,
+    STR_DTC_LAMP,
+    STR_DTC_EXT_T,
+    STR_DTC_FREEZE_T,
+    STR_DTC_WAIT,           /* vybrano, odpoved jeste nedosla */
+    STR_DTC_EMPTY,          /* jednotka k te chybe nic nema */
+    STR_ODOMETER,
+    STR_REC_ODO_AT,         /* nazvy rozsirenych zaznamu 19 06 */
+    STR_REC_AGING,
+    STR_REC_COUNT,
+    STR_REC_ODO_HEALED,
+    STR_REC_DIST_WITH,
+    STR_REC_ODO_FIRST,
+    STR_REC_UNSET,          /* zaznam je samych 0xFF, jednotka ho nema */
 
     /* stranka DPF */
     STR_DPF_TEMP_IN,
     STR_DPF_TEMP_OUT,
-    STR_DPF_REGEN_BTN,
-    STR_DPF_NO_VEHICLE,
-    STR_REGEN_TITLE,
-    STR_REGEN_BODY,
-    STR_REGEN_STATE,        /* popisek rucniho prepinace stavu regenerace */
+    STR_DPF_TEMP_TARGET,
+    STR_DPF_SOOT,
+    STR_DPF_LOAD,
+    STR_DPF_SINCE,
+    STR_DPF_REGEN_NA,       /* proc tu neni tlacitko na spusteni */
+    STR_REGEN_STATE,
     STR_REGEN_OFF,
-    STR_REGEN_REQ,
     STR_REGEN_RUN,
-    STR_REGEN_RUN_PCT,
 
     /* nastaveni */
     STR_SET_SPEED,
     STR_SET_TEMP,
-    STR_SET_BLANK,
+    STR_SET_DIM,            /* popisek tlacitka, ktere otevira ztlumeni */
     STR_SET_BRIGHT,
     STR_SET_PROFILE,        /* popisek tlacitka volby profilu */
     STR_SET_LANG,
     STR_SET_MAINT,          /* popisek tlacitka, ktere otevira resety */
     STR_BLANK_NEVER,
+
+    /* ztlumeni po necinnosti
+     *
+     * Nahradilo drivejsi zhasinani. Zhasly displej za jizdy nerika
+     * nic; ztlumeny je porad citelny. Uplne zhasnuti zustalo jen jako
+     * rucni akce. */
+    STR_DIM_TITLE,
+    STR_DIM_AFTER,
+    STR_DIM_TO,
+    STR_DIM_NA,             /* deska stmivat neumi - misto urovni */
+    STR_DIM_OFF_ONLY,       /* a co tedy udela misto ztlumeni */
+
+    /* Stmivani jde na tuto desku dodelat jednim dratkem. Nabizi se jen
+     * tam, kde chybi - kde uz je, nema co radit. Je to konstatovani
+     * moznosti, ne doporuceni, a nenahrazuje navod; ten je v
+     * docs/hardware/backlight.md a text na nej odkazuje. */
+    STR_HW_DIM_BTN,         /* maly popisek tlacitka vedle vysvetleni */
+    STR_HW_DIM_TITLE,
+    STR_HW_DIM_BODY,
+
+    /* rezim sbernice
+     *
+     * Prepnuti do normalniho rezimu je jedina akce v UI, po ktere deska
+     * zacne na cizi sbernici vysilat, takze text musi rict presne to. */
+    STR_CAN_LISTEN,
+    STR_CAN_NORMAL,
+    STR_CAN_NA,             /* deska CAN nema nebo rezim prepnout neumi */
+    STR_CAN_TITLE,
+    STR_CAN_BODY,
+    STR_CAN_FAILED,         /* radic se v novem rezimu nerozjel */
 
     /* profily nastaveni - jmena jsou pevna, viz komentar v ui.h */
     STR_PROF_SHOP,
@@ -85,8 +141,6 @@ enum {
     STR_PROF_HINT,          /* co profil nese a co plati pro vsechny */
 
     /* WiFi */
-    STR_WIFI_NOT_CONN,
-    STR_WIFI_PICK,
     STR_SET_DISPLAY_OFF,
     STR_WIFI_TITLE,
     STR_WIFI_SEARCHING,
@@ -144,8 +198,10 @@ enum {
     STR_DBG_PERF,           /* prepinac prekryvu s FPS a pameti */
     STR_DBG_RAW,            /* syrove hodnoty, ktere UI prave ukazuje */
     STR_DBG_BUS,
-    STR_DBG_BUS_NA,         /* CAN jeste neni na UI napojeny */
+    STR_DBG_POLL,           /* merena rychlost vycitani */
     STR_DBG_MEM,
+    STR_DBG_SAVE,           /* jedno %s = jmeno profilu, do ktereho se uklada */
+    STR_DBG_DEFAULT,
 
     STR__COUNT
 };
