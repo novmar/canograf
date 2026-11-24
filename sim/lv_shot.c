@@ -89,7 +89,7 @@ static void safe_name(char *dst, size_t n, const char *src)
  * bylo videt odliseni v seznamu i zapomínani. Hesla nikam nejdou, drzi
  * se jen v pameti teto zkousky.
  * ------------------------------------------------------------------- */
-#define FAKE_SCAN_MS 400        /* jak dlouho predstirany sken "bezi" */
+#define FAKE_SCAN_MS 1200       /* jak dlouho predstirany sken "bezi" */
 
 static const char *const FAKE_SSID[] = {
     "dilna", "Trafic-hotspot", "domov", "UPC1234567", "sousedi"
@@ -256,13 +256,154 @@ static void check(const char *what, bool ok)
     if (!ok) checks_failed++;
 }
 
+/* ---------------- zapis snimku ---------------- */
+static unsigned char *rgb;
+static const char *g_outdir;
+static int shot_no;
+static int shot_err;
+
+static void shot(const char *name)
+{
+    /* vynutit prekresleni cele obrazovky, at ve frame neni nic stareho */
+    lv_obj_invalidate(lv_scr_act());
+    lv_refr_now(NULL);
+    frame_to_rgb(rgb);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%02d-%s.png", g_outdir, shot_no++, name);
+    if (!stbi_write_png(path, SCR_W, SCR_H, 3, rgb, SCR_W * 3)) {
+        fprintf(stderr, "zapis %s selhal\n", path);
+        shot_err = 1;
+        return;
+    }
+    printf("%s\n", path);
+}
+
+/* Souradnice, ktere zkouska poklepava. Vychazeji z rozvrzeni v ui.c;
+ * kdyz se rozvrzeni posune, posunou se i tady. */
+#define TAP_HANDLE_X   400
+#define TAP_HANDLE_Y   460              /* uchyt navigace */
+#define NAVBTN_X(i)    (4 + (i) * 132 + 64)
+#define NAVBTN_Y       (480 - 124 + 58) /* stred tlacitka stranky v liste */
+#define PAGE_Y(y)      (64 + (y))       /* stranka zacina pod horni listou */
+
+static void phase_navigace(void)
+{
+    ui_show_page(0);
+    run_ms(400, true);
+
+    tap(TAP_HANDLE_X, TAP_HANDLE_Y, true);
+    shot("nav-lista");
+
+    /* tah nahoru zacaty NA tlacitku stranky - nesmi prepnout stranku */
+    unsigned before = content_hash();
+    swipe(NAVBTN_X(2), NAVBTN_Y, NAVBTN_X(2), 180, 6, false, true);
+    shot("nav-mrizka");
+
+    /* tazeni na pulce cesty, prst jeste dole */
+    swipe(400, 200, 400, 340, 5, true, true);
+    shot("nav-tazeni");
+    touch_release(true);
+
+    /* tahem dolu zpatky na uchyt */
+    swipe(400, 200, 400, 470, 6, false, true);
+    unsigned after = content_hash();
+    check("tah z tlacitka navigace neprepne stranku", before == after);
+
+    /* obycejne tuknuti na tlacitko stranku prepnout musi */
+    tap(TAP_HANDLE_X, TAP_HANDLE_Y, true);
+    before = content_hash();
+    tap(NAVBTN_X(2), NAVBTN_Y, true);
+    check("tuknuti na tlacitko navigace stranku prepne", before != content_hash());
+
+    swipe(400, 200, 400, 470, 6, false, true);     /* uklid: zpatky na uchyt */
+    ui_show_page(0);
+    run_ms(200, true);
+}
+
+static void phase_dialogy(void)
+{
+    /* ---- potvrzeni drzenim na strance DPF ---- */
+    ui_show_page(4);
+    run_ms(200, false);
+    unsigned page_before = content_hash();
+
+    tap(190, PAGE_Y(175), false);           /* SPUSTIT REGENERACI */
+    shot("potvrzeni");
+
+    /* gesto zprava musi dialog zavrit a NEsmi pod nim prepnout stranku */
+    swipe(120, 240, 700, 250, 8, false, false);
+    check("gesto zprava zavre potvrzovaci dialog", page_before == content_hash());
+
+    /* znovu a tentokrat opravdu podrzet */
+    tap(190, PAGE_Y(175), false);
+    touch_at(210, 390);                     /* tlacitko DRZ 3 s */
+    touch_down = true;
+    run_ms(1040, false);                    /* tesne po preskoceni na "2" */
+    shot("potvrzeni-blik");
+    run_ms(460, false);
+    shot("potvrzeni-odpocet");
+    run_ms(1600, false);                    /* pres tri vteriny */
+    shot("potvrzeni-hotovo");
+    touch_release(false);
+    run_ms(600, false);                     /* akce a zavreni dialogu */
+
+    /* ---- stavy regenerace na sloupci ---- */
+    shot("regen-odeslano");
+    tap(540, PAGE_Y(175), false);           /* STAV REGENERACE -> bezi */
+    run_ms(520, false);                     /* at padne do rozsviceneho bliknuti */
+    shot("regen-bezi");
+    tap(540, PAGE_Y(175), false);           /* -> bezi s procenty */
+    run_ms(9000, false);
+    shot("regen-procenta");
+    tap(540, PAGE_Y(175), false);           /* -> zpatky vypnuto */
+    run_ms(200, false);
+}
+
+static void phase_wifi(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+    unsigned page_before = content_hash();
+
+    /* ---- zavreni dialogu driv, nez dobehne sken ---- */
+    tap(520, PAGE_Y(168), false);           /* VYBRAT SIT */
+    shot("wifi-hledam");
+    /* zavrit driv, nez sken dobehne - presne ta cesta, po ktere to padalo */
+    swipe(120, 240, 700, 250, 4, false, false);
+    run_ms(2000, false);                    /* sken dobehne do prazdna */
+    check("zavreni dialogu behem skenu nic nerozbije", page_before == content_hash());
+
+    /* ---- seznam siti ---- */
+    tap(520, PAGE_Y(168), false);
+    run_ms(1600, false);                    /* sken dobehne */
+    shot("wifi-seznam");
+
+    /* neznama sit se zepta na heslo */
+    tap(300, 184, false);
+    shot("wifi-heslo");
+    swipe(120, 300, 700, 310, 8, false, false);     /* gesto pres klavesnici */
+    check("gesto zprava zavre dialog s heslem", page_before == content_hash());
+
+    /* znama sit: dlouhy stisk nabidne zapomenuti */
+    tap(520, PAGE_Y(168), false);
+    run_ms(1600, false);
+    touch_at(300, 126);
+    touch_down = true;
+    run_ms(700, false);                     /* dlouhy stisk */
+    touch_release(false);
+    shot("wifi-zapomenout");
+    swipe(120, 240, 700, 250, 8, false, false);
+    run_ms(200, false);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "pouziti: %s <vystupni adresar> [kod jazyka]\n", argv[0]);
         return 2;
     }
-    const char *outdir = argv[1];
+    g_outdir = argv[1];
 
     int lang = 0;
     if (argc == 3) {
@@ -276,10 +417,10 @@ int main(int argc, char **argv)
         }
     }
 
-    if (mkdir(outdir, 0777) != 0) {
+    if (mkdir(g_outdir, 0777) != 0) {
         struct stat st;
-        if (stat(outdir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            fprintf(stderr, "nelze vytvorit adresar %s\n", outdir);
+        if (stat(g_outdir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "nelze vytvorit adresar %s\n", g_outdir);
             return 1;
         }
     }
@@ -298,38 +439,34 @@ int main(int argc, char **argv)
     ddrv.full_refresh = 1;      /* at je v bufferu vzdy cely obraz */
     lv_disp_drv_register(&ddrv);
 
-    /* host zustava nenaplneny - ui.c musi NULL snest */
+    static lv_indev_drv_t idrv;
+    lv_indev_drv_init(&idrv);
+    idrv.type = LV_INDEV_TYPE_POINTER;
+    idrv.read_cb = read_cb;
+    lv_indev_drv_register(&idrv);
+
+    ui_set_host(&FAKE_HOST);
     ui_set_cfg(false, false, 0, lang);
     ui_build();
 
-    unsigned char *rgb = malloc((size_t)SCR_W * SCR_H * 3);
+    rgb = malloc((size_t)SCR_W * SCR_H * 3);
     if (!rgb) { fprintf(stderr, "malloc selhal\n"); return 1; }
 
     int n = ui_page_count();
     for (int i = 0; i < n; i++) {
         ui_show_page(i);
-        for (int s = 0; s < WARM_STEPS; s++) {
-            lv_tick_inc(STEP_MS);
-            ui_tick();
-            lv_timer_handler();
-        }
-        /* vynutit prekresleni cele obrazovky, at ve frame neni nic stareho */
-        lv_obj_invalidate(lv_scr_act());
-        lv_refr_now(NULL);
+        run_ms(WARM_STEPS * STEP_MS, false);
 
-        frame_to_rgb(rgb);
-
-        char path[512], name[64];
+        char name[64];
         safe_name(name, sizeof(name), ui_page_name(i));
-        snprintf(path, sizeof(path), "%s/%02d-%s.png", outdir, i, name);
-        if (!stbi_write_png(path, SCR_W, SCR_H, 3, rgb, SCR_W * 3)) {
-            fprintf(stderr, "zapis %s selhal\n", path);
-            free(rgb);
-            return 1;
-        }
-        printf("%s\n", path);
+        shot(name);
     }
 
+    phase_navigace();
+    phase_dialogy();
+    phase_wifi();
+
     free(rgb);
-    return 0;
+    if (checks_failed) printf("%d kontrol selhalo\n", checks_failed);
+    return (shot_err || checks_failed) ? 1 : 0;
 }

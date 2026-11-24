@@ -18,6 +18,13 @@
  *                         rozhodit provozni sbernici.
  *   CAN_MODE_NORMAL       bezny provoz, muzeme se ptat jednotek.
  *
+ * Ticho dela VYHRADNE radic, ne transceiver. Na teto desce ma TJA1051T/3
+ * pin S (silent) pripojeny na zem pres R96 = 0R, takze je natvrdo v
+ * normalnim rezimu a hardwarove se umlcet neda - wiki Waveshare, podle
+ * ktere se CAN povoluje pres expander CH422G, pro revizi 1.1 neplati a
+ * zadne prepinani na expanderu se tu proto nedela. Jedina pojistka je
+ * TWAI_MODE_LISTEN_ONLY v konfiguraci radice.
+ *
  * Prijate i odeslane ramce se ukladaji do jednoho kruhoveho zasobniku.
  * Odber je kurzorovy a neblokujici: kazdy ctenar si drzi vlastni kurzor,
  * takze odposlech v UI nebere ramce transportni vrstve a naopak.

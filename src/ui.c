@@ -477,23 +477,35 @@ static void nav_attach_drag(lv_obj_t *o)
     lv_obj_add_event_cb(o, nav_release_cb, LV_EVENT_PRESS_LOST, NULL);
 }
 
+/* ---------------------------------------------------------------------
+ * Gesto na obrazovce
+ *
+ * Jeden tah musi udelat nejvys jednu vec. LVGL si sice pamatuje, ze uz
+ * gesto z tohoto stisku poslalo, ale jakmile se objekt pod prstem zmeni
+ * - a prepnuti stranky ho zmeni - priznak zahodi a zbytek tehoz tahu
+ * posle gesto znovu. Jedno svihnuti pak proletelo dve az tri stranky.
+ * lv_indev_wait_release() zbytek stisku zahodi, takze dalsi gesto prijde
+ * az z noveho doteku.
+ * ------------------------------------------------------------------- */
 static void gesture_cb(lv_event_t *e)
 {
     (void)e;
-    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_get_act());
-    switch (d) {
+    lv_indev_t *in = lv_indev_get_act();
+    switch (lv_indev_get_gesture_dir(in)) {
         case LV_DIR_RIGHT:
             /* tah od leveho okraje = zpet na hlavni obrazovku */
             if (press_x < 70 && cur_page != PG_HLAVNI) ui_show_page(PG_HLAVNI);
             else ui_show_page(cur_page + 1);
             break;
         case LV_DIR_LEFT:  ui_show_page(cur_page - 1); break;
-        /* Kdyz tah zacal na navigaci, uz si ho vyridilo tazeni - jinak by
-         * se stav prepnul dvakrat. */
-        case LV_DIR_TOP:    if (!nav_drag) set_nav_state(nav_state + 1); break;
-        case LV_DIR_BOTTOM: if (!nav_drag) set_nav_state(nav_state - 1); break;
-        default: break;
+        /* Kdyz tah zacal na navigaci, uz si ho vyridilo tazeni prstem -
+         * jinak by se stav prepnul dvakrat. Tah pokracuje, takze se stisk
+         * nesmi zahodit. */
+        case LV_DIR_TOP:    if (nav_drag) return; set_nav_state(nav_state + 1); break;
+        case LV_DIR_BOTTOM: if (nav_drag) return; set_nav_state(nav_state - 1); break;
+        default: return;
     }
+    lv_indev_wait_release(in);
 }
 
 /* ---------------------------------------------------------------------
@@ -545,9 +557,14 @@ static void modal_gesture_cb(lv_event_t *e)
 {
     (void)e;
     /* Zpetne gesto dela totez co tlacitko ZPET, a to kdekoliv na dialogu -
-     * tedy i nad klavesnici nebo seznamem siti. */
-    if (lv_indev_get_gesture_dir(lv_indev_get_act()) == LV_DIR_RIGHT)
-        modal_close_cb(NULL);
+     * tedy i nad klavesnici nebo seznamem siti. Zbytek tahu se musi
+     * zahodit: dialog pod prstem zmizi, LVGL si vsimne zmeny objektu,
+     * odemkne gesto a zbyvajicich par desitek pixelu tehoz tahu by uz
+     * dostala obrazovka a prepnula stranku. */
+    lv_indev_t *in = lv_indev_get_act();
+    if (lv_indev_get_gesture_dir(in) != LV_DIR_RIGHT) return;
+    lv_indev_wait_release(in);
+    modal_close_cb(NULL);
 }
 
 static lv_obj_t *modal_open(const char *title, uint32_t accent)
@@ -621,7 +638,7 @@ static void show_info(const char *title, const char *body, uint32_t accent)
 #define HOLD_DONE_MS   700      /* jak dlouho je videt potvrzeni pred akci */
 #define HOLD_PANEL_Y   92
 #define HOLD_PANEL_H   230
-#define HOLD_RING_D    180
+#define HOLD_RING_D    200
 
 static uint32_t hold_start, hold_flash_ms, hold_done_ms, hold_accent;
 static int hold_last_sec;
@@ -850,14 +867,27 @@ static void wifi_save_connect(const char *ssid, const char *pass)
     if (host && host->wifi_connect) host->wifi_connect(ssid, pass);
 }
 
+/* Seznam je jedine misto, kde by prosvital vychozi svetly vzhled LVGL,
+ * takze kazdy radek dostane paletu UI. Ulozene site jsou zelene a maji
+ * fajfku - samotna barva by na snimku z dilny pri slunci nestacila. */
+static void wifi_row_style(lv_obj_t *b, uint32_t color)
+{
+    lv_obj_set_style_text_font(b, UI_FONT_20, 0);
+    lv_obj_set_style_text_color(b, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(C_PANEL), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(b, 0, 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(b, 1, 0);
+}
+
 /* Jeden radek misto seznamu siti: hledam / nic jsem nenasel / nepovedlo se. */
 static void wifi_msg(int str)
 {
     if (!wifi_list) return;
     lv_obj_clean(wifi_list);
-    lv_obj_t *l = lv_list_add_text(wifi_list, T(str));
-    lv_obj_set_style_text_font(l, UI_FONT_20, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(C_LABEL), 0);
+    wifi_row_style(lv_list_add_text(wifi_list, T(str)), C_LABEL);
 }
 
 static void kb_ok_cb(lv_event_t *e)
@@ -938,6 +968,11 @@ static void wifi_scan_cb(lv_event_t *e)
     lv_obj_set_pos(wifi_list, 30, 90);
     lv_obj_set_size(wifi_list, 600, 290);
     lv_obj_set_style_bg_color(wifi_list, lv_color_hex(C_PANEL), 0);
+    lv_obj_set_style_border_color(wifi_list, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_border_width(wifi_list, 1, 0);
+    lv_obj_set_style_radius(wifi_list, 0, 0);
+    lv_obj_set_style_pad_all(wifi_list, 0, 0);
+    lv_obj_set_style_pad_row(wifi_list, 0, 0);
     /* Seznam roluje jen svisle. Vodorovny tah tim zustane gestem a zavre
      * dialog, misto aby se zaradil v seznamu. */
     lv_obj_set_scroll_dir(wifi_list, LV_DIR_VER);
@@ -983,9 +1018,8 @@ static void wifi_poll(void)
         if (!ssid) ssid = "";
         bool known = host_wifi_known(ssid);
         lv_obj_t *b = lv_list_add_btn(wifi_list, known ? LV_SYMBOL_OK : NULL, ssid);
-        lv_obj_set_style_text_font(b, UI_FONT_20, 0);
-        lv_obj_set_style_min_height(b, 56, 0);
-        if (known) lv_obj_set_style_text_color(b, lv_color_hex(C_SAGE), 0);
+        lv_obj_set_style_min_height(b, 58, 0);
+        wifi_row_style(b, known ? C_SAGE : C_BRIGHT);
         lv_obj_add_event_cb(b, press_cb, LV_EVENT_PRESSED, NULL);
         /* SHORT_CLICKED, ne CLICKED: po dlouhem stisku posila LVGL oboji,
          * takze by se sit zaroven zapomnela i pripojila. */

@@ -125,6 +125,16 @@ bool can_start(const can_cfg_t *c)
         return false;
     }
 
+    /* Rezim radice je jedina vec, ktera na teto desce drzi ticho:
+     * TJA1051T/3 ma pin S na zemi pres R96 = 0R, takze transceiver je
+     * natvrdo v normalnim rezimu a umlcet se neda (to, co o povolovani
+     * CAN pres expander CH422G pise wiki Waveshare, pro revizi 1.1
+     * neplati). TWAI_MODE_LISTEN_ONLY podle ESP-IDF "will not influence
+     * the bus (No transmissions or acknowledgments)" - a prave ten
+     * chybejici ACK je dulezity: na zive sbernici v aute by nas ACK na
+     * ramec, ktery jsme spatne precetli (jina rychlost, prohozene piny),
+     * delal chyby ostatnim jednotkam. Cokoli jineho nez CAN_MODE_NORMAL
+     * konci v listen-only zamerne - omyl ma vest k tichu. */
     g = (twai_general_config_t)TWAI_GENERAL_CONFIG_DEFAULT(
             (gpio_num_t)c->tx_pin, (gpio_num_t)c->rx_pin,
             (c->mode == CAN_MODE_NORMAL) ? TWAI_MODE_NORMAL
