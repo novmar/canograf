@@ -49,7 +49,14 @@ kept with a note, because the reason it changed is usually the useful part.
 - Top row is a **status bar**: WiFi name or `none`, signal as 0-5 bars like a
   phone, an icon for transmitting / receiving / not connected, and the vehicle
   link state. `[done]`
-- Touch targets at least 120 px. `[done]`
+- Touch targets at least 120 px. `[part]` - **the blanket claim was wrong.**
+  It holds for the controls pressed while moving: page buttons 129 x 140,
+  menu tiles, confirm buttons 360 x 120. It does not hold for settings rows
+  (160 x 68), dialog back (124 x 70), brightness levels (104 x 120), fault
+  and network rows, the profile switcher, the nav handle or the keyboard.
+  `docs/ui.md` was always honest about this; only this file overstated it.
+  Decide which of those are driving controls and must grow, and which are
+  bench controls and may stay.
 - Pages should be splittable like windows in i3 or sway: halves or thirds,
   each field either split again or holding one widget. Granularity by size -
   percent plus caption, or a value up to 10000, possibly 1000 with a `x10`
@@ -93,9 +100,15 @@ kept with a note, because the reason it changed is usually the useful part.
   button covers the button. It blinks yellow once a second. `[done]`
 - Two equally sized buttons in the dialog - a smaller cancel would be a trap.
   `[done]`
-- Every dialog has a back button at the top right. `[done]`
+- Every dialog has a back button at the top right. `[part]` - 19 of 20 do.
+  The WiFi password dialog has none and can only be left by swiping right,
+  which is the one dialog where a stuck user is most likely.
 - When the hold finishes, the result must read as a **statement, not a
-  button**: `OK` looked clickable and is being replaced. `[part]`
+  button**. `[done]` - the ring is replaced by a flat notice, every button
+  disappears, and `OK` became `DONE`. Fixing this also uncovered a real
+  fault: during the 700 ms notice the dialog could still be closed, which
+  cancelled the timer and silently threw the action away after a full
+  three-second hold.
 
 ### Brightness and blanking
 
@@ -132,8 +145,8 @@ kept with a note, because the reason it changed is usually the useful part.
   never reset, because that is the one setting whose loss can make the device
   unreadable. `[done]`
 - Debug tile holds the FPS overlay, raw values, bus statistics, save to
-  profile and reset to default. `[part]` - statistics are wired, the save and
-  reset to profile are not
+  profile and reset to default. `[done]` - I had this as unfinished; all five
+  are wired, and the save button marks itself unsaved with an accent border.
 - Language in Czech, English and German, each in its own file. `[done]`
 - Czech and German diacritics need a generated font; the built-in one has
   neither. `[done]`
@@ -153,9 +166,15 @@ kept with a note, because the reason it changed is usually the useful part.
   progress. `[done]`
 - Manual regeneration behind a hold confirmation, with the state visible on
   the DPF rail - a red wash for the attempt, a draining fill while it runs.
-  Use the ECU's own progress when it reports one, and step in fifths when it
-  does not, because smooth movement would read as a measured value.
-  `[part]` - the UI exists, the command is not sent
+  `[open]` - **not partly done, not done at all.** I had this as "the UI
+  exists, the command is not sent"; in fact the whole control was removed,
+  because `31 01 02 0D` writes to the ECU and writing is gated. The DPF page
+  carries the explanation where the button used to be.
+- When it is built, the preconditions must be checked first and a refusal has
+  to say **which** one failed. This needs no guessed thresholds: the ECU
+  reports its own reason in `246D`, a 17-value list that includes coolant
+  temperature not reached, differential pressure not reached, engine speed
+  deviation and regeneration forbidden. See `docs/regeneration.md`. `[open]`
 - First connection to a real vehicle is **listen-only**. The gate is in the
   poller: until it is armed, not a single frame leaves, not even a keep-alive.
   `[done]`
@@ -174,21 +193,35 @@ kept with a note, because the reason it changed is usually the useful part.
 
 ## Writing to the vehicle
 
+**I marked this whole section done. It is designed, not built.** `src/safety.h`
+is an interface and says so in its own header; there is no `safety.c`, nothing
+includes it, and no token, sequence or captcha string exists anywhere in the
+interface or the translations. The design in `docs/safety.md` is worth keeping
+- it is the reasoning, and the reasoning survived a round of review - but none
+of it runs.
+
+The one part that is real: **nothing writes to the vehicle today**, so the
+protection has nothing to guard yet. Manual regeneration was removed for
+exactly this reason. That is a safe state, not a finished feature.
+
 - Reading is safe, writing is not. Everything that writes is marked as such.
-  `[done]`
+  `[done]` - trivially, because nothing writes
 - Write access is **off by default** and has to be unlocked deliberately.
-  `[done]` - designed in `docs/safety.md`
+  `[open]` - designed in `docs/safety.md`
 - The unlock is a Simon-says sequence over four coloured icons, not a timed
   challenge. **One sequence per session, not per write** - a per-write
-  sequence gets clicked through without reading. `[done]`
+  sequence gets clicked through without reading. `[open]`
 - **No time limit**, because a countdown makes people rush exactly when they
-  should be reading. `[done]`
+  should be reading. `[open]`
 - The debug menu has a "try the captcha" entry so it can be practised without
-  arming anything. `[done]`
+  arming anything. `[open]`
 - A compile-time option builds the firmware with writing removed entirely, for
-  anyone who wants a read-only device. `[done]`
+  anyone who wants a read-only device. `[open]`
 - Colour alone must not carry meaning - the tokens differ in shape as well,
-  because a red/green pair is useless to a lot of people. `[done]`
+  because a red/green pair is useless to a lot of people. `[open]` for the
+  tokens, which do not exist. The principle itself **is** applied elsewhere:
+  a saved network carries a tick as well as green, a refused value prints the
+  literal `7F 31` as well as red, and the four value states differ by glyph.
 
 ---
 
