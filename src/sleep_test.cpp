@@ -1,15 +1,18 @@
 /*
  * Mereni klidoveho odberu po krocich.
  *
- * Smysl: nezajima nas jen kolik deska bere, ale KDE ten proud je. Firmware
- * proto projde stavy jeden po druhem, kazdy drzi 20 vterin a predem rekne
- * do seriove linky, co prave vypnul. Rozdil mezi dvema kroky je cena te
- * jedne veci.
+ * Smysl: nezajima nas jen kolik deska bere, ale KDE ten proud je. Deska
+ * proto projde stavy jeden po druhem, kazdy drzi 20 vterin a predem
+ * rekne do seriove linky, co prave vypnula. Rozdil mezi dvema kroky je
+ * cena te jedne veci.
  *
  * Jak merit:
- *   1. Nahrat, odpojit terminal (jen napajeni), USB meraka dat do cesty.
+ *   1. Prelozit s CANOGRAF_SLEEP_TEST=on, nahrat, odpojit terminal
+ *      (jen napajeni), USB meraka dat do cesty.
  *   2. Opsat proud na konci kazdeho kroku - hodnota se musi ustalit.
- *   3. Kroky jdou samy za sebou, posledni je hluboky spanek.
+ *   3. Kroky jdou samy za sebou, posledni je hluboky spanek. Po nem
+ *      deska nabehne znovu a mereni se opakuje dokola.
+ *   4. Hotovo: prelozit zpatky s CANOGRAF_SLEEP_TEST=off a nahrat.
  *
  * DULEZITE OMEZENI, at se vysledek necte spatne:
  *   - Merime 5V vetev z USB. Vozidlo napaji 7-36 V pres menic SY8293FCC,
@@ -22,7 +25,27 @@
  *     v normalnim rezimu a vypnout se neda. To je dno, pod ktere se bez
  *     zasahu do hardwaru nedostaneme - a zaroven je to ta soucastka, ktera
  *     umi desku probudit provozem na sbernici.
+ *
+ * PROC JE TO SOUCAST HLAVNIHO FIRMWARU A NE VLASTNI PROJEKT:
+ * driv to byl samostatny projekt v tools/sleep-test. Mel vlastni kopii
+ * adres expanderu CH422G, mapy vyvodu EXIO a probouzeciho registru
+ * GT911 - tedy presne tech udaju, ktere se pri pristi desce nebo revizi
+ * zmeni. Dve kopie znamenaji, ze se jedna opravi a druha tise lze.
+ * Jedna kopie za prepinacem je levnejsi nez dve kopie za nic.
+ *
+ * Image firmwaru je tim padem velky jako normalne (LVGL i panel se
+ * linkuji dal), ale to na odber nema vliv: sleep_test_run() je prvni
+ * prikaz v setup(), takze se panel, LVGL, CAN ani WiFi vubec
+ * neinicializuji. Co BEZI, je presne to, co je v tomhle souboru.
+ *
+ * Adresy a vyvody nize patri desce Waveshare ESP32-S3-Touch-LCD-4.3B.
+ * V config/ nejsou schvalne: pouziva je jediny soubor a klic, ktery ma
+ * jedineho ctenare, je jen dalsi misto, kde muze byt preklep.
  */
+#include "sleep_test.h"
+
+#if CANOGRAF_SLEEP_TEST
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
@@ -87,9 +110,10 @@ static void step(const char *what)
     }
 }
 
-void setup(void)
+void sleep_test_run(void)
 {
-    Serial.begin(115200);
+    /* Serial uz rozjel volajici. Tohle je cas pro hostitele, aby stihl
+     * navazat USB CDC - jinak prvni radky nikdo neuvidi. */
     delay(1500);
     Serial.println("\n\nsleep-test - kde je klidovy odber");
     Serial.println("merime 5V vetev z USB; proud z baterie je asi 0,49x");
@@ -147,7 +171,4 @@ void setup(void)
     esp_deep_sleep_start();
 }
 
-void loop(void)
-{
-    /* sem se to nikdy nedostane, setup() konci hlubokym spankem */
-}
+#endif /* CANOGRAF_SLEEP_TEST */

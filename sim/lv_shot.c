@@ -729,6 +729,24 @@ static void scan_btns(lv_obj_t *o, lv_coord_t y0, lv_coord_t y1,
     }
 }
 
+/* Kolik VIDITELNYCH tlacitek ma prave otevreny dialog.
+ *
+ * Dialog je v ui.c staticky a zvenku na nej neni ukazatel, zato je to
+ * vzdy nejvrchnejsi dite obrazovky: stranky, prekryv navigace i radek s
+ * FPS se posouvaji dopredu uz pri stavbe UI, dialog vznika az dlouho po
+ * ni. Bez tohohle zuzeni by se do poctu pocitala i tlacitka stranky,
+ * ktera dialog jen prekryva - ta jsou porad ve strome. */
+static int modal_btns(void)
+{
+    uint32_t cnt = lv_obj_get_child_cnt(lv_scr_act());
+    lv_coord_t minw = 9999, minh = 9999;
+    int n = 0;
+
+    if (cnt) scan_btns(lv_obj_get_child(lv_scr_act(), (int32_t)cnt - 1),
+                       0, SCR_H, &n, &minw, &minh);
+    return n;
+}
+
 static int checks_failed = 0;
 
 static void check(const char *what, bool ok)
@@ -1370,10 +1388,21 @@ static void phase_dialogy(void)
     touch_down = true;
     run_ms(1040, false);                    /* tesne po preskoceni na "2" */
     shot("potvrzeni-blik");
+    check("behem odpoctu dialog volbu nabizi", modal_btns() == 3);
     run_ms(460, false);
     shot("potvrzeni-odpocet");
     run_ms(1600, false);                    /* pres tri vteriny */
     shot("potvrzeni-hotovo");
+
+    /* Po dokonceni odpoctu uz je to OZNAMENI, ne otazka: prst je nahore
+     * a akce bezi. Na obrazovce proto nesmi zbyt zadne tlacitko - ani
+     * DRZ 3 s (vypadalo by, ze se ma drzet znovu), ani ZRUSIT a ZPET.
+     * Mutacni zkouska: v hold_tick_cb() v ui.c vyhodit volani
+     *     modal_hide_buttons();
+     * kontrola najde tri tlacitka a selze. */
+    check("po dokonceni odpoctu uz neni do ceho tuknout",
+          modal_btns() == 0);
+
     touch_release(false);
     run_ms(900, false);                     /* akce a zavreni dialogu */
     check("podrzeni prepne radic do normalniho rezimu", fake_can_normal);
@@ -1385,6 +1414,35 @@ static void phase_dialogy(void)
     run_ms(200, false);
     check("tuknuti vrati radic do poslechu", !fake_can_normal);
     shot("can-poslech");
+
+    /* -----------------------------------------------------------------
+     * A jeste jednou, tentokrat s gestem behem oznameni.
+     *
+     * Rozhodnuto je rozhodnuto. Zavreni dialogu rusi i timer, ktery akci
+     * teprve spousti, takze by zpetne gesto v tom okamziku zahodilo tri
+     * vteriny drzeni a nestalo by se nic. Dialog se proto po dokonceni
+     * odpoctu zavrit neda.
+     *
+     * Casovani: odpocet dobehne na 3000 ms, oznameni je videt dalsich
+     * HOLD_DONE_MS = 700 ms. Gesto se vyhodnocuje az pri PUSTENI, tedy
+     * 3040 + 300 (pusteni prstu) + 60 + 3*40 = 3520 ms - uvnitr okna, s
+     * rezervou 180 ms na obe strany.
+     *
+     * Mutacni zkouska: v modal_close_cb() v ui.c vyhodit
+     *     if (hold_done) return;
+     * gesto dialog zavre, akce se uz nespusti a kontrola selze.
+     * ----------------------------------------------------------------- */
+    tap(SET_CAN_X, SET_ROW2_Y, false);      /* JEN POSLECH -> potvrzeni */
+    touch_at(HOLD_X, HOLD_Y);
+    touch_down = true;
+    run_ms(3040, false);                    /* tesne pres tri vteriny */
+    touch_release(false);
+    swipe(120, 240, 700, 250, 3, false, false);
+    run_ms(900, false);
+    check("zpetne gesto behem oznameni akci nezrusi", fake_can_normal);
+
+    tap(SET_CAN_X, SET_ROW2_Y, false);      /* a zpatky do poslechu */
+    run_ms(200, false);
 }
 
 static void phase_wifi(void)

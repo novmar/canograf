@@ -21,6 +21,7 @@
 #include "ui.h"
 #include "i18n.h"
 #include "can/twai.h"
+#include "sleep_test.h"
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -529,6 +530,19 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
+
+#if CANOGRAF_SLEEP_TEST
+    /* Mereni klidoveho odberu misto normalniho startu. Musi to byt uplne
+     * prvni vec v setup(): panel, LVGL, CAN ani WiFi se tim padem vubec
+     * nerozjedou, takze deska bere presne to, co se meri. Nevraci se -
+     * posledni krok je hluboky spanek.
+     *
+     * Co se meri a cemu ta cisla NEodpovidaji (merime 5V vetev z USB,
+     * ne proud z baterie): src/sleep_test.cpp. Zapina se v config/,
+     * viz config/README.md. */
+    sleep_test_run();
+#endif
+
     Serial.println("\nTalento HMI v5 - start");
 
     prefs.begin("talento", true);

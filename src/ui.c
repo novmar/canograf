@@ -1200,7 +1200,33 @@ static void modal_deleted_cb(lv_event_t *e)
     if (lv_event_get_target(e) == modal) modal_forget();
 }
 
-static void modal_close_cb(lv_event_t *e) { (void)e; if (modal) lv_obj_del(modal); }
+/* Po dokonceni odpoctu se dialog zavrit NESMI. Akce uz je rozhodnuta a
+ * ceka jen na to, az si ji clovek stihne precist (HOLD_DONE_MS). Zavreni
+ * v tu chvili rusi i timer odpoctu, takze by akce tise vypadla - prst
+ * drzel tri vteriny a nestalo by se nic. Plati to i pro zpetne gesto,
+ * ktere vede sem taky. */
+static void modal_close_cb(lv_event_t *e)
+{
+    (void)e;
+    if (hold_done) return;
+    if (modal) lv_obj_del(modal);
+}
+
+/* Schova vsechna tlacitka dialogu. Pouziva se v jedinem okamziku: kdyz
+ * uz je rozhodnuto a dialog nic nenabizi. Nez se sam zavre, nema na
+ * obrazovce zustat nic, do ceho se da tuknout - jinak se oznameni
+ * "hotovo" cte jako dalsi vyzva k akci. */
+static void modal_hide_buttons(void)
+{
+    if (!modal) return;
+
+    uint32_t n = lv_obj_get_child_cnt(modal);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(modal, i);
+        if (lv_obj_check_type(c, &lv_btn_class))
+            lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 /* Zpetne gesto dela totez co tlacitko ZPET, a to kdekoliv na dialogu -
  * tedy i nad klavesnici nebo seznamem siti. Stejne jako gesta na
@@ -1288,9 +1314,13 @@ static lv_obj_t *modal_open(const char *title, uint32_t accent)
  *     Kazda ubehla vterina celym prekryvem blikne zlute: deska nema ani
  *     bzucak, ani motorek, takze zpetna vazba muze byt jedine videt a
  *     musi byt citelna i periferne.
- *   - po dokonceni se nejdriv kratce ukaze potvrzeni a teprve pak se
+ *   - po dokonceni se nejdriv kratce ukaze oznameni a teprve pak se
  *     akce provede - jinak by dialog zmizel driv, nez by si clovek stihl
- *     vsimnout, ze drzel dost dlouho.
+ *     vsimnout, ze drzel dost dlouho. To oznameni ale uz nesmi vypadat
+ *     jako otazka: prst je nahore, rozhodnuto je a akce bezi. Proto
+ *     prstenec zmizi, misto nej je plocha cedule pres celou sirku, a
+ *     tlacitka dialogu zmizi taky - neni kam tuknout, protoze neni o
+ *     cem rozhodovat. Viz hold_tick_cb() a modal_close_cb().
  * ------------------------------------------------------------------- */
 #define HOLD_MS        3000
 #define HOLD_STEP_MS   30       /* krok odpoctu - prstenec se musi hybat plynule */
@@ -1346,16 +1376,27 @@ static void hold_tick_cb(lv_timer_t *t)
     if (el >= HOLD_MS) {
         hold_done = true;
         hold_done_ms = now;
-        lv_arc_set_value(hold_ring, 100);
-        lv_obj_set_style_arc_color(hold_ring, lv_color_hex(C_SAGE), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(hold_panel, lv_color_hex(C_INK), 0);
+        /* Prstenec je odpocet a odpocet skoncil, takze uz nema co rict.
+         * Hlavne ale zbyde kruh velky jako palec se slovem uprostred, a
+         * to je presne tvar tlacitka - clovek na nej saha, i kdyz uz je
+         * hotovo. Prstenec proto mizi.
+         *
+         * Zustane plocha cedule pres celou sirku dialogu: ostre rohy,
+         * jemne zelene podbarveni, fajfka a jedno slovo. Nic kulateho a
+         * nic velikosti tlacitka, cili neni na co tuknout.
+         *
+         * Zaroven mizi vsechna tlacitka dialogu. DRZ by vybizelo k
+         * druhemu drzeni, ZRUSIT a ZPET uz nemaji co vzit zpatky (viz
+         * modal_close_cb). Dialog po dokonceni odpoctu uz jen oznamuje. */
+        lv_obj_add_flag(hold_ring, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(hold_panel,
+            lv_color_mix(lv_color_hex(C_SAGE), lv_color_hex(C_INK), 26), 0);
         lv_obj_set_style_border_color(hold_panel, lv_color_hex(C_SAGE), 0);
-        /* Fajfka nad slovem: slovo samo by pri fontu 48 z prstence vylezlo,
-         * takze text je o cislo mensi a znacka nese hlavni sdeleni. */
-        lv_obj_set_style_text_font(hold_num, UI_FONT_32, 0);
+        lv_obj_set_style_text_font(hold_num, UI_FONT_48, 0);
         lv_obj_set_style_text_color(hold_num, lv_color_hex(C_SAGE), 0);
         lv_obj_set_style_text_align(hold_num, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text_fmt(hold_num, LV_SYMBOL_OK "\n%s", T(STR_HOLD_DONE));
+        lv_label_set_text_fmt(hold_num, LV_SYMBOL_OK "  %s", T(STR_HOLD_DONE));
+        modal_hide_buttons();
         return;
     }
 

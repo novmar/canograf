@@ -153,7 +153,7 @@ static const char *const LANG_EN[] = {
     "GOT IT",
     "CANCEL",
     "HOLD %d s",
-    "OK",
+    "DONE",
     "ON",
     "OFF",
 

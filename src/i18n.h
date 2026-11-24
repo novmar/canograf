@@ -159,7 +159,10 @@ enum {
     STR_OK,
     STR_CANCEL,
     STR_HOLD_FMT,       /* "HOLD %d s" - potvrzeni drzenim */
-    STR_HOLD_DONE,      /* potvrzeno - ukaze se na chvili misto odpoctu */
+    /* Akce probehla - ukaze se na chvili misto odpoctu. Je to
+     * KONSTATOVANI, ne pokyn: prst uz je nahore a nic se nepotvrzuje.
+     * "OK" tedy ne, to se cte jako tlacitko k odklepnuti. */
+    STR_HOLD_DONE,
     STR_ON,
     STR_OFF,
 

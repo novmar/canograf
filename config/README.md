@@ -141,6 +141,43 @@ settled before the code arrives.
 | `CANOGRAF_MOD_ELM327` | `off` | ELM327 emulation for existing diagnostic apps |
 | `CANOGRAF_MOD_SDLOG` | `off` | logging to the microSD card |
 
+### Idle current measurement
+
+| key | default | meaning |
+|---|---|---|
+| `CANOGRAF_SLEEP_TEST` | `off` | `on` replaces the normal start with a stepped idle current measurement |
+
+This one does not change how the firmware behaves - it changes what the board
+**is**. With it on, `setup()` never reaches the panel, LVGL, CAN or WiFi.
+Instead it walks a list of states, holds each one for 20 seconds and announces
+over the serial line (115200) what it just turned off, so that the difference
+between two readings on a USB meter is the price of that one thing. The last
+step is deep sleep; the board wakes on a timer, boots again and the
+measurement repeats.
+
+```sh
+echo 'CANOGRAF_SLEEP_TEST=on' >> local.env
+.pio-venv/bin/pio run -t upload
+# measure, then take the line back out and flash the real firmware again
+```
+
+Keep it in `local.env`. Turning it on in a file that is in the repository
+means somebody ends up with a current meter bolted into their van instead of
+a diagnostic tool.
+
+**Read the header of `src/sleep_test.cpp` before writing any number down.**
+The measurement has three limits that make the raw figure mean something
+other than what it looks like: it measures the 5 V rail fed from USB, not the
+current drawn from the vehicle battery (roughly 0.49x); sleep over USB is
+shallower than sleep from the terminals, so the floor is an upper bound; and
+the CAN transceiver cannot be switched off at all.
+
+It used to be a separate PlatformIO project in `tools/sleep-test`. It was
+deleted when this key arrived: it carried its own copy of the CH422G expander
+addresses, the EXIO bit map and the GT911 wake register - exactly the values
+that change with the next board revision, and exactly the kind of duplicate
+where one copy gets fixed and the other quietly lies.
+
 ## Adding a board
 
 1. Measure it and write it down in `docs/hardware/<board>.md`.
