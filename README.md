@@ -113,9 +113,10 @@ through three gates, and a mis-tap cannot open any of them:
 2. **A switch in Settings**, "Enable write functions", off every time the device
    starts. It is never stored: a restart locks it again.
 3. **A sequence.** Turning the switch on shows a short page explaining what
-   writing can do, then plays a five step pattern on four shapes which you
-   repeat back. Three tries, then a minute's wait. Shapes and digits, not just
-   colours, so it works for colour-blind users too.
+   writing can do, then plays a four step pattern on four pictures - house,
+   lightning bolt, gear, key - which you repeat back. Three tries, then a
+   minute's wait. Pictures and digits rather than colours, so colour vision
+   plays no part in it.
 
 Once unlocked it stays unlocked until the device restarts - the sequence is a
 captcha, not something you repeat for every write. Each individual write still
@@ -147,6 +148,16 @@ script that is not watching what the vehicle is doing. Such a build shows a
 permanent `WRITE UNLOCKED` badge so it cannot be mistaken for a normal one after
 it has been left in a vehicle. Do not hand it to anyone else and do not leave it
 installed.
+
+There is a third way, for when rebuilding is not practical: a **Skip the write
+confirmation** switch in the debug panel. It skips the sequence for the current
+run only and is forgotten at the next restart. Compiling is still the better
+answer - a switch only skips the question, while a build without write support
+does not contain the code at all.
+
+The debug panel also has **Try captcha**, which runs the sequence as a
+rehearsal: it unlocks nothing and sends nothing, so the mechanism can be tried
+without a vehicle connected.
 
 The reasoning, and the full list of which requests are gated and which are not,
 is in [`docs/safety.md`](docs/safety.md).

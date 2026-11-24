@@ -28,8 +28,11 @@ jobs:
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
+      # requirements.txt ma zamcenou verzi PlatformIO, aby se CI nerozeslo
+      # s tim, co mame lokalne. Zaroven ho vyzaduje `cache: pip` vyse -
+      # bez nej setup-python skonci chybou, ze nema co cachovat.
       - name: Install PlatformIO
-        run: pip install --upgrade platformio
+        run: pip install -r requirements.txt
 
       - name: Build
         run: pio run

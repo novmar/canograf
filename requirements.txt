@@ -1,0 +1,3 @@
+# Nastroje pro preklad firmwaru. Verze je zamcena, aby se CI nerozesla
+# s tim, co mame lokalne.
+platformio==6.2.0

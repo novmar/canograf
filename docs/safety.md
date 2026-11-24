@@ -700,7 +700,7 @@ what is in the way and where the switch is:
 
 | Verdict | What the user is told |
 |---|---|
-| `SAFETY_DENY_LOCKED` | `STR_SAFETY_LOCKED_HINT` - "Write functions are switched off. Enable them in Settings; you will be asked to repeat a short sequence first. If you build the firmware yourself, this check can also be disabled at compile time." |
+| `SAFETY_DENY_LOCKED` | `STR_SAFETY_LOCKED_HINT` - "Write functions are switched off. Enable them in Settings; you will be asked to repeat a four step pattern first. If you build the firmware yourself, this check can also be disabled at compile time." |
 | `SAFETY_DENY_BUILD` | `STR_SAFETY_NO_WRITE_BUILD` - "This build can only read. Write functions are not compiled in - see docs/safety.md." |
 | `SAFETY_DENY_FORBIDDEN` | this device does not send that request, in any mode |
 | `SAFETY_DENY_PRECOND` | the specific condition: engine running, vehicle moving, voltage too low, no saved backup |
@@ -725,7 +725,7 @@ make three language files go stale.
 | `STR_SAFETY_TITLE` | `ENABLE WRITING` |
 | `STR_SAFETY_DISCLAIMER` | the five paragraphs above |
 | `STR_SAFETY_CONTINUE` | `CONTINUE` |
-| `STR_SAFETY_WARN` | `A wrong value can disable the vehicle. Repeat the sequence to continue.` |
+| `STR_SAFETY_WARN` | `A wrong value can disable the vehicle. Repeat the pattern to continue.` |
 | `STR_SAFETY_WATCH` | `WATCH` |
 | `STR_SAFETY_REPEAT` | `NOW REPEAT IT` |
 | `STR_SAFETY_REPLAY` | `SHOW IT AGAIN` |
@@ -738,6 +738,14 @@ make three language files go stale.
 | `STR_SAFETY_LOCKED_HINT` | `Write functions are switched off. Enable them in Settings; you will be asked to repeat a short sequence first. If you build the firmware yourself, this check can also be disabled at compile time.` |
 | `STR_SAFETY_NO_WRITE_BUILD` | `This build can only read. Write functions are not compiled in - see docs/safety.md.` |
 | `STR_SAFETY_REMOTE_STOP` | `STOP REMOTE ACCESS` |
+| `STR_DBG_BYPASS` | `SKIP THE WRITE CONFIRMATION` (debug panel switch) |
+| `STR_DBG_BYPASS_INFO` | `Writing to a control unit normally asks you to repeat a four step pattern, once per start. This switch skips it, and is forgotten when the device restarts.\n\nBuilding with write support left out is the better protection: the write code is then not in the firmware at all, while this switch only skips the question in front of it. See docs/safety.md.` |
+| `STR_SAFETY_BYPASS_BADGE` | `NO CONFIRM` (top strip, while the switch is on) |
+| `STR_DBG_TRY_CAPTCHA` | `TRY CAPTCHA` (debug panel button) |
+| `STR_DBG_TRY_CAPTCHA_INFO` | `Runs the confirmation sequence as a rehearsal. Nothing is unlocked and nothing is sent to the vehicle.` |
+| `STR_SAFETY_DEMO_TITLE` | `CAPTCHA REHEARSAL` (dialog title, so it cannot be mistaken for the real one) |
+| `STR_SAFETY_DEMO_PASS` | `Repeated correctly. This was a rehearsal - nothing was unlocked.` |
+| `STR_SAFETY_DEMO_FAIL` | `Not repeated correctly. This was a rehearsal - nothing was unlocked.` |
 
 Two conventions from `lang/README.md` that these strings have to follow: every
 key carrying a `%` marker needs a comment at its entry in `src/i18n.h` saying
@@ -757,7 +765,9 @@ the build, which is the intended behaviour.
 ```c
 bool safety_write_allowed(void);          /* same answer for every channel */
 void safety_request_unlock(void);         /* warning page, then the sequence */
-void safety_unlock_grant(void);           /* only the dialog calls this      */
+void safety_unlock_grant(void);           /* the only path that can grant    */
+void safety_demo_sequence(void);          /* rehearsal - cannot grant        */
+void safety_bypass_set(bool on);          /* debug panel, never persisted    */
 void safety_lock(void);                   /* idempotent                      */
 
 safety_class_t   safety_classify(uint32_t tx_id, const uint8_t *req, uint16_t len);
@@ -791,7 +801,7 @@ by the third caller.
 `safety_seq_begin()`, `safety_seq_input()` and the attempt counting live in
 `safety.c` because they are rules, not pixels. Generation, comparison, the
 regenerate-on-failure requirement and the lockout are all testable on the host
-with no LVGL. `ui.c` draws four styled objects and reports taps. If the two ever
+with no LVGL. `ui.c` draws four icons and reports taps. If the two ever
 disagree, the rule wins.
 
 ### Board dependencies
@@ -819,6 +829,9 @@ Not a test suite - the checks that would actually catch a regression.
 | a token is single use | consume twice, the second must fail |
 | a token cannot carry another frame | mint for request A, consume with request B, must fail |
 | a restart locks again | the state is in RAM; assert no NVS key is ever written by `safety.c` |
+| the rehearsal cannot grant | run `safety_demo_sequence()` to a correct finish, assert `safety_write_allowed()` is still false; `grep -c safety_unlock_grant src/` finds exactly one call site |
+| the debug bypass does not persist | set it, restart the device, assert it is off; assert the profile writer never serialises it |
+| the bypass does not widen anything else | with the bypass on, assert `SAFETY_DENY_FORBIDDEN` for `34` and `SAFETY_DENY_PRECOND` with the engine running |
 
 All of these run on the host, which is the point of keeping `safety.c` free of
 board headers.
@@ -870,3 +883,11 @@ board headers.
   `-DCANOGRAF_ALLOW_WRITE=1 -DCANOGRAF_WRITE_UNLOCKED=1` and have no gate at all.
   That is documented in the README, it is the honest escape hatch, and the price
   is a permanent badge on screen saying the protection is off.
+- Three ways off, in order of preference: **leave writing out of the build**
+  (the code is absent), **build with the gate open** (the code is there, the
+  question is not), or **the debug panel switch** (the question is skipped for
+  this run only). The first is the only one that reduces what the firmware is
+  able to do at all, and the text beside the switch says so.
+- `TRY CAPTCHA` in the debug panel runs the whole thing as a rehearsal, in any
+  build, granting nothing - so the mechanism can be shown and checked without a
+  vehicle and without a write-capable firmware.

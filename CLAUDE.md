@@ -203,3 +203,47 @@ Read freely. **Think before writing.**
 - Clearing fault memory destroys the extended records: occurrence counter,
   odometer at first occurrence, distance driven with the fault present. Read
   `19 06` **before** anyone clears anything. A self-healed fault wipes them too.
+
+---
+
+## How work is organised
+
+The project runs as parallel lanes with **strict file ownership**. This is not
+bureaucracy - two agents editing `src/ui.c` at once already cost a wasted
+verification cycle where a build failure belonged to somebody else's
+half-finished refactor.
+
+| Lane | Owns | Must not touch |
+|---|---|---|
+| UI | `src/ui.c`, `src/i18n.h`, `lang/*` | `src/can/*`, `platformio.ini` |
+| Transport | `src/can/*`, transport side of `src/main.cpp` | `src/ui.c` |
+| Safety | `docs/safety.md`, `src/safety.h`, `src/write/*` | `src/ui.c` |
+| Build | `platformio.ini`, `config/*`, `scripts/*` | `src/*` |
+| Hardware | `docs/hardware/*` | all code |
+
+**Only one agent may own `src/ui.c` at any moment.** If you need a change
+there and you are not the UI lane, message the UI lane over `hub` and let them
+make it.
+
+### Rules for anyone working here
+
+**Verify, do not claim.** Run the build. Render the screens and *look* at them.
+A rendered screenshot has already caught two layout faults that were invisible
+when reading the code - a gauge overflowing under the right rail, and a unit
+label that said `km/h` while the value had been converted to mph.
+
+**Say what you measured and what you guessed.** Mark inferences as inferences.
+Hours went into a software PWM experiment built on an assumption about which
+part was the bottleneck; a 174 us measurement settled it in minutes and pointed
+somewhere else entirely.
+
+**Report short.** The person reading this works fast and in parallel. Lead with
+what changed and what is still broken. Detail belongs in the document you wrote,
+not in the summary.
+
+**Coordinate directly.** If another lane needs to agree on a name or an
+interface, message them over `hub`. Do not route it through the main thread and
+do not invent a second name for something that already exists.
+
+**Finish or say you did not.** A half-applied change is worse than none,
+because the next person assumes it works.

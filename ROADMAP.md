@@ -34,11 +34,18 @@ Ordered roughly by dependency. Nothing here is a promise.
   - [ ] Show raw values next to scaled ones, for checking a vehicle profile
   - [ ] Bus statistics: frames per second, error counters, timeouts
   - [ ] Log level
+  - [ ] **Skip the write confirmation** - turns the unlock sequence off for this
+        run only, with the explanation beside it. Never persisted, see
+        [`docs/safety.md`](docs/safety.md)
+  - [ ] **Try captcha** - runs the unlock sequence as a rehearsal, unlocking
+        nothing and sending nothing, so it can be tested without a vehicle
 - [ ] **Three settings profiles** plus "reset to default"
   - [ ] Stored in NVS. The partition here is 20 kB and a profile is a few
         hundred bytes, so **no SD card is needed** - keep the card for trip logs
   - [ ] Name each profile, so they are not just 1 / 2 / 3
-  - [ ] Profile covers units, blanking, language, debug flags
+  - [ ] Profile covers units, blanking, language, debug flags - **except the
+        write confirmation switch**, which must never be stored or exported,
+        or a profile would carry a disabled safety gate between devices
 
 ## Known bugs
 
