@@ -5,6 +5,14 @@
  * prekopiruje a pak se z nej udela PNG. Cas je virtualni (lv_tick_inc),
  * takze beh je deterministicky a nezavisi na rychlosti stroje.
  *
+ * Druha cast je zkouska ovladani: registruje se predstirany dotyk a
+ * predstirana deska (sken WiFi vraci vymyslene site), takze jdou
+ * vyfotit i stavy, do kterych se UI dostane az po doteku - vysunuta
+ * navigace, dialogy, odpocet u potvrzeni drzenim a stav regenerace.
+ * Zaroven se tim da overit chovani, ktere na snimku videt neni, treba
+ * ze tah z tlacitka navigace neprepne stranku; takove kontroly pisou
+ * PASS/FAIL a nenulovy navratovy kod.
+ *
  * Pouziti:  lv_shot <vystupni adresar> [kod jazyka]
  *
  * Bez kodu jazyka se kresli vychozi anglictina. "lv_shot /tmp/shots cs"
@@ -72,6 +80,180 @@ static void safe_name(char *dst, size_t n, const char *src)
             (*src >= '0' && *src <= '9'))
             dst[k++] = *src;
     dst[k] = '\0';
+}
+
+/* ---------------------------------------------------------------------
+ * Predstirana deska
+ *
+ * Sken vraci petici vymyslenych siti, dve z nich jsou "ulozene", aby
+ * bylo videt odliseni v seznamu i zapomínani. Hesla nikam nejdou, drzi
+ * se jen v pameti teto zkousky.
+ * ------------------------------------------------------------------- */
+#define FAKE_SCAN_MS 400        /* jak dlouho predstirany sken "bezi" */
+
+static const char *const FAKE_SSID[] = {
+    "dilna", "Trafic-hotspot", "domov", "UPC1234567", "sousedi"
+};
+#define FAKE_N ((int)(sizeof(FAKE_SSID) / sizeof(FAKE_SSID[0])))
+
+static char fake_saved[4][33] = { "dilna", "domov" };
+static int  fake_saved_n = 2;
+static uint32_t fake_scan_done_at = 0;
+static bool fake_scan_running = false;
+static char fake_conn[33] = "";
+
+static int fake_find(const char *ssid)
+{
+    for (int i = 0; i < fake_saved_n; i++)
+        if (strcmp(fake_saved[i], ssid) == 0) return i;
+    return -1;
+}
+
+static void fake_scan_start(void)
+{
+    fake_scan_running = true;
+    fake_scan_done_at = lv_tick_get() + FAKE_SCAN_MS;
+}
+
+static int fake_scan_result(void)
+{
+    if (!fake_scan_running) return -2;
+    if (lv_tick_get() < fake_scan_done_at) return -1;
+    return FAKE_N;
+}
+
+static const char *fake_scan_ssid(int i)
+{
+    return (i >= 0 && i < FAKE_N) ? FAKE_SSID[i] : "";
+}
+
+static void fake_connect(const char *ssid, const char *pass)
+{
+    (void)pass;
+    if (fake_find(ssid) < 0 && fake_saved_n < 4)
+        snprintf(fake_saved[fake_saved_n++], 33, "%s", ssid);
+    snprintf(fake_conn, sizeof(fake_conn), "%s", ssid);
+}
+
+static bool fake_known(const char *ssid) { return fake_find(ssid) >= 0; }
+
+static bool fake_connect_known(const char *ssid)
+{
+    if (fake_find(ssid) < 0) return false;
+    snprintf(fake_conn, sizeof(fake_conn), "%s", ssid);
+    return true;
+}
+
+static void fake_forget(const char *ssid)
+{
+    int i = fake_find(ssid);
+    if (i < 0) return;
+    for (int k = i; k + 1 < fake_saved_n; k++)
+        memcpy(fake_saved[k], fake_saved[k + 1], 33);
+    fake_saved_n--;
+}
+
+static bool fake_connected(void) { return fake_conn[0] != '\0'; }
+static const char *fake_ssid(void) { return fake_conn; }
+static const char *fake_ip(void) { return fake_conn[0] ? "192.168.1.42" : ""; }
+
+static const ui_host_t FAKE_HOST = {
+    NULL,                   /* backlight */
+    NULL,                   /* save_cfg */
+    fake_scan_start,
+    fake_scan_result,
+    fake_scan_ssid,
+    fake_connect,
+    fake_connected,
+    fake_ssid,
+    fake_ip,
+    fake_known,
+    fake_connect_known,
+    fake_forget,
+    NULL, NULL,             /* heap_kb, psram_kb */
+    NULL, NULL, NULL, NULL, /* pokus s PWM podsvicenim */
+};
+
+/* ---------------------------------------------------------------------
+ * Predstirany dotyk
+ *
+ * LVGL si cte polohu a stav z techto dvou promennych, takze tah se sklada
+ * z posouvani bodu mezi volanimi lv_timer_handler().
+ * ------------------------------------------------------------------- */
+static lv_point_t touch_pt;
+static bool touch_down;
+
+static void read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    (void)drv;
+    data->point = touch_pt;
+    data->state = touch_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+
+/* Beh virtualniho casu. anim_only necha stranou ui_tick(), takze se
+ * namerene hodnoty nehybou a dva snimky jdou porovnat. */
+static void run_ms(int ms, bool anim_only)
+{
+    for (int t = 0; t < ms; t += STEP_MS) {
+        lv_tick_inc(STEP_MS);
+        if (!anim_only) ui_tick();
+        lv_timer_handler();
+    }
+}
+
+static void touch_at(lv_coord_t x, lv_coord_t y) { touch_pt.x = x; touch_pt.y = y; }
+
+static void tap(lv_coord_t x, lv_coord_t y, bool anim_only)
+{
+    touch_at(x, y);
+    touch_down = true;
+    run_ms(120, anim_only);
+    touch_down = false;
+    run_ms(200, anim_only);
+}
+
+/* Tah z (x1,y1) do (x2,y2) po krocich; drzi prst dole, kdyz keep_down. */
+static void swipe(lv_coord_t x1, lv_coord_t y1, lv_coord_t x2, lv_coord_t y2,
+                  int steps, bool keep_down, bool anim_only)
+{
+    touch_at(x1, y1);
+    touch_down = true;
+    run_ms(60, anim_only);
+    for (int i = 1; i <= steps; i++) {
+        touch_at((lv_coord_t)(x1 + (x2 - x1) * i / steps),
+                 (lv_coord_t)(y1 + (y2 - y1) * i / steps));
+        run_ms(40, anim_only);
+    }
+    if (keep_down) return;
+    touch_down = false;
+    run_ms(300, anim_only);
+}
+
+static void touch_release(bool anim_only)
+{
+    touch_down = false;
+    run_ms(300, anim_only);
+}
+
+/* Otisk obsahove casti obrazovky (pod horni listou, nad prekryvem
+ * navigace). Kdyz se nezmeni, nezmenila se ani stranka. */
+static unsigned content_hash(void)
+{
+    unsigned h = 2166136261u;
+    for (int y = 64; y < 64 + 228; y++)
+        for (int x = 0; x < 736; x++) {
+            h ^= (unsigned)lv_color_to32(frame[y * SCR_W + x]);
+            h *= 16777619u;
+        }
+    return h;
+}
+
+static int checks_failed = 0;
+
+static void check(const char *what, bool ok)
+{
+    printf("%-52s %s\n", what, ok ? "PASS" : "FAIL");
+    if (!ok) checks_failed++;
 }
 
 int main(int argc, char **argv)

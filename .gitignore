@@ -6,9 +6,10 @@
 .clang_complete
 .gcc-flags.json
 
-# simulator / CI build
+# simulator / hostitelske testy / CI build
 sim/build/
 sim/third_party/lvgl/
+test/build/
 *.png.tmp
 
 # python venv pouzite pro platformio

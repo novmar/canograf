@@ -55,6 +55,11 @@ static const char *const LANG_DE[] = {
     "Taste 31 01 02 0D. Die Abgastemperatur übersteigt dabei 600 C. "
     "Nur am stehenden Fahrzeug im Freien, bei warmem Motor, und sie "
     "darf nicht unterbrochen werden.",
+    "REGEN.-STATUS",
+    "AUS",
+    "GESENDET",
+    "LÄUFT",
+    "LÄUFT %",
 
     /* Einstellungen */
     "TEMPO",
@@ -73,6 +78,13 @@ static const char *const LANG_DE[] = {
     "suche...",
     "PASSWORT FÜR  %s",
     "Passwort",
+    "grün = gespeichert, tippen verbindet, halten vergisst",
+    "NETZ VERGESSEN",
+    "%s\n\nDas gespeicherte Passwort wird gelöscht. Beim nächsten "
+    "Verbinden fragt die Oberfläche erneut danach.",
+    "kein Netz gefunden",
+    "Suche fehlgeschlagen - erneut versuchen",
+    "ERNEUT VERSUCHEN",
 
     /* Dialoge */
     "ZURÜCK",
@@ -80,6 +92,7 @@ static const char *const LANG_DE[] = {
     "VERSTANDEN",
     "ABBRECHEN",
     "%d s HALTEN",
+    "FERTIG",
 
     /* Versuch mit PWM-Hintergrundbeleuchtung */
     "Helligkeit - Versuch mit Software-PWM",

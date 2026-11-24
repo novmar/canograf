@@ -62,6 +62,11 @@ enum {
     STR_DPF_NO_VEHICLE,
     STR_REGEN_TITLE,
     STR_REGEN_BODY,
+    STR_REGEN_STATE,        /* popisek rucniho prepinace stavu regenerace */
+    STR_REGEN_OFF,
+    STR_REGEN_REQ,
+    STR_REGEN_RUN,
+    STR_REGEN_RUN_PCT,
 
     /* nastaveni */
     STR_SET_SPEED,
@@ -80,6 +85,12 @@ enum {
     STR_WIFI_SEARCHING,
     STR_WIFI_PASS_FOR,      /* jedno %s = nazev site */
     STR_WIFI_PASS_PH,
+    STR_WIFI_SAVED,         /* legenda u seznamu siti */
+    STR_WIFI_FORGET_TITLE,
+    STR_WIFI_FORGET_BODY,   /* jedno %s = nazev site */
+    STR_WIFI_NONE,          /* sken dobehl a nic nenasel */
+    STR_WIFI_FAILED,        /* sken se nerozjel nebo se nedockal */
+    STR_WIFI_RETRY,
 
     /* dialogy */
     STR_BACK,
@@ -87,6 +98,7 @@ enum {
     STR_OK,
     STR_CANCEL,
     STR_HOLD_FMT,       /* "HOLD %d s" - potvrzeni drzenim */
+    STR_HOLD_DONE,      /* potvrzeno - ukaze se na chvili misto odpoctu */
 
     /* pokus s PWM podsvicenim */
     STR_BRIGHT_TITLE,

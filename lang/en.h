@@ -56,6 +56,11 @@ static const char *const LANG_EN[] = {
     "No vehicle is connected.\n\nOnce one is, this button sends "
     "31 01 02 0D. Exhaust temperature goes past 600 C. Stationary "
     "vehicle outdoors only, engine warm, and it must not be interrupted.",
+    "REGEN STATE",
+    "OFF",
+    "REQUESTED",
+    "RUNNING",
+    "RUNNING %",
 
     /* settings */
     "SPEED",
@@ -74,6 +79,13 @@ static const char *const LANG_EN[] = {
     "scanning...",
     "PASSWORD FOR  %s",
     "password",
+    "green = saved, tap connects, hold forgets",
+    "FORGET NETWORK",
+    "%s\n\nThe saved password will be deleted. Connecting to this "
+    "network again will ask for it.",
+    "no network found",
+    "scan failed - try again",
+    "TRY AGAIN",
 
     /* dialogs */
     "BACK",
@@ -81,6 +93,7 @@ static const char *const LANG_EN[] = {
     "GOT IT",
     "CANCEL",
     "HOLD %d s",
+    "OK",
 
     /* backlight PWM experiment */
     "Brightness - software PWM experiment",

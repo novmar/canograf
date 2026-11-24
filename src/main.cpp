@@ -20,6 +20,7 @@
 #include "lvgl_v8_port.h"
 #include "ui.h"
 #include "i18n.h"
+#include "can/twai.h"
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -124,19 +125,114 @@ static void host_save_cfg(bool mph, bool fahrenheit, uint32_t blank_s, int lang)
     prefs.end();
 }
 
-/* ---------------- WiFi ---------------- */
+/* ---------------------------------------------------------------------
+ * WiFi
+ *
+ * Zapamatovanych siti je sest. Diagnostika potka dilnu, domov, telefon
+ * a par zakaznickych siti; sest jich pokryje, vic uz by se do seznamu
+ * nevesolo najednou a kazda stoji v NVS jen SSID a heslo (asi 100 B).
+ * Poradi je podle posledniho pripojeni, takze pri zaplneni vypadne ta
+ * nejdele nepouzita.
+ *
+ * Klice v NVS: "wn" pocet, "ws0".."ws5" SSID, "wp0".."wp5" heslo.
+ * ------------------------------------------------------------------- */
+#define WIFI_SLOTS 6
+
+static char saved_ssid[WIFI_SLOTS][33];
+static char saved_pass[WIFI_SLOTS][65];
+static int  saved_n = 0;
+
 /* LVGL dostava jen const char*, takze retezce z Arduino String musi prezit
  * navrat z funkce - proto staticke kopie. */
 static char scan_ssid_buf[33];
 static char conn_ssid_buf[33];
 static char ip_buf[20];
 
-static void host_wifi_scan_start(void)
+static int saved_find(const char *ssid)
 {
-    WiFi.scanDelete();
-    WiFi.scanNetworks(true);
+    if (!ssid || !ssid[0]) return -1;
+    for (int i = 0; i < saved_n; i++)
+        if (strcmp(saved_ssid[i], ssid) == 0) return i;
+    return -1;
 }
 
+static void saved_store(void)
+{
+    prefs.begin("talento", false);
+    prefs.putInt("wn", saved_n);
+    for (int i = 0; i < saved_n; i++) {
+        char k[8];
+        snprintf(k, sizeof(k), "ws%d", i); prefs.putString(k, saved_ssid[i]);
+        snprintf(k, sizeof(k), "wp%d", i); prefs.putString(k, saved_pass[i]);
+    }
+    prefs.end();
+}
+
+static void saved_load(void)
+{
+    prefs.begin("talento", false);
+    saved_n = prefs.getInt("wn", -1);
+    if (saved_n < 0) {
+        /* Prechod z verze, ktera si pamatovala jedinou sit. Stare klice
+         * uz nikdo necte, takze po prepsani zmizi. */
+        saved_n = 0;
+        String s = prefs.getString("ssid", ""), p = prefs.getString("pass", "");
+        if (s.length()) {
+            snprintf(saved_ssid[0], sizeof(saved_ssid[0]), "%s", s.c_str());
+            snprintf(saved_pass[0], sizeof(saved_pass[0]), "%s", p.c_str());
+            saved_n = 1;
+        }
+        prefs.remove("ssid");
+        prefs.remove("pass");
+        prefs.end();
+        saved_store();
+        return;
+    }
+    if (saved_n > WIFI_SLOTS) saved_n = WIFI_SLOTS;
+    for (int i = 0; i < saved_n; i++) {
+        char k[8];
+        snprintf(k, sizeof(k), "ws%d", i);
+        snprintf(saved_ssid[i], sizeof(saved_ssid[i]), "%s",
+                 prefs.getString(k, "").c_str());
+        snprintf(k, sizeof(k), "wp%d", i);
+        snprintf(saved_pass[i], sizeof(saved_pass[i]), "%s",
+                 prefs.getString(k, "").c_str());
+    }
+    prefs.end();
+}
+
+/* Ulozi sit na prvni misto. Kdyz uz tam je, jen se posune nahoru;
+ * kdyz je plno, vypadne posledni. */
+static void saved_put(const char *ssid, const char *pass)
+{
+    if (!ssid || !ssid[0]) return;
+    int at = saved_find(ssid);
+    if (at < 0) {
+        at = (saved_n < WIFI_SLOTS) ? saved_n++ : WIFI_SLOTS - 1;
+    }
+    for (int i = at; i > 0; i--) {
+        memcpy(saved_ssid[i], saved_ssid[i - 1], sizeof(saved_ssid[0]));
+        memcpy(saved_pass[i], saved_pass[i - 1], sizeof(saved_pass[0]));
+    }
+    snprintf(saved_ssid[0], sizeof(saved_ssid[0]), "%s", ssid);
+    snprintf(saved_pass[0], sizeof(saved_pass[0]), "%s", pass ? pass : "");
+    saved_store();
+}
+
+static void host_wifi_scan_start(void)
+{
+    /* Sken se nerozjede, kdyz radio neni v rezimu STA nebo kdyz prave
+     * bezi nedokonceny pokus o pripojeni - esp_wifi_scan_start v tom
+     * stavu vrati chybu a scanComplete() pak hlasi -2 az do smrti.
+     * Fungujici spojeni se nerusi, pri nem sken na ESP32 projde. */
+    WiFi.mode(WIFI_STA);
+    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false, false);
+    WiFi.scanDelete();
+    int16_t r = WiFi.scanNetworks(true);
+    if (r == WIFI_SCAN_FAILED) Serial.println("WiFi: sken se nerozjel");
+}
+
+/* -1 jeste bezi, -2 nerozjelo se, jinak pocet siti */
 static int host_wifi_scan_result(void) { return WiFi.scanComplete(); }
 
 static const char *host_wifi_scan_ssid(int i)
@@ -147,11 +243,36 @@ static const char *host_wifi_scan_ssid(int i)
 
 static void host_wifi_connect(const char *ssid, const char *pass)
 {
-    prefs.begin("talento", false);
-    prefs.putString("ssid", ssid);
-    prefs.putString("pass", pass);
-    prefs.end();
+    saved_put(ssid, pass);
     WiFi.begin(ssid, pass);
+}
+
+static bool host_wifi_known(const char *ssid) { return saved_find(ssid) >= 0; }
+
+static bool host_wifi_connect_known(const char *ssid)
+{
+    int i = saved_find(ssid);
+    if (i < 0) return false;
+    /* kopie, protoze saved_put() sloty prehazi */
+    char pass[sizeof(saved_pass[0])];
+    memcpy(pass, saved_pass[i], sizeof(pass));
+    saved_put(ssid, pass);
+    WiFi.begin(ssid, pass);
+    return true;
+}
+
+static void host_wifi_forget(const char *ssid)
+{
+    int i = saved_find(ssid);
+    if (i < 0) return;
+    for (int k = i; k + 1 < saved_n; k++) {
+        memcpy(saved_ssid[k], saved_ssid[k + 1], sizeof(saved_ssid[0]));
+        memcpy(saved_pass[k], saved_pass[k + 1], sizeof(saved_pass[0]));
+    }
+    saved_n--;
+    saved_ssid[saved_n][0] = 0;
+    saved_pass[saved_n][0] = 0;
+    saved_store();
 }
 
 static bool host_wifi_connected(void) { return WiFi.status() == WL_CONNECTED; }
@@ -183,6 +304,9 @@ static const ui_host_t UI_HOST = {
     host_wifi_connected,
     host_wifi_ssid,
     host_wifi_ip,
+    host_wifi_known,
+    host_wifi_connect_known,
+    host_wifi_forget,
     host_heap_kb,
     host_psram_kb,
     host_measure_toggle,
@@ -208,7 +332,6 @@ void setup()
     int def_lang = i18n_find(CANOGRAF_DEFAULT_LANG);
     if (def_lang < 0) def_lang = 0;
     int lang = prefs.getInt("lang", def_lang);
-    String ss = prefs.getString("ssid", ""), pw = prefs.getString("pass", "");
     prefs.end();
 
     g_board = new Board();
@@ -220,10 +343,24 @@ void setup()
     }
     Serial.println("LVGL OK");
 
+    /* CAN se rozjizdi v listen-only: radic nevysila ani potvrzovaci bit,
+     * takze ani spatna rychlost nebo prohozene piny nemuzou rozhodit
+     * provozni sbernici vozu. Do normalniho rezimu se prepina az vedome
+     * pres can_set_mode(). Kdyz profil desky nedosadil piny, can_start()
+     * nic nenahodi a rekne to do logu - firmware tim nepadne, jen nema
+     * CAN. */
+    {
+        can_cfg_t can;
+        can_cfg_default(&can);
+        Serial.printf("CAN: %s\n", can_start(&can) ? "listen-only" : "nejede");
+    }
+
     WiFi.mode(WIFI_STA);
-    if (ss.length()) {
-        WiFi.begin(ss.c_str(), pw.c_str());
-        Serial.printf("WiFi: zkousim %s\n", ss.c_str());
+    saved_load();
+    if (saved_n) {
+        WiFi.begin(saved_ssid[0], saved_pass[0]);
+        Serial.printf("WiFi: zkousim %s (ulozenych siti %d)\n",
+                      saved_ssid[0], saved_n);
     }
     ArduinoOTA.setHostname("talento-hmi");
     ArduinoOTA.begin();
@@ -242,5 +379,8 @@ void setup()
 void loop()
 {
     ArduinoOTA.handle();
+    /* Jediny zapisovatel do kruhoveho zasobniku ramcu. UI z nej cte
+     * svym vlastnim kurzorem, viz src/can/twai.h. */
+    can_poll();
     delay(20);
 }

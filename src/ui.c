@@ -36,12 +36,22 @@
 #define C_SAGE      0x68937A
 #define C_LABEL     0x65798B
 #define C_BRIGHT    0xDCE7F0
+/* Podkres sloupce DPF pri regeneraci - C_DEFICIT primichana do pozadi.
+ * Tlumena pri pokusu o spusteni, vyrazna pri blikani bezici regenerace. */
+#define C_REGEN_DIM 0x3A1D1B
+#define C_REGEN_HOT 0x7C2F23
 
 /* ---------------- rozvrzeni ---------------- */
 #define TOP_H   64
 #define NAV_H   124             /* 14,5 mm */
 #define RAIL_W  64
 #define CONT_W  (800 - RAIL_W)
+
+/* Stranky maji vzdy plnou vysku pod horni listou. Navigace je prekryv:
+ * vysouva se pres obsah, nic nepostrkuje a nic nezmensuje. Diky tomu
+ * obsah pri hrani s navigaci nikam neposkakuje a ukazatele maji porad
+ * stejny prumer. */
+#define PAGE_H  (480 - TOP_H)
 
 /* Pravy sloupec s nasycenim DPF. Neni to panel - ma stejne pozadi jako
  * obsah stranky a od ukazatelu ho deli jen vlasova linka. Samotny
@@ -68,11 +78,12 @@ static const int PAGE_STR[N_PAGES] = {
 static lv_obj_t *page[N_PAGES], *navbtn[N_PAGES];
 static lv_obj_t *navbar, *rail;
 static int cur_page = PG_HLAVNI;
-static bool nav_visible = true;
 
 /* ---------------- trvale prvky ---------------- */
 static lv_obj_t *lbl_temp, *lbl_state, *rail_bar, *rail_val;
 static lv_obj_t *rail_rule, *rail_tick[4];
+/* naposled nastavene pozadi sloupce; prekresluje se jen pri zmene */
+static uint32_t rail_bg_shown = C_INK;
 /* hlavni */
 static lv_obj_t *arc_speed, *arc_rpm, *lbl_speed_v, *lbl_rpm_v, *lbl_speed_u, *lbl_rpm_u;
 /* motor */
@@ -82,6 +93,8 @@ static lv_obj_t *chart, *lbl_gap;
 static lv_chart_series_t *ser_sp, *ser_act;
 /* nastaveni */
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
+/* DPF */
+static lv_obj_t *btn_regen_state;
 
 /* ---------------- deska ---------------- */
 static const ui_host_t *host = NULL;
@@ -108,6 +121,13 @@ static const char *host_wifi_ip(void)
 {
     const char *s = (host && host->wifi_ip) ? host->wifi_ip() : NULL;
     return s ? s : "";
+}
+
+/* Zapamatovane site. Hesla zustavaji na desce, UI se jen pta. */
+static bool host_wifi_known(const char *ssid)
+{
+    if (!host || !host->wifi_known || !ssid || !ssid[0]) return false;
+    return host->wifi_known(ssid);
 }
 
 /* ---------------- nastaveni ---------------- */
@@ -137,6 +157,52 @@ static val_t v_speed, v_rpm, v_temp, v_boost, v_boost_sp, v_vnt, v_rail, v_soot;
 static float sim_t = 0;
 static uint32_t last_sample = 0;
 static inline void approach(val_t *v, float k) { v->shown += (v->target - v->shown) * k; }
+
+/* ---------------------------------------------------------------------
+ * Dotek: tuknuti versus tah
+ *
+ * LV_EVENT_CLICKED posila LVGL pri uvolneni tomu objektu, na kterem tah
+ * ZACAL, at uz prst skonci kdekoliv. Jedina vestavena vyjimka je
+ * rolovani - a nase panely rolovatelne nejsou, takze tah nahoru zacaty
+ * na tlacitku navigace poslal i klik a prepnul stranku.
+ *
+ * Rozhoduje vzdalenost mezi mistem stisku a mistem uvolneni. Prah 30 px
+ * je 3,5 mm: nad chvenim prstu pri tuknuti (LVGL sam bere posun do
+ * 10 px jako stani) a pod 50 px, ktere potrebuje gesto, takze jeden tah
+ * nikdy neudela obe veci najednou.
+ * ------------------------------------------------------------------- */
+#define DRAG_PX  30
+
+static lv_coord_t press_x, press_y;
+
+static void press_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *in = lv_indev_get_act();
+    if (!in) return;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    press_x = p.x;
+    press_y = p.y;
+}
+
+static bool was_drag(void)
+{
+    lv_indev_t *in = lv_indev_get_act();
+    if (!in) return false;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    int dx = p.x - press_x, dy = p.y - press_y;
+    return dx * dx + dy * dy > DRAG_PX * DRAG_PX;
+}
+
+/* Visi na kazdem tlacitku pred jeho vlastni obsluhou kliku: kdyz slo o
+ * tah, zarazi zpracovani udalosti a obsluha se vubec nezavola. Jedno
+ * misto pro vsechna tlacitka - na nove uz se neda zapomenout. */
+static void drag_guard_cb(lv_event_t *e)
+{
+    if (was_drag()) lv_event_stop_processing(e);
+}
 
 /* ---------------- stavebni prvky ---------------- */
 static lv_obj_t *mk_panel(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
@@ -185,7 +251,13 @@ static lv_obj_t *mk_button(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
     lv_obj_set_style_text_color(l, lv_color_hex(C_BRIGHT), 0);
     lv_obj_set_style_text_color(l, lv_color_hex(C_INK), LV_STATE_PRESSED);
     lv_obj_center(l);
-    if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+    /* Poradi je dulezite: hlidac tahu musi bezet pred vlastni obsluhou,
+     * aby ji stihl zarazit. LVGL vola obsluhy v poradi registrace. */
+    lv_obj_add_event_cb(b, press_cb, LV_EVENT_PRESSED, NULL);
+    if (cb) {
+        lv_obj_add_event_cb(b, drag_guard_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+    }
     return b;
 }
 
@@ -216,30 +288,82 @@ static void backlight(bool on)
 }
 
 /* ---------------------------------------------------------------------
- * Navigace ma tri stavy, prepinaji se tazenim nahoru:
+ * Navigace ma tri stavy:
  *   0  jen uchyt  - tenky pruh s "=" uprostred, jako na Androidu
  *   1  lista      - sest tlacitek stranek; po 5 s necinnosti spadne na 0
  *   2  dlazdice   - mrizka 3x6 pro budouci ikony, zatim prazdna
- * Tazeni dolu jde vzdy o stupen zpet.
+ *
+ * Navigace je PREKRYV nad strankami. Driv si stranky i sloupec DPF
+ * prepocitavaly vysku podle toho, kolik navigace zabirala, takze se
+ * obsah pri kazdem vysunuti scvrkl a ukazatele zmenily prumer. Ovladani
+ * nema prekreslovat obsah, takze stranky maji vzdy PAGE_H a lista se
+ * vysouva pres ne.
+ *
+ * Prepina se trojim zpusobem: tuknutim na uchyt, gestem a tazenim prstu
+ * jako u bottom sheetu na Androidu - nahoru, drzet, dolu zpatky, bez
+ * pusteni. Pri tazeni panel jen jezdi po ose y a nemeni velikost: neni
+ * co preskladat a prekresli se jen pruh, o ktery se panel posunul.
  * ------------------------------------------------------------------- */
 #define NAV_HANDLE_H  44
 #define NAV_GRID_H    300
 #define NAV_IDLE_MS   5000
+#define NAV_ANIM_MS   180       /* zapadnuti po pusteni */
+#define NAV_FLING     8         /* px mezi dvema ctenimi doteku (~20 ms),
+                                   tedy asi 400 px/s = svihnuti */
 
 static lv_obj_t *navhandle, *navgrid;
 static int nav_state = 0;
 static uint32_t nav_shown_ms = 0;
 
-static void layout_hlavni(void);
-static void layout_rail(lv_coord_t h);
+/* kolik navigace prave zabira zespodu; 0 = jeste neni postavena */
+static lv_coord_t nav_h_shown = 0;
 
-static lv_coord_t nav_height(void)
+static lv_coord_t nav_state_h(int s)
 {
-    switch (nav_state) {
+    switch (s) {
         case 1:  return NAV_H;
         case 2:  return NAV_GRID_H;
         default: return NAV_HANDLE_H;
     }
+}
+
+static void nav_apply(lv_coord_t h)
+{
+    if (h < NAV_HANDLE_H) h = NAV_HANDLE_H;
+    if (h > NAV_GRID_H)   h = NAV_GRID_H;
+    nav_h_shown = h;
+
+    /* Co je videt, urcuje vyska: do vysky uchytu uchyt, nad ni lista a od
+     * jeji plne vysky vys mrizka. Panely si drzi svou velikost a jen
+     * vyjizdeji zpod spodni hrany, takze se v nich nic nepreklada. */
+    bool grid = h > NAV_H;
+    bool bar  = !grid && h > NAV_HANDLE_H;
+
+    if (grid) lv_obj_clear_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
+    if (bar)  lv_obj_clear_flag(navbar, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(navbar, LV_OBJ_FLAG_HIDDEN);
+    if (!grid && !bar) lv_obj_clear_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
+    else               lv_obj_add_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_set_y(navbar, 480 - h);
+    lv_obj_set_y(navgrid, 480 - h);
+}
+
+static void nav_anim_cb(void *p, int32_t v) { (void)p; nav_apply((lv_coord_t)v); }
+
+static void nav_animate_to(lv_coord_t h)
+{
+    lv_anim_del(&nav_h_shown, NULL);
+    if (nav_h_shown == 0 || nav_h_shown == h) { nav_apply(h); return; }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, &nav_h_shown);
+    lv_anim_set_exec_cb(&a, nav_anim_cb);
+    lv_anim_set_values(&a, nav_h_shown, h);
+    lv_anim_set_time(&a, NAV_ANIM_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 static void set_nav_state(int s)
@@ -247,25 +371,8 @@ static void set_nav_state(int s)
     if (s < 0) s = 0;
     if (s > 2) s = 2;
     nav_state = s;
-    nav_visible = (s > 0);
     nav_shown_ms = lv_tick_get();
-
-    if (s == 0) lv_obj_clear_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
-    else        lv_obj_add_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
-    if (s == 1) lv_obj_clear_flag(navbar, LV_OBJ_FLAG_HIDDEN);
-    else        lv_obj_add_flag(navbar, LV_OBJ_FLAG_HIDDEN);
-    if (s == 2) lv_obj_clear_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
-    else        lv_obj_add_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
-
-    lv_coord_t h = 480 - TOP_H - nav_height();
-    /* build_chrome() vola set_nav_state(0) jeste pred stavbou stranek,
-     * takze pri prvnim pruchodu je pole stranek prazdne - NULL preskocit.
-     * Stranky si do te doby nechavaji vysku z mk_page(). */
-    for (int i = 0; i < N_PAGES; i++)
-        if (page[i]) lv_obj_set_size(page[i], CONT_W, h);
-    lv_obj_set_size(rail, RAIL_W, h);
-    layout_rail(h);
-    layout_hlavni();
+    nav_animate_to(nav_state_h(s));
 }
 
 int ui_page_count(void) { return N_PAGES; }
@@ -297,17 +404,77 @@ static void nav_cb(lv_event_t *e)
 
 static void handle_cb(lv_event_t *e) { (void)e; set_nav_state(1); }
 
-/* Zacatek tahu si pamatujeme kvuli gestu od leveho okraje = zpet,
- * jak je zvykem na Androidu. */
-static lv_coord_t press_x = 0;
-static void press_cb(lv_event_t *e)
+/* ---- tazeni navigace prstem ---- */
+static bool nav_drag = false;           /* tah uz prekrocil prah */
+static lv_coord_t nav_drag_h0;          /* vyska ve chvili stisku */
+static int nav_drag_state0;
+static int nav_drag_vel;                /* vyhlazena rychlost, + = nahoru */
+static lv_coord_t nav_drag_last_y;
+
+static void nav_press_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_anim_del(&nav_h_shown, NULL);    /* prst prebira rizeni od animace */
+    nav_drag = false;
+    nav_drag_h0 = nav_h_shown;
+    nav_drag_state0 = nav_state;
+    nav_drag_vel = 0;
+    nav_drag_last_y = press_y;
+}
+
+static void nav_pressing_cb(lv_event_t *e)
 {
     (void)e;
     lv_indev_t *in = lv_indev_get_act();
     if (!in) return;
     lv_point_t p;
     lv_indev_get_point(in, &p);
-    press_x = p.x;
+    lv_coord_t dy = press_y - p.y;              /* nahoru = kladne */
+    if (!nav_drag) {
+        if (dy > -DRAG_PX && dy < DRAG_PX) return;
+        nav_drag = true;
+    }
+    /* Rychlost z poslednich cteni, at se pozna svihnuti. Vaha 3:1 ve
+     * prospech noveho vzorku: kratke svihnuti se musi stihnout projevit,
+     * jednotlive chveni prstu to jeste vyhladi. */
+    nav_drag_vel = (nav_drag_vel + 3 * (nav_drag_last_y - p.y)) / 4;
+    nav_drag_last_y = p.y;
+    nav_apply(nav_drag_h0 + dy);
+}
+
+static void nav_release_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!nav_drag) return;
+    nav_drag = false;
+
+    /* Rychle svihnuti prepne o stupen, i kdyz prst neurazil ani pulku
+     * cesty - tak se bottom sheet chova na telefonu a cekat na pulku by
+     * bylo liknave. Pomale tazeni rozhoduje podle pixelu, ne po
+     * tretinach: stavy nejsou stejne daleko (44 / 124 / 300 px). */
+    int s;
+    if (nav_drag_vel >= NAV_FLING)       s = nav_drag_state0 + 1;
+    else if (nav_drag_vel <= -NAV_FLING) s = nav_drag_state0 - 1;
+    else {
+        s = 0;
+        lv_coord_t best = LV_ABS(nav_h_shown - nav_state_h(0));
+        for (int i = 1; i <= 2; i++) {
+            lv_coord_t d = LV_ABS(nav_h_shown - nav_state_h(i));
+            if (d < best) { best = d; s = i; }
+        }
+    }
+    set_nav_state(s);       /* zapadnuti animaci a novy odpocet 5 s */
+}
+
+/* Panely navigace reaguji na tah prstem. Tlacitka stranek a dlazdice maji
+ * EVENT_BUBBLE, takze tah zacaty na nich dojde sem taky. */
+static void nav_attach_drag(lv_obj_t *o)
+{
+    lv_obj_add_event_cb(o, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(o, nav_press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(o, nav_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(o, nav_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(o, nav_release_cb, LV_EVENT_PRESS_LOST, NULL);
 }
 
 static void gesture_cb(lv_event_t *e)
@@ -321,19 +488,71 @@ static void gesture_cb(lv_event_t *e)
             else ui_show_page(cur_page + 1);
             break;
         case LV_DIR_LEFT:  ui_show_page(cur_page - 1); break;
-        case LV_DIR_TOP:    set_nav_state(nav_state + 1); break;
-        case LV_DIR_BOTTOM: set_nav_state(nav_state - 1); break;
+        /* Kdyz tah zacal na navigaci, uz si ho vyridilo tazeni - jinak by
+         * se stav prepnul dvakrat. */
+        case LV_DIR_TOP:    if (!nav_drag) set_nav_state(nav_state + 1); break;
+        case LV_DIR_BOTTOM: if (!nav_drag) set_nav_state(nav_state - 1); break;
         default: break;
     }
 }
 
-/* ---------------- modal ---------------- */
+/* ---------------------------------------------------------------------
+ * Modalni dialog
+ *
+ * Otevreny je vzdycky nanejvys jeden, takze staci jeden ukazatel. Co ale
+ * uvnitr dialogu zije, se musi zapomenout ve chvili, kdy dialog zanikne,
+ * a zaniknout muze ctyrmi cestami: tlacitkem, gestem zprava, otevrenim
+ * jineho dialogu a prestavbou UI po zmene jazyka. Proto uklid visi na
+ * LV_EVENT_DELETE samotneho dialogu - spusti se pri kazde z nich a neda
+ * se na nej zapomenout. Driv se nulovalo jen v nekterych obsluhach,
+ * takze ukazatel na seznam siti prezil smazany dialog a dobihajici sken
+ * psal do uvolnene pameti.
+ * ------------------------------------------------------------------- */
 static lv_obj_t *modal = NULL;
-static void modal_close_cb(lv_event_t *e) { (void)e; if (modal) { lv_obj_del(modal); modal = NULL; } }
+
+/* stav, ktery zije jen po dobu otevreneho dialogu */
+static lv_obj_t *wifi_list, *wifi_ta, *wifi_kb;
+static int scan_state;                  /* 0 klid, 1 bezi sken, 2 dobehl */
+static uint32_t scan_started_ms;
+static lv_obj_t *hold_panel, *hold_ring, *hold_num;
+static lv_timer_t *hold_timer;
+static lv_event_cb_t hold_action;
+static bool hold_done;
+
+static void modal_forget(void)
+{
+    modal      = NULL;
+    wifi_list  = NULL;
+    wifi_ta    = NULL;
+    wifi_kb    = NULL;
+    scan_state = 0;
+    hold_panel = NULL;
+    hold_ring  = NULL;
+    hold_num   = NULL;
+    hold_action = NULL;
+    hold_done   = false;
+    /* Timer odpoctu kresli do popisku v dialogu, takze musi skoncit tady.
+     * Ukazatele uz jsou NULL, takze i kdyby se jeste jednou spustil,
+     * nema do ceho psat. */
+    if (hold_timer) { lv_timer_del(hold_timer); hold_timer = NULL; }
+}
+
+static void modal_deleted_cb(lv_event_t *e) { (void)e; modal_forget(); }
+
+static void modal_close_cb(lv_event_t *e) { (void)e; if (modal) lv_obj_del(modal); }
+
+static void modal_gesture_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Zpetne gesto dela totez co tlacitko ZPET, a to kdekoliv na dialogu -
+     * tedy i nad klavesnici nebo seznamem siti. */
+    if (lv_indev_get_gesture_dir(lv_indev_get_act()) == LV_DIR_RIGHT)
+        modal_close_cb(NULL);
+}
 
 static lv_obj_t *modal_open(const char *title, uint32_t accent)
 {
-    if (modal) lv_obj_del(modal);
+    if (modal) lv_obj_del(modal);       /* uklid obstara obsluha DELETE */
     modal = lv_obj_create(lv_scr_act());
     lv_obj_set_pos(modal, 0, 0); lv_obj_set_size(modal, 800, 480);
     lv_obj_set_style_bg_color(modal, lv_color_hex(C_INK), 0);
@@ -342,6 +561,17 @@ static lv_obj_t *modal_open(const char *title, uint32_t accent)
     lv_obj_set_style_radius(modal, 0, 0);
     lv_obj_set_style_pad_all(modal, 0, 0);
     lv_obj_clear_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Gesto posila LVGL prvnimu predkovi BEZ priznaku GESTURE_BUBBLE a ten
+     * priznak dostane po vytvoreni kazdy objekt (lv_obj.c). Bez tohohle
+     * radku tah propadne az na obrazovku: dialog zustane otevreny a jeste
+     * se pod nim prepne stranka. Takhle gesto konci u dialogu, at uz tah
+     * zacal kdekoliv - na klavesnici, v seznamu siti i na tlacitku - a na
+     * obrazovku se nedostane, takze stranka se neprepne. */
+    lv_obj_clear_flag(modal, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(modal, modal_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(modal, modal_deleted_cb, LV_EVENT_DELETE, NULL);
+
     lv_obj_t *s = lv_obj_create(modal);
     lv_obj_set_pos(s, 0, 0); lv_obj_set_size(s, 800, 6);
     lv_obj_set_style_bg_color(s, lv_color_hex(accent), 0);
@@ -371,84 +601,149 @@ static void show_info(const char *title, const char *body, uint32_t accent)
 /* ---------------------------------------------------------------------
  * Potvrzovaci dialog pro akce, ktere neco opravdu provedou.
  *
- * Proti show_info() ma tri veci navic:
+ * Proti show_info() ma ctyri veci navic:
  *   - dve STEJNE VELIKA tlacitka. Kdyby bylo zruseni mensi, cetlo by se jako
  *     druhoradá volba, a u akce, ktera umi poskodit vuz, to je spatne.
- *   - potvrzeni se musi DRZET 3 vteriny a odpocet je videt primo na tlacitku.
- *     Omylem se takove tlacitko stisknout neda.
- *   - gesto od leveho okraje dialog zavre, stejne jako jinde v UI
+ *   - potvrzeni se musi DRZET 3 vteriny
+ *   - odpocet je UPROSTRED OBRAZOVKY, ne na tlacitku. Na tlacitku ho
+ *     zakryval prst, takze uzivatel nevidel, jak daleko odpocet je.
+ *     Prst lezi dole, stred zustava volny, a cislice je pres pul dialogu.
+ *     Kazda ubehla vterina celym prekryvem bliknne zlute: deska nema ani
+ *     bzucak, ani motorek, takze zpetna vazba muze byt jedine videt a
+ *     musi byt citelna i periferne.
+ *   - po dokonceni se nejdriv kratce ukaze potvrzeni a teprve pak se
+ *     akce provede - jinak by dialog zmizel driv, nez by si clovek stihl
+ *     vsimnout, ze drzel dost dlouho.
  * ------------------------------------------------------------------- */
-#define HOLD_MS 3000
+#define HOLD_MS        3000
+#define HOLD_STEP_MS   30       /* krok odpoctu - prstenec se musi hybat plynule */
+#define HOLD_FLASH_MS  200      /* jak dlouho blikne zluta na kazde vterine */
+#define HOLD_DONE_MS   700      /* jak dlouho je videt potvrzeni pred akci */
+#define HOLD_PANEL_Y   92
+#define HOLD_PANEL_H   230
+#define HOLD_RING_D    180
 
-static lv_obj_t *hold_btn_lbl = NULL;
-static lv_timer_t *hold_timer = NULL;
-static uint32_t hold_start = 0;
-static lv_event_cb_t hold_action = NULL;
+static uint32_t hold_start, hold_flash_ms, hold_done_ms, hold_accent;
+static int hold_last_sec;
+
+static void hold_paint(bool flash)
+{
+    if (!hold_panel) return;
+    lv_obj_set_style_bg_color(hold_panel,
+        flash ? lv_color_mix(lv_color_hex(C_ACTUAL), lv_color_hex(C_INK), 48)
+              : lv_color_hex(C_INK), 0);
+    lv_obj_set_style_border_color(hold_panel,
+        lv_color_hex(flash ? C_ACTUAL : C_RULE), 0);
+    lv_obj_set_style_arc_color(hold_ring,
+        lv_color_hex(flash ? C_ACTUAL : hold_accent), LV_PART_INDICATOR);
+    lv_obj_set_style_text_color(hold_num,
+        lv_color_hex(flash ? C_ACTUAL : C_BRIGHT), 0);
+}
 
 static void hold_reset(void)
 {
+    if (hold_done) return;      /* uz se jen ukazuje potvrzeni, to se nerusi */
     if (hold_timer) { lv_timer_del(hold_timer); hold_timer = NULL; }
-    if (hold_btn_lbl) {
-        char b[32];
-        snprintf(b, sizeof(b), T(STR_HOLD_FMT), HOLD_MS / 1000);
-        lv_label_set_text(hold_btn_lbl, b);
-    }
+    if (hold_panel) lv_obj_add_flag(hold_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void hold_tick_cb(lv_timer_t *t)
 {
     (void)t;
-    uint32_t el = lv_tick_get() - hold_start;
-    if (el >= HOLD_MS) {
+    uint32_t now = lv_tick_get();
+
+    if (hold_done) {
+        if (now - hold_done_ms < HOLD_DONE_MS) return;
         lv_event_cb_t a = hold_action;
-        hold_reset();
+        hold_done = false;
+        hold_action = NULL;
+        if (hold_timer) { lv_timer_del(hold_timer); hold_timer = NULL; }
+        /* Akce az ted, kdyz uzivatel videl potvrzeni. Vetsinou dialog
+         * zrusi, takze po tomhle radku uz se na nic v nem nesmi sahat. */
         if (a) a(NULL);
-        else modal_close_cb(NULL);
+        else   modal_close_cb(NULL);
         return;
     }
-    if (hold_btn_lbl) {
-        char b[32];
-        snprintf(b, sizeof(b), T(STR_HOLD_FMT),
-                 (int)((HOLD_MS - el + 999) / 1000));
-        lv_label_set_text(hold_btn_lbl, b);
+
+    uint32_t el = now - hold_start;
+    if (el >= HOLD_MS) {
+        hold_done = true;
+        hold_done_ms = now;
+        lv_arc_set_value(hold_ring, 100);
+        lv_obj_set_style_arc_color(hold_ring, lv_color_hex(C_SAGE), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(hold_panel, lv_color_hex(C_INK), 0);
+        lv_obj_set_style_border_color(hold_panel, lv_color_hex(C_SAGE), 0);
+        /* Fajfka nad slovem: slovo samo by pri fontu 48 z prstence vylezlo,
+         * takze text je o cislo mensi a znacka nese hlavni sdeleni. */
+        lv_obj_set_style_text_font(hold_num, UI_FONT_32, 0);
+        lv_obj_set_style_text_color(hold_num, lv_color_hex(C_SAGE), 0);
+        lv_obj_set_style_text_align(hold_num, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text_fmt(hold_num, LV_SYMBOL_OK "\n%s", T(STR_HOLD_DONE));
+        return;
     }
+
+    int left = (int)((HOLD_MS - el + 999) / 1000);
+    if (left != hold_last_sec) { hold_last_sec = left; hold_flash_ms = now; }
+    lv_arc_set_value(hold_ring, (int32_t)((HOLD_MS - el) * 100 / HOLD_MS));
+    lv_label_set_text_fmt(hold_num, "%d", left);
+    hold_paint(now - hold_flash_ms < HOLD_FLASH_MS);
 }
 
 static void hold_press_cb(lv_event_t *e)
 {
-    lv_event_code_t c = lv_event_get_code(e);
-    if (c == LV_EVENT_PRESSED) {
+    if (hold_done) return;      /* po dokonceni uz pusteni nic nemeni */
+    if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
         hold_start = lv_tick_get();
-        if (!hold_timer) hold_timer = lv_timer_create(hold_tick_cb, 100, NULL);
+        hold_last_sec = 0;      /* prvni tik hned blikne */
+        lv_obj_set_style_text_font(hold_num, UI_FONT_48, 0);
+        lv_obj_clear_flag(hold_panel, LV_OBJ_FLAG_HIDDEN);
+        if (!hold_timer) hold_timer = lv_timer_create(hold_tick_cb, HOLD_STEP_MS, NULL);
     } else {
-        hold_reset();       /* pusteni driv = zacina se znovu */
+        hold_reset();           /* pusteni driv = zacina se znovu */
     }
-}
-
-static void modal_gesture_cb(lv_event_t *e)
-{
-    (void)e;
-    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_get_act());
-    if (d == LV_DIR_RIGHT) { hold_reset(); modal_close_cb(NULL); }
 }
 
 static void show_confirm(const char *title, const char *body,
                          uint32_t accent, lv_event_cb_t on_ok)
 {
     lv_obj_t *m = modal_open(title, accent);
-    lv_obj_add_flag(m, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(m, modal_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     lv_obj_t *b = mk_lbl(m, body, UI_FONT_20, C_LABEL, 30, 100);
     lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(b, 740);
 
     hold_action = on_ok;
+    hold_accent = accent;
+    hold_done   = false;
+
+    hold_panel = lv_obj_create(m);
+    lv_obj_set_pos(hold_panel, 0, HOLD_PANEL_Y);
+    lv_obj_set_size(hold_panel, 800, HOLD_PANEL_H);
+    lv_obj_set_style_bg_color(hold_panel, lv_color_hex(C_INK), 0);
+    lv_obj_set_style_bg_opa(hold_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(hold_panel, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_border_width(hold_panel, 2, 0);
+    lv_obj_set_style_radius(hold_panel, 0, 0);
+    lv_obj_set_style_pad_all(hold_panel, 0, 0);
+    lv_obj_clear_flag(hold_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hold_panel, LV_OBJ_FLAG_HIDDEN);
+
+    hold_ring = mk_arc(hold_panel, (800 - HOLD_RING_D) / 2,
+                       (HOLD_PANEL_H - HOLD_RING_D) / 2, HOLD_RING_D,
+                       0, 100, accent, 14);
+    /* Cely kruh od dvanactky, ne gauge jako ukazatele - odpocet se cte
+     * jako ubyvajici kolac, ne jako merena hodnota. */
+    lv_arc_set_rotation(hold_ring, 270);
+    lv_arc_set_bg_angles(hold_ring, 0, 360);
+    lv_arc_set_value(hold_ring, 100);
+
+    hold_num = mk_lbl(hold_panel, "", UI_FONT_48, C_BRIGHT, 0, 0);
+    lv_obj_center(hold_num);
+
     char cap[32];
     snprintf(cap, sizeof(cap), T(STR_HOLD_FMT), HOLD_MS / 1000);
     lv_obj_t *ok = mk_button(m, 30, 330, 360, 120, cap, UI_FONT_32,
                              accent, NULL, NULL);
-    hold_btn_lbl = lv_obj_get_child(ok, 0);
     lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_PRESS_LOST, NULL);
@@ -457,22 +752,112 @@ static void show_confirm(const char *title, const char *body,
               C_LABEL, modal_close_cb, NULL);
 }
 
+/* ---------------------------------------------------------------------
+ * Regenerace DPF
+ *
+ * Stav se kresli na pravy sloupec, protoze ten je videt na kazde strance -
+ * jedine misto, kde si bezici regenerace vsimne i ten, kdo je zrovna
+ * jinde. Pokus o spusteni podkresli sloupec cervene, bezici regenerace
+ * k tomu blika a napln ubyva shora dolu.
+ *
+ * Procenta, nebo pet kroku? Kdyz jednotka postup hlasi (31 03 02 0D
+ * status, delka regenerace v DID 2487), jede se podle nej a vypln klesa
+ * plynule od nasyceni k nule. Kdyz ho nehlasi, ubyva po petinach podle
+ * odhadovane delky. Hrubost je zamer: plynuly pohyb se cte jako merena
+ * hodnota, skoky jako odhad, cimz to v tom pripade je. Posledni petina
+ * zustane stat, dokud regeneraci nekdo neukonci - UI si nevymysli, ze
+ * je hotovo.
+ * ------------------------------------------------------------------- */
+#define RGN_BLINK_MS  500
+#define RGN_STEP_MS   180000    /* petina z odhadovanych 15 minut */
+#define RGN_SIM_MS    20000     /* rucni ukazka: 0 az 100 % za 20 s */
+
+static ui_regen_t regen_state = UI_REGEN_OFF;
+static int regen_pct = -1;      /* <0 = jednotka postup nehlasi */
+static uint32_t regen_since = 0;
+static float regen_soot0 = 0;   /* nasyceni ve chvili spusteni */
+static int regen_demo = 0;      /* 0 vyp, 1 odeslano, 2 bezi, 3 bezi s procenty */
+
+void ui_set_regen_state(ui_regen_t state, int percent)
+{
+    if (state != regen_state) {
+        regen_since = lv_tick_get();
+        regen_soot0 = v_soot.shown;
+    }
+    regen_state = state;
+    regen_pct = percent;
+}
+
+static void regen_demo_label(void)
+{
+    static const int S[4] = {
+        STR_REGEN_OFF, STR_REGEN_REQ, STR_REGEN_RUN, STR_REGEN_RUN_PCT
+    };
+    if (btn_regen_state)
+        lv_label_set_text(lv_obj_get_child(btn_regen_state, 0), T(S[regen_demo]));
+}
+
+static void regen_demo_set(int d)
+{
+    regen_demo = d & 3;
+    ui_set_regen_state(UI_REGEN_OFF, -1);   /* vzdy od nuly, at jde cyklit */
+    switch (regen_demo) {
+        case 1: ui_set_regen_state(UI_REGEN_REQUESTED, -1); break;
+        case 2: ui_set_regen_state(UI_REGEN_ACTIVE, -1); break;
+        case 3: ui_set_regen_state(UI_REGEN_ACTIVE, 0); break;
+        default: break;
+    }
+    regen_demo_label();
+}
+
+static void regen_state_cb(lv_event_t *e) { (void)e; regen_demo_set(regen_demo + 1); }
+
+static void regen_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Na CAN se zatim nic neposila - rozsviti se jen stav na sloupci, aby
+     * slo rozhrani odladit. Az bude vrstva CAN, prijde sem 31 01 02 0D
+     * a stav se bude prepinat podle odpovedi jednotky. */
+    regen_demo_set(1);
+    modal_close_cb(NULL);
+}
+
 static void regen_cb(lv_event_t *e)
 {
     (void)e;
-    /* Zatim jen informuje - vozidlo neni pripojene. Az bude, sem prijde
-     * skutecna akce; potvrzeni drzenim uz je na svem miste. */
-    show_confirm(T(STR_REGEN_TITLE), T(STR_REGEN_BODY), C_DEFICIT, NULL);
+    show_confirm(T(STR_REGEN_TITLE), T(STR_REGEN_BODY), C_DEFICIT, regen_ok_cb);
 }
 
-/* ---------------- WiFi ---------------- */
-static lv_obj_t *wifi_list = NULL, *wifi_ta = NULL, *wifi_kb = NULL;
-static char wifi_ssid[33] = {0};
-static int scan_state = 0;      /* 0 klid, 1 bezi, 2 hotovo */
+/* ---------------------------------------------------------------------
+ * WiFi
+ *
+ * Zapamatovane site drzi deska v NVS, UI se jen pta, jestli sit uz zna.
+ * Znama sit se pripoji rovnou, neznama se zepta na heslo. Zapomenuti je
+ * na dlouhem stisku radku - tuknuti uz je obsazene pripojenim a druhe
+ * tlacitko v radku by bylo pod 120 px dotykovy cil.
+ * ------------------------------------------------------------------- */
+#define WIFI_SCAN_MS   15000    /* po teto dobe se sken vzdava */
+#define WIFI_ROWS      12       /* kolik siti se vejde do seznamu */
+
+static char wifi_ssid[33];      /* sit, ke ktere se prave zadava heslo */
+static char wifi_target[33];    /* sit urcena k zapomenuti; musi prezit
+                                   vymenu seznamu za potvrzovaci dialog */
+
+static void wifi_scan_cb(lv_event_t *e);
 
 static void wifi_save_connect(const char *ssid, const char *pass)
 {
     if (host && host->wifi_connect) host->wifi_connect(ssid, pass);
+}
+
+/* Jeden radek misto seznamu siti: hledam / nic jsem nenasel / nepovedlo se. */
+static void wifi_msg(int str)
+{
+    if (!wifi_list) return;
+    lv_obj_clean(wifi_list);
+    lv_obj_t *l = lv_list_add_text(wifi_list, T(str));
+    lv_obj_set_style_text_font(l, UI_FONT_20, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(C_LABEL), 0);
 }
 
 static void kb_ok_cb(lv_event_t *e)
@@ -480,14 +865,23 @@ static void kb_ok_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_READY) return;
     wifi_save_connect(wifi_ssid, lv_textarea_get_text(wifi_ta));
     modal_close_cb(e);
-    wifi_list = NULL; wifi_ta = NULL; wifi_kb = NULL;
 }
 
 static void ssid_pick_cb(lv_event_t *e)
 {
-    lv_obj_t *btn = lv_event_get_target(e);
-    strncpy(wifi_ssid, lv_list_get_btn_text(wifi_list, btn), sizeof(wifi_ssid) - 1);
-    wifi_list = NULL;
+    const char *txt = lv_list_get_btn_text(wifi_list, lv_event_get_target(e));
+    if (!txt) return;
+    /* Text zije v seznamu, ktery za chvili zanikne - nejdriv kopie. */
+    char ssid[33];
+    snprintf(ssid, sizeof(ssid), "%s", txt);
+
+    /* Znamou sit uz se na heslo neptame, deska ho ma v NVS. */
+    if (host_wifi_known(ssid)) {
+        if (host->wifi_connect_known) host->wifi_connect_known(ssid);
+        modal_close_cb(NULL);
+        return;
+    }
+    snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", ssid);
 
     /* Vlastni rozvrzeni bez velkeho nadpisu - klavesnice potrebuje vysku.
      * Popisek 26 px + vstup 64 px + klavesnice 370 px = presne 480. */
@@ -519,37 +913,85 @@ static void ssid_pick_cb(lv_event_t *e)
     lv_obj_add_event_cb(wifi_kb, modal_close_cb, LV_EVENT_CANCEL, NULL);
 }
 
+static void wifi_forget_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    if (host && host->wifi_forget) host->wifi_forget(wifi_target);
+    wifi_scan_cb(NULL);         /* zpatky do seznamu a rovnou novy sken */
+}
+
+static void ssid_forget_cb(lv_event_t *e)
+{
+    const char *txt = lv_list_get_btn_text(wifi_list, lv_event_get_target(e));
+    if (!txt || !host_wifi_known(txt)) return;
+    snprintf(wifi_target, sizeof(wifi_target), "%s", txt);
+    char body[192];
+    snprintf(body, sizeof(body), T(STR_WIFI_FORGET_BODY), wifi_target);
+    show_confirm(T(STR_WIFI_FORGET_TITLE), body, C_DEFICIT, wifi_forget_ok_cb);
+}
+
 static void wifi_scan_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *m = modal_open(T(STR_WIFI_TITLE), C_DEMAND);
     wifi_list = lv_list_create(m);
     lv_obj_set_pos(wifi_list, 30, 90);
-    lv_obj_set_size(wifi_list, 600, 300);
+    lv_obj_set_size(wifi_list, 600, 290);
     lv_obj_set_style_bg_color(wifi_list, lv_color_hex(C_PANEL), 0);
-    lv_obj_t *l = lv_list_add_btn(wifi_list, NULL, T(STR_WIFI_SEARCHING));
-    lv_obj_set_style_text_font(l, UI_FONT_20, 0);
+    /* Seznam roluje jen svisle. Vodorovny tah tim zustane gestem a zavre
+     * dialog, misto aby se zaradil v seznamu. */
+    lv_obj_set_scroll_dir(wifi_list, LV_DIR_VER);
+
     mk_button(m, 650, 90, 120, 120, T(STR_CLOSE), UI_FONT_20,
               C_DEMAND, modal_close_cb, NULL);
+    mk_button(m, 650, 240, 120, 120, T(STR_WIFI_RETRY), UI_FONT_20,
+              C_ACTUAL, wifi_scan_cb, NULL);
+    mk_lbl(m, T(STR_WIFI_SAVED), UI_FONT_16, C_LABEL, 30, 392);
+
+    wifi_msg(STR_WIFI_SEARCHING);
     if (host && host->wifi_scan_start) host->wifi_scan_start();
     scan_state = 1;
+    scan_started_ms = lv_tick_get();
 }
 
 static void wifi_poll(void)
 {
     if (scan_state != 1) return;
-    if (!host || !host->wifi_scan_result || !host->wifi_scan_ssid) return;
+    if (!host || !host->wifi_scan_result || !host->wifi_scan_ssid) {
+        scan_state = 2;                 /* sken nema kdo vyridit */
+        wifi_msg(STR_WIFI_FAILED);
+        return;
+    }
     int n = host->wifi_scan_result();
-    if (n < 0) return;                       /* -1 bezi, -2 nespusteno */
+    if (n == -1) {                      /* jeste bezi */
+        if (lv_tick_get() - scan_started_ms > WIFI_SCAN_MS) {
+            scan_state = 2;
+            wifi_msg(STR_WIFI_FAILED);
+        }
+        return;
+    }
     scan_state = 2;
+    /* -2 je WIFI_SCAN_FAILED, tedy sken se vubec nerozjel. Driv spadlo
+     * oboji do "n < 0" a dialog zustal navzdy na hlasce "hledam". */
+    if (n < 0)  { wifi_msg(STR_WIFI_FAILED); return; }
+    if (n == 0) { wifi_msg(STR_WIFI_NONE);   return; }
     if (!wifi_list) return;
+
     lv_obj_clean(wifi_list);
-    for (int i = 0; i < n && i < 12; i++) {
+    for (int i = 0; i < n && i < WIFI_ROWS; i++) {
         const char *ssid = host->wifi_scan_ssid(i);
-        lv_obj_t *b = lv_list_add_btn(wifi_list, NULL, ssid ? ssid : "");
+        if (!ssid) ssid = "";
+        bool known = host_wifi_known(ssid);
+        lv_obj_t *b = lv_list_add_btn(wifi_list, known ? LV_SYMBOL_OK : NULL, ssid);
         lv_obj_set_style_text_font(b, UI_FONT_20, 0);
         lv_obj_set_style_min_height(b, 56, 0);
-        lv_obj_add_event_cb(b, ssid_pick_cb, LV_EVENT_CLICKED, NULL);
+        if (known) lv_obj_set_style_text_color(b, lv_color_hex(C_SAGE), 0);
+        lv_obj_add_event_cb(b, press_cb, LV_EVENT_PRESSED, NULL);
+        /* SHORT_CLICKED, ne CLICKED: po dlouhem stisku posila LVGL oboji,
+         * takze by se sit zaroven zapomnela i pripojila. */
+        lv_obj_add_event_cb(b, drag_guard_cb, LV_EVENT_SHORT_CLICKED, NULL);
+        lv_obj_add_event_cb(b, ssid_pick_cb, LV_EVENT_SHORT_CLICKED, NULL);
+        if (known) lv_obj_add_event_cb(b, ssid_forget_cb, LV_EVENT_LONG_PRESSED, NULL);
     }
 }
 
@@ -574,11 +1016,12 @@ static void ui_rebuild(void)
     for (int i = 0; i < N_PAGES; i++) { page[i] = NULL; navbtn[i] = NULL; }
     arc_speed = NULL;
     rail_bar  = NULL;
-    modal     = NULL;
-    wifi_list = NULL;
-    wifi_ta   = NULL;
-    wifi_kb   = NULL;
-    scan_state = 0;
+    modal_forget();     /* stejny uklid jako pri zavreni dialogu */
+
+    /* Navigace se stavi znovu, takze animace vysouvani uz nema co hybat
+     * a vyska se musi nastavit rovnou, bez prejezdu. */
+    lv_anim_del(&nav_h_shown, NULL);
+    nav_h_shown = 0;
 
     int keep_page = cur_page;
     int keep_nav  = nav_state;
@@ -731,7 +1174,7 @@ static lv_obj_t *mk_page(lv_obj_t *scr)
 {
     lv_obj_t *p = lv_obj_create(scr);
     lv_obj_set_pos(p, 0, TOP_H);
-    lv_obj_set_size(p, CONT_W, 480 - TOP_H - NAV_H);
+    lv_obj_set_size(p, CONT_W, PAGE_H);
     lv_obj_set_style_bg_color(p, lv_color_hex(C_INK), 0);
     lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(p, 0, 0);
@@ -742,14 +1185,18 @@ static lv_obj_t *mk_page(lv_obj_t *scr)
 }
 
 /* Prepocet velikosti dvou hlavnich ukazatelu. Prumer je omezeny jak vyskou
- * (kolik zbylo po navigaci), tak sirkou - dva oblouky vedle sebe se musi
- * vejit do CONT_W. Driv byl prumer napevno 360 px a pravy oblouk tim
- * prelezal pod pravy sloupec s DPF; odhalil to az vyrenderovany snimek. */
+ * stranky, tak sirkou - dva oblouky vedle sebe se musi vejit do CONT_W.
+ * Driv byl prumer napevno 360 px a pravy oblouk tim prelezal pod pravy
+ * sloupec s DPF; odhalil to az vyrenderovany snimek.
+ *
+ * Stranka ma vzdy plnou vysku, takze se prumer uz nemeni podle navigace.
+ * Lista prekryje spodnich 124 px, ale tam maji oba oblouky stejne mezeru
+ * (kresli se jen 270 stupnu od 135) a cisla uprostred zustanou videt. */
 static void layout_hlavni(void)
 {
     if (!arc_speed) return;
     const lv_coord_t margin = 16;
-    lv_coord_t h = 480 - TOP_H - nav_height();
+    lv_coord_t h = PAGE_H;
     lv_coord_t d_h = h - 16;                          /* limit vyskou */
     lv_coord_t d_w = (CONT_W - 3 * margin) / 2;       /* limit sirkou */
     lv_coord_t d = d_h < d_w ? d_h : d_w;
@@ -842,7 +1289,17 @@ static void build_dpf(lv_obj_t *scr)
     mk_lbl(p, "-- C", UI_FONT_36, C_BRIGHT, 240, 30);
     mk_button(p, 20, 110, 340, 130, T(STR_DPF_REGEN_BTN),
               UI_FONT_24, C_DEFICIT, regen_cb, NULL);
-    mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 390, 150);
+
+    /* Rucni prepinac stavu regenerace, dokud neni CAN: jinak by nebylo
+     * jak si stav na sloupci prohlednout a odladit. Az bude vrstva CAN,
+     * prepne stav jednotka a tohle tlacitko zmizi. */
+    mk_lbl(p, T(STR_REGEN_STATE), UI_FONT_14, C_LABEL, 390, 90);
+    btn_regen_state = mk_button(p, 390, 110, 300, 130, "", UI_FONT_24,
+                                C_ACTUAL, regen_state_cb, NULL);
+    regen_demo_label();
+
+    /* Nize uz nez 250 px to nejde: od 292 px zacina prekryv navigace. */
+    mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 20, 250);
 }
 
 /* Prvni rada nastaveni: pet tlacitek vedle sebe. Rozestup je tesny,
@@ -884,24 +1341,29 @@ static void build_nastav(lv_obj_t *scr)
     /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne jako
      * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
      * Hlavni duvod existence: merit na ploskach BL/GND se zhasnutym
-     * podsvicenim, aniz by se cekalo na timeout. */
-    mk_button(p, 20, 230, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
+     * podsvicenim, aniz by se cekalo na timeout.
+     *
+     * Tlacitko i radek s diagnostikou musi skoncit nad 292 px: od tam dolu
+     * je prekryva vysunuta lista stranek. */
+    mk_button(p, 20, 200, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
               C_ACTUAL, display_off_cb, NULL);
 
-    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, 320);
+    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 360, 240);
 }
 
-/* Sloupec se musi vejit do toho, co po sobe nechala navigace, takze se
- * jeho obsah prepocitava stejne jako hlavni ukazatele. Bar dostane celou
- * volnou vysku, hodnota sedi uplne dole pod nim. */
+/* Sloupec je vysoky jako stranka, ale jeho obsah musi zustat nad uchytem
+ * navigace - ten je videt porad. Listu a mrizku UI naopak prekryt necha:
+ * obe samy spadnou po peti vterinach a posouvat kvuli nim hodnotu vys by
+ * znamenalo drzet volnych 300 px, ktere jsou jinak k nicemu. */
 static const int RAIL_TICK_G[2] = {12, 18};
 
-static void layout_rail(lv_coord_t h)
+static void layout_rail(void)
 {
     if (!rail_bar) return;
+    lv_coord_t h = PAGE_H - NAV_HANDLE_H;
     lv_coord_t bh = h - RAIL_TOP - RAIL_BOT - RAIL_VAL_H;
     if (bh < 40) bh = 40;
-    lv_obj_set_size(rail_rule, 1, h);
+    lv_obj_set_size(rail_rule, 1, PAGE_H);      /* vlasova linka po cele vysce */
     lv_obj_set_pos(rail_bar, RAIL_BAR_X, RAIL_TOP);
     lv_obj_set_size(rail_bar, RAIL_BAR_W, bh);
     lv_obj_set_pos(rail_val, 0, h - RAIL_VAL_H);
@@ -934,7 +1396,7 @@ static void build_chrome(lv_obj_t *scr)
      * jen vlasova linka po leve hrane. */
     rail = lv_obj_create(scr);
     lv_obj_set_pos(rail, CONT_W, TOP_H);
-    lv_obj_set_size(rail, RAIL_W, 480 - TOP_H - NAV_H);
+    lv_obj_set_size(rail, RAIL_W, PAGE_H);
     lv_obj_set_style_bg_color(rail, lv_color_hex(C_INK), 0);
     lv_obj_set_style_bg_opa(rail, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(rail, 0, 0);
@@ -980,12 +1442,14 @@ static void build_chrome(lv_obj_t *scr)
     rail_val = mk_lbl(rail, "--", UI_FONT_24, C_SAGE, 0, 0);
     lv_obj_set_width(rail_val, RAIL_W);
     lv_obj_set_style_text_align(rail_val, LV_TEXT_ALIGN_CENTER, 0);
-    layout_rail(480 - TOP_H - NAV_H);
+    layout_rail();
 
     /* uchyt - to, co je videt vetsinu casu */
     navhandle = mk_panel(scr, 0, 480 - NAV_HANDLE_H, 800, NAV_HANDLE_H);
     lv_obj_add_flag(navhandle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(navhandle, lv_color_hex(C_RULE), LV_STATE_PRESSED);
+    nav_attach_drag(navhandle);
+    lv_obj_add_event_cb(navhandle, drag_guard_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(navhandle, handle_cb, LV_EVENT_CLICKED, NULL);
     /* dve kratke carky nad sebou = univerzalni znacka "da se vytahnout" */
     for (int i = 0; i < 2; i++) {
@@ -995,17 +1459,27 @@ static void build_chrome(lv_obj_t *scr)
         lv_obj_set_style_bg_color(d, lv_color_hex(C_LABEL), 0);
         lv_obj_set_style_border_width(d, 0, 0);
         lv_obj_set_style_radius(d, 2, 0);
+        /* jen ozdoba - dotek patri uchytu pod ni, jinak by se z carek
+         * nedalo tahnout */
+        lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE);
     }
 
     /* lista se sesti strankami */
     navbar = mk_panel(scr, 0, 480 - NAV_H, 800, NAV_H);
-    for (int i = 0; i < N_PAGES; i++)
+    nav_attach_drag(navbar);
+    for (int i = 0; i < N_PAGES; i++) {
         navbtn[i] = mk_button(navbar, 4 + i * 132, 6, 128, NAV_H - 14,
                               T(PAGE_STR[i]), UI_FONT_20,
                               C_DEMAND, nav_cb, (void *)(intptr_t)i);
+        /* Aby slo tahat i z tlacitka, musi se jeho dotyk dostat na listu.
+         * Klik si tlacitko vyridi samo a hlidac tahu v mk_button() ho pri
+         * tazeni zahodi, takze stranka se neprepne. */
+        lv_obj_add_flag(navbtn[i], LV_OBJ_FLAG_EVENT_BUBBLE);
+    }
 
     /* mrizka 3 rady x 6 sloupcu pro budouci ikony - zatim prazdna */
     navgrid = mk_panel(scr, 0, 480 - NAV_GRID_H, 800, NAV_GRID_H);
+    nav_attach_drag(navgrid);
     mk_lbl(navgrid, T(STR_NAV_PLACEHOLDER), UI_FONT_14,
            C_LABEL, 16, 6);
     for (int r = 0; r < 3; r++)
@@ -1013,6 +1487,9 @@ static void build_chrome(lv_obj_t *scr)
             lv_obj_t *t = mk_panel(navgrid, 6 + c * 132, 28 + r * 90, 126, 84);
             lv_obj_set_style_bg_color(t, lv_color_hex(C_INK), 0);
             lv_obj_set_style_border_color(t, lv_color_hex(C_RULE), 0);
+            /* az dlazdice neco budou delat, pujdou z nich tahat stejne
+             * jako z tlacitek stranek */
+            lv_obj_add_flag(t, LV_OBJ_FLAG_EVENT_BUBBLE);
         }
 
     set_nav_state(0);
@@ -1049,10 +1526,35 @@ void ui_tick(void)
     float tp = cfg.fahrenheit ? v_temp.shown * 1.8f + 32.0f : v_temp.shown;
     lv_label_set_text_fmt(lbl_temp, "%d", (int)tp);
 
+    /* ----- pravy sloupec: nasyceni DPF a stav regenerace ----- */
     int soot = (int)v_soot.shown;
+    uint32_t sc = soot > 1800 ? C_DEFICIT : (soot > 1200 ? C_ACTUAL : C_SAGE);
+    uint32_t bg = C_INK;
+
+    if (regen_state != UI_REGEN_OFF) {
+        uint32_t el = now - regen_since;
+        bg = C_REGEN_DIM;               /* pokus o spusteni: jen podkres */
+        if (regen_state == UI_REGEN_ACTIVE) {
+            if (regen_demo == 3) {      /* rucni ukazka misto dat z CAN */
+                regen_pct = (int)(el * 100 / RGN_SIM_MS);
+                if (regen_pct > 100) regen_pct = 100;
+            }
+            int done = regen_pct;
+            if (done < 0) {
+                int step = (int)(el / RGN_STEP_MS);
+                done = (step > 4 ? 4 : step) * 20;
+            } else if (done > 100) done = 100;
+            soot = (int)(regen_soot0 * (float)(100 - done) / 100.0f);
+            sc = C_DEFICIT;
+            if ((el / RGN_BLINK_MS) & 1) bg = C_REGEN_HOT;
+        }
+    }
+    if (bg != rail_bg_shown) {          /* prekreslovat jen pri zmene */
+        rail_bg_shown = bg;
+        lv_obj_set_style_bg_color(rail, lv_color_hex(bg), 0);
+    }
     lv_bar_set_value(rail_bar, soot, LV_ANIM_OFF);
     lv_label_set_text_fmt(rail_val, "%d.%d", soot / 100, (soot / 10) % 10);
-    uint32_t sc = soot > 1800 ? C_DEFICIT : (soot > 1200 ? C_ACTUAL : C_SAGE);
     lv_obj_set_style_bg_color(rail_bar, lv_color_hex(sc), LV_PART_INDICATOR);
     lv_obj_set_style_text_color(rail_val, lv_color_hex(sc), 0);
 
@@ -1134,6 +1636,13 @@ void ui_build(void)
     build_dpf(scr);
     build_nastav(scr);
     ui_show_page(PG_HLAVNI);
+
+    /* Navigace je prekryv, takze musi byt v z-poradi nad strankami.
+     * Stranky vznikaji az po chrome, takze bez tohohle by se lista
+     * kreslila pod ne a pri vysunuti by nebyla videt. */
+    lv_obj_move_foreground(navbar);
+    lv_obj_move_foreground(navgrid);
+    lv_obj_move_foreground(navhandle);
 
     /* Jen pri prvni stavbe. Po zmene jazyka se UI stavi znovu a namerene
      * hodnoty si musi zustat tam, kde byly - jinak by plnici tlak skocilo

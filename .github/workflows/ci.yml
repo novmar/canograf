@@ -45,6 +45,26 @@ jobs:
             .pio/build/waveshare43b/firmware.elf
           if-no-files-found: error
 
+  transport:
+    name: Testy ISO-TP (hostitel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Zadna LVGL, zadne stahovani - jen libc a src/can/isotp.c,
+      # takze tenhle job dobehne v radu sekund.
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+      - name: Configure
+        run: cmake -S test -B test/build
+
+      - name: Build
+        run: cmake --build test/build -j"$(nproc)"
+
+      - name: Run
+        run: ./test/build/isotp_test
+
   screenshots:
     name: Nahledy obrazovek
     runs-on: ubuntu-latest

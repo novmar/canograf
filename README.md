@@ -65,6 +65,25 @@ python3 -m venv .pio-venv
 Versions in `platformio.ini` are pinned on purpose - see
 [CLAUDE.md](CLAUDE.md) for why.
 
+### Tests on a host
+
+The transport layer is deliberately split in two: `src/can/twai.c` is the only
+file that knows ESP-IDF, while the ISO-TP state machine in `src/can/isotp.c`
+has no clock and no driver - frames leave through a callback and the current
+time arrives as an argument. So it runs on a laptop, with no board and no
+vehicle:
+
+```sh
+cmake -S test -B test/build
+cmake --build test/build
+./test/build/isotp_test            # exit code 0 = everything passed
+```
+
+No LVGL, nothing downloaded, a couple of seconds. Covered: single frame both
+ways, multi-frame receive, multi-frame send with block size 1, a flow control
+that never arrives, the 150 ms N_Cs guard and `0x78` responsePending. CI runs
+the same binary on every push.
+
 ## Configuration
 
 Write protection, the vehicle profile, the board profile and the optional

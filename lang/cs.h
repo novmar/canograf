@@ -54,6 +54,11 @@ static const char *const LANG_CS[] = {
     "Vozidlo není připojeno.\n\nAž bude, tohle tlačítko odešle "
     "31 01 02 0D. Teplota výfuku přitom překročí 600 C. Jen na "
     "stojícím voze venku, se zahřátým motorem, a nesmí se přerušit.",
+    "STAV REGENERACE",
+    "VYPNUTO",
+    "ODESLÁNO",
+    "BĚŽÍ",
+    "BĚŽÍ %",
 
     /* nastaveni */
     "RYCHLOST",
@@ -72,6 +77,13 @@ static const char *const LANG_CS[] = {
     "hledám...",
     "HESLO PRO  %s",
     "heslo",
+    "zelená = uložená, ťuknutí připojí, podržení zapomene",
+    "ZAPOMENOUT SÍŤ",
+    "%s\n\nUložené heslo se smaže. Při dalším připojení k této síti "
+    "se UI zeptá znovu.",
+    "žádná síť nenalezena",
+    "hledání se nezdařilo - zkuste znovu",
+    "ZKUSIT ZNOVU",
 
     /* dialogy */
     "ZPĚT",
@@ -79,6 +91,7 @@ static const char *const LANG_CS[] = {
     "ROZUMÍM",
     "ZRUŠIT",
     "DRŽ %d s",
+    "HOTOVO",
 
     /* pokus s PWM podsvicenim */
     "Jas - pokus se softwarovým PWM",
