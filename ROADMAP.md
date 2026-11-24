@@ -184,9 +184,12 @@ cell, timestamps for the log - works over I2C and needs no interrupt line. The
 interrupt is only worth a pin for waking a sleeping processor, because that is
 the one case where nothing can be asked over a bus.
 
-`EXIO6` and `EXIO7` on the expander are unrouted and could carry a second
-modification, but that means soldering to the package rather than to a pad put
-there for the purpose - and an expander line still cannot wake the chip.
+The choice is genuinely exclusive. `EXIO6` and `EXIO7` on the expander are
+unrouted and look like spare pins, but they are not a way out of this: the
+expander sits on I2C, I2C is dead in deep sleep, so neither can wake anything.
+They cannot dim either - the filter wants PWM above roughly 500 Hz and one
+expander toggle was measured at 174 us. They are unused legs on a slow part,
+not a reserve.
 - [x] **Backlight dimming through `GPIO6`** - done and measured on hardware.
       One wire from `GPIO6` to the `BL` pad, no cut, nothing removed. The pad
       feeds the driver's feedback node through a 10 k / 1 uF filter, so a
