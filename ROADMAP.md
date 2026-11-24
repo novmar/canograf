@@ -147,18 +147,34 @@ precondition check and a backup of whatever it overwrites.
 
 - [ ] Ignition sensing on `DI0` so the device sleeps with the vehicle.
       At about 3 W it will flatten a healthy battery in under a week
-- [ ] **Ambient light sensor** for adaptive backlight. Pointless on this board
-      as it stands, because the backlight is a switch and not a dimmer, but
-      worth having ready for a board where it is not, or together with the
-      GPIO6 modification below
-- [ ] Optional: cut `EXIO2` and drive the backlight from `GPIO6` for real PWM
-      dimming. See the closed experiment in CLAUDE.md
+- [x] **Backlight dimming through `GPIO6`** - done and measured on hardware.
+      One wire from `GPIO6` to the `BL` pad, no cut, nothing removed. The pad
+      feeds the driver's feedback node through a 10 k / 1 uF filter, so a
+      filtered PWM voltage moves the LED current over the full range while the
+      panel itself is never touched. See `docs/hardware/backlight.md`
+- [ ] **Ambient light sensor** for adaptive backlight. Now worth doing, since
+      the backlight is a real dimmer. Needs a free pin or an I2C part, and
+      `GPIO6` is already spent
+- [ ] **Day/night from the vehicle** instead of a sensor. The car already
+      knows - lighting state and instrument dimming are on the bus. Per
+      vehicle, so it belongs in the vehicle profile, not in the firmware
 - [ ] Support a second board with a different pinout, to prove the abstraction
 - [ ] Enclosure and a dashboard mount
 
+## Ideas worth keeping
+
+- [ ] **Interface that changes with road speed.** Below about 10 km/h the
+      driver can look at the screen, so sliders and dense controls are fine.
+      Moving, everything should be large buttons with no precision required.
+      The speed is already on the bus and already read. Nice to have, not
+      a promise
+
 ## Deliberately not doing
 
-- **Software PWM on the backlight.** Measured and closed, see CLAUDE.md.
+- **Software PWM through the `EXIO2` expander line.** Measured and closed. That
+  line carries `DISP`, which blanks the panel as well as the backlight, so it
+  can never dim anything. Real dimming goes through `GPIO6` and is done - see
+  `docs/hardware/backlight.md`.
 - **Driving the ECU through an ELM327 dongle.** The 7-byte limit and the serial
   bottleneck are the reason this project exists. Emulating one so that other
   tools can connect to us is a different thing and is on the list above.
