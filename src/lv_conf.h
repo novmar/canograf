@@ -272,9 +272,18 @@
 #define LV_USE_ASSERT_MEM_INTEGRITY 0   /*Check the integrity of `lv_mem` after critical operations. (Slow)*/
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
 
-/*Add a custom handler when assert happens e.g. to restart the MCU*/
+/*Add a custom handler when assert happens e.g. to restart the MCU.
+ *Na desce je spravne zatuhnout - watchdog ji restartuje a je poznat, ze
+ *neco neni v poradku. Hostitelsky build (sim/) si bere tenhle samy
+ *soubor zamerne, jenze tam by nekonecna smycka znamenala zkousku, ktera
+ *misto cerveneho vysledku bezi, dokud ji nekdo nezabije. Obe makra proto
+ *jdou prebit z prikazove radky - viz sim/CMakeLists.txt.*/
+#ifndef LV_ASSERT_HANDLER_INCLUDE
 #define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
+#endif
+#ifndef LV_ASSERT_HANDLER
 #define LV_ASSERT_HANDLER while(1);   /*Halt by default*/
+#endif
 
 /*-------------
  * Others

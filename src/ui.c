@@ -22,6 +22,7 @@
 #include <lvgl.h>
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -43,7 +44,6 @@
 
 /* ---------------- rozvrzeni ---------------- */
 #define TOP_H   64
-#define NAV_H   124             /* 14,5 mm */
 #define RAIL_W  64
 #define CONT_W  (800 - RAIL_W)
 
@@ -76,7 +76,7 @@ static const int PAGE_STR[N_PAGES] = {
 };
 
 static lv_obj_t *page[N_PAGES], *navbtn[N_PAGES];
-static lv_obj_t *navbar, *rail;
+static lv_obj_t *rail;
 static int cur_page = PG_HLAVNI;
 
 /* ---------------- trvale prvky ---------------- */
@@ -96,6 +96,13 @@ static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
 static lv_obj_t *btn_bright, *btn_daynight;
 /* DPF */
 static lv_obj_t *btn_regen_state;
+/* horni lista: volitelny rychly prepinac den/noc */
+static lv_obj_t *dn_btn, *dn_sun, *dn_moon, *dn_lbl;
+/* diagnostika: prekryv s FPS a pameti zije porad, jen byva schovany */
+static lv_obj_t *perf_lbl;
+static bool perf_on = false;
+static uint32_t perf_frames, perf_draw_sum, perf_win_start;
+static int perf_fps10, perf_draw10;
 
 /* ---------------- deska ---------------- */
 static const ui_host_t *host = NULL;
@@ -126,6 +133,16 @@ static bool host_wifi_known(const char *ssid)
     return host->wifi_known(ssid);
 }
 
+static unsigned host_heap_kb(void)
+{
+    return (host && host->heap_kb) ? host->heap_kb() : 0u;
+}
+
+static unsigned host_psram_kb(void)
+{
+    return (host && host->psram_kb) ? host->psram_kb() : 0u;
+}
+
 /* ---------------------------------------------------------------------
  * Nastaveni
  *
@@ -141,6 +158,7 @@ static bool host_wifi_known(const char *ssid)
  * pulzy. Uplne zhasnout stejne umi jen EXIO2, a to je jine tlacitko.
  * ------------------------------------------------------------------- */
 #define BL_LEVELS 5
+#define BL_MODES  2             /* 0 = den, 1 = noc */
 static const int BL_LEVEL[BL_LEVELS] = {100, 75, 50, 35, 25};
 #define BL_MIN  (BL_LEVEL[BL_LEVELS - 1])
 
@@ -189,6 +207,11 @@ static inline void approach(val_t *v, float k) { v->shown += (v->target - v->sho
 
 static lv_coord_t press_x, press_y;
 
+/* Napoveda gesta zpet a priznak napnuteho gesta; definice obsluhy je az
+ * u gest, sem patri jen proto, ze je shazuje kazdy novy stisk. */
+static void gest_hint_show(bool on);
+static bool gest_armed;
+
 static void press_cb(lv_event_t *e)
 {
     (void)e;
@@ -198,6 +221,9 @@ static void press_cb(lv_event_t *e)
     lv_indev_get_point(in, &p);
     press_x = p.x;
     press_y = p.y;
+    /* Novy tah, nova sance: gesto z toho predchoziho uz neplati. */
+    gest_armed = false;
+    gest_hint_show(false);
 }
 
 static bool was_drag(void)
@@ -229,6 +255,11 @@ static lv_obj_t *mk_panel(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
     lv_obj_set_style_border_color(o, lv_color_hex(C_RULE), 0);
     lv_obj_set_style_border_width(o, 1, 0);
     lv_obj_set_style_radius(o, 0, 0);
+    /* Panel je vyzdoba, ne ovladaci prvek. Dotek na nem musi propadnout
+     * tomu, kdo ho ma vyridit - strance nebo rovnou obrazovce, ktera z
+     * nej sklada gesta. Kdo chce dotek sam (uchyt, panel navigace), si
+     * priznak zase prida. */
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_pad_all(o, 0, 0);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     return o;
@@ -272,6 +303,11 @@ static lv_obj_t *mk_button(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
         lv_obj_add_event_cb(b, drag_guard_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
     }
+    /* Dotyk tlacitka musi dojit i jeho rodici: panel navigace z nej
+     * pozna tah prstem a obrazovka z nej vi, kde tah zacal a kdy skoncil
+     * (gesta se vyhodnocuji az pri pusteni). Klik si tlacitko vyridi
+     * samo, rodice na nej zadnou obsluhu nemaji. */
+    lv_obj_add_flag(b, LV_OBJ_FLAG_EVENT_BUBBLE);
     return b;
 }
 
@@ -310,18 +346,32 @@ static lv_obj_t *mk_arc(lv_obj_t *p, lv_coord_t x, lv_coord_t y, lv_coord_t d,
  *
  * Pred zhasnutim po necinnosti se jas za pul vteriny stahne dolu a
  * teprve pak se vypne panel. Tvrdy skok z plneho jasu do tmy je v noci
- * rana do oka a clovek nepozna, jestli deska jeste zije. Probuzeni
- * zustava okamzite - dotek vraci obrazovku bez jakehokoli prejezdu.
+ * rana do oka a clovek nepozna, jestli deska jeste zije.
+ *
+ * Probuzeni je zrcadlo toho sameho, jen pomalejsi: panel se zapina
+ * jeste tmavy a jas najede na ulozenou uroven za vterinu, aby to v noci
+ * neprasklo do oci. Nabeh NIC NEBLOKUJE - pocita ho bl_step() z
+ * ui_tick(), takze dotek i prekreslovani jedou po celou dobu dal a
+ * tuknout jde hned, i kdyz jas jeste najizdi. Uroven zvolena rucne
+ * (bl_apply) nabeh zrusi a plati okamzite; cekat vterinu na vlastni
+ * tuknuti by bylo matouci.
  * ------------------------------------------------------------------- */
 #define BL_FADE_MS 500
+#define BL_WAKE_MS 1000
 
 static bool backlight_on = true;
-static bool bl_fading = false;
+static bool bl_fading = false;      /* stmivani pred zhasnutim */
+static bool bl_waking = false;      /* nabeh po probuzeni */
 static uint32_t bl_fade_start = 0;
+static uint32_t bl_wake_start = 0;
+static int bl_wake_from = 0;        /* jas, ze ktereho nabeh zacal */
 static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
 
-/* dialog jasu - zije jen po dobu otevreneho dialogu, uklizi modal_forget() */
-static lv_obj_t *btn_bl_level[BL_LEVELS], *btn_bl_mode;
+/* dialog jasu a diagnostiky - zije jen po dobu otevreneho dialogu,
+ * uklizi modal_forget() */
+static lv_obj_t *btn_bl_level[BL_MODES][BL_LEVELS];
+static lv_obj_t *btn_bl_mode[BL_MODES], *btn_bl_topbar;
+static lv_obj_t *dbg_raw, *dbg_mem, *dbg_perf_btn;
 
 static bool bl_can_dim(void) { return host && host->bl_set_percent; }
 
@@ -334,14 +384,28 @@ static void bl_set(int percent)
     host->bl_set_percent(percent);
 }
 
-static void bl_apply(void) { bl_set(bl_level()); }
+static void bl_apply(void)
+{
+    bl_waking = false;              /* rucni volba prebiji nabeh */
+    bl_set(bl_level());
+}
 
 static void backlight(bool on)
 {
     bl_fading = false;
-    /* Jas se nastavuje jeste pred zapnutim panelu, aby se displej nikdy
-     * neukazal se stridou, ktera zbyla po stmivani. */
-    if (on) bl_apply();
+    if (on) {
+        if (!bl_can_dim()) {
+            bl_apply();             /* bez stmivani je zapnuti tvrde */
+        } else {
+            /* Panel se zapina uz tmavy, aby se neukazal se stridou,
+             * ktera zbyla po stmivani - a hlavne aby nabeh zacal od
+             * nuly, ne od posledni urovne. */
+            if (!backlight_on) bl_set(0);
+            bl_wake_from = bl_shown < 0 ? 0 : bl_shown;
+            bl_waking = true;
+            bl_wake_start = lv_tick_get();
+        }
+    }
     if (on == backlight_on) return;
     backlight_on = on;
     if (host && host->backlight) host->backlight(on);
@@ -351,20 +415,34 @@ static void blank_begin(void)
 {
     if (bl_fading) return;
     if (!bl_can_dim()) { backlight(false); return; }
+    bl_waking = false;
     bl_fading = true;
     bl_fade_start = lv_tick_get();
 }
 
-static void blank_step(void)
+/* Jeden krok prejezdu jasu, volany z ui_tick(). Zhasinani ma prednost:
+ * kdyz se zhasina, nabeh uz nebezi. */
+static void bl_step(void)
 {
-    if (!bl_fading) return;
-    uint32_t el = lv_tick_get() - bl_fade_start;
-    if (el >= BL_FADE_MS) {
-        bl_set(0);              /* strida na doraz, LEDky uz nesviti */
-        backlight(false);       /* az ted vypnout panel */
+    if (bl_fading) {
+        uint32_t el = lv_tick_get() - bl_fade_start;
+        if (el >= BL_FADE_MS) {
+            bl_set(0);              /* strida na doraz, LEDky uz nesviti */
+            backlight(false);       /* az ted vypnout panel */
+            return;
+        }
+        bl_set((int)((uint32_t)bl_level() * (BL_FADE_MS - el) / BL_FADE_MS));
         return;
     }
-    bl_set((int)((uint32_t)bl_level() * (BL_FADE_MS - el) / BL_FADE_MS));
+    if (!bl_waking) return;
+    int target = bl_level();
+    uint32_t el = lv_tick_get() - bl_wake_start;
+    if (el >= BL_WAKE_MS) {
+        bl_waking = false;
+        bl_set(target);
+        return;
+    }
+    bl_set(bl_wake_from + (target - bl_wake_from) * (int)el / BL_WAKE_MS);
 }
 
 /* ---------------------------------------------------------------------
@@ -411,29 +489,78 @@ uint32_t ui_bl_duty(int percent, uint32_t duty_max)
 
 /* ---------------------------------------------------------------------
  * Navigace ma tri stavy:
- *   0  jen uchyt  - tenky pruh s "=" uprostred, jako na Androidu
- *   1  lista      - sest tlacitek stranek; po 5 s necinnosti spadne na 0
- *   2  dlazdice   - mrizka 3x6 pro budouci ikony, zatim prazdna
+ *   0  uchyt      - tenky pruh s "=" uprostred, jako na Androidu
+ *   1  lista      - sest tlacitek stranek
+ *   2  mrizka     - tataz lista a POD NI dlazdice dalsich funkci
+ *
+ * Lista a mrizka jsou JEDEN panel, ne dva. Panel ma porad vysku
+ * NAV_FULL_H, tlacitka stranek sedi u jeho horni hrany a dlazdice pod
+ * nimi; menit se smi jen jeho y. Ve stavu 1 tedy nad spodni hranu
+ * obrazovky kouka jen pruh s tlacitky, ve stavu 2 cely panel a lista
+ * zustane nahore videt. Driv to byly dva samostatne panely a mrizka
+ * listu prekryla, takze z mrizky nebylo kam prepnout stranku.
  *
  * Navigace je PREKRYV nad strankami. Driv si stranky i sloupec DPF
  * prepocitavaly vysku podle toho, kolik navigace zabirala, takze se
  * obsah pri kazdem vysunuti scvrkl a ukazatele zmenily prumer. Ovladani
- * nema prekreslovat obsah, takze stranky maji vzdy PAGE_H a lista se
+ * nema prekreslovat obsah, takze stranky maji vzdy PAGE_H a navigace se
  * vysouva pres ne.
  *
  * Prepina se trojim zpusobem: tuknutim na uchyt, gestem a tazenim prstu
  * jako u bottom sheetu na Androidu - nahoru, drzet, dolu zpatky, bez
  * pusteni. Pri tazeni panel jen jezdi po ose y a nemeni velikost: neni
  * co preskladat a prekresli se jen pruh, o ktery se panel posunul.
+ *
+ * ROZMERY. Panel ma hustotu 8,54 px/mm (docs/ui.md), takze:
+ *
+ *     tlacitko stranky  129 x 140 px = 15,1 x 16,4 mm
+ *     dlazdice          129 x 120 px = 15,1 x 14,0 mm
+ *
+ * Doporuceni pro ovladani za jizdy je 14 mm (120 px) a to je MINIMUM,
+ * ne cil. Tlacitka stranek se mackaji za jizdy nejcasteji, takze maji
+ * na vysku 16,4 mm, o sestinu vic; puvodnich 110 px (12,9 mm) bylo pod
+ * minimem a uzivatel je hlasil jako "male".
+ *
+ * JEDNA RADA, NE DVE. Sest stranek na 800 px da 133 px na sloupec, tedy
+ * tlacitko siroke 129 px = 15,1 mm - nad minimem i s plnymi popisky,
+ * takze zkracovat je netreba. Dve rady po trech by sice dala tlacitka
+ * 262 px siroka, ale lista by narostla pres 290 px a pod ni by z 416 px
+ * plochy pod horni listou zbylo na dlazdice uz jen asi 120 px, tedy
+ * jedina rada. Sirka byla v poradku, chybela vyska - a ta se v jedne
+ * rade da dat obema.
+ *
+ * Panel vysunuty nadoraz je presne tak vysoky jako plocha pod horni
+ * listou, aby mrizka nekoncila kousek pod ni a nenechavala zbytecny
+ * prouzek stranky. Vyska dlazdice je proto to, co zbyde pod listou -
+ * kdyz lista povyroste, ubere dlazdicim, a _Static_assert nize hlida,
+ * ze pritom nespadnou pod dotykovy cil.
  * ------------------------------------------------------------------- */
 #define NAV_HANDLE_H  44
-#define NAV_GRID_H    300
+#define NAV_PAD       6
+#define NAV_BTN_W     129
+#define NAV_BTN_H     140
+#define NAV_BTN_Y     NAV_PAD           /* lista je u HORNI hrany panelu */
+#define NAV_BTN_X(i)  (3 + (i) * 133)
+#define NAV_BAR_H     (NAV_PAD + NAV_BTN_H + NAV_PAD)
+#define NAV_CAP_H     20                /* radek s popiskem nad dlazdicemi */
+#define NAV_TILE_GAP  4
+#define NAV_TILE_COLS 6
+#define NAV_TILE_ROWS 2
+#define NAV_FULL_H    PAGE_H
+#define NAV_TILE_H    ((NAV_FULL_H - NAV_BAR_H - NAV_CAP_H - \
+                        (NAV_TILE_ROWS - 1) * NAV_TILE_GAP) / NAV_TILE_ROWS)
+#define NAV_TILE_Y(r) (NAV_BAR_H + NAV_CAP_H + (r) * (NAV_TILE_H + NAV_TILE_GAP))
+#define NAV_TILE_DEBUG 0                /* ktera dlazdice otevira diagnostiku */
+
+_Static_assert(NAV_TILE_H >= 120,
+               "dlazdice klesly pod dotykovy cil 14 mm, lista je prilis vysoka");
+
 #define NAV_IDLE_MS   5000
 #define NAV_ANIM_MS   180       /* zapadnuti po pusteni */
 #define NAV_FLING     8         /* px mezi dvema ctenimi doteku (~20 ms),
                                    tedy asi 400 px/s = svihnuti */
 
-static lv_obj_t *navhandle, *navgrid;
+static lv_obj_t *navhandle, *navpanel;
 static int nav_state = 0;
 static uint32_t nav_shown_ms = 0;
 
@@ -443,8 +570,8 @@ static lv_coord_t nav_h_shown = 0;
 static lv_coord_t nav_state_h(int s)
 {
     switch (s) {
-        case 1:  return NAV_H;
-        case 2:  return NAV_GRID_H;
+        case 1:  return NAV_BAR_H;
+        case 2:  return NAV_FULL_H;
         default: return NAV_HANDLE_H;
     }
 }
@@ -452,24 +579,20 @@ static lv_coord_t nav_state_h(int s)
 static void nav_apply(lv_coord_t h)
 {
     if (h < NAV_HANDLE_H) h = NAV_HANDLE_H;
-    if (h > NAV_GRID_H)   h = NAV_GRID_H;
+    if (h > NAV_FULL_H)   h = NAV_FULL_H;
     nav_h_shown = h;
 
-    /* Co je videt, urcuje vyska: do vysky uchytu uchyt, nad ni lista a od
-     * jeji plne vysky vys mrizka. Panely si drzi svou velikost a jen
-     * vyjizdeji zpod spodni hrany, takze se v nich nic nepreklada. */
-    bool grid = h > NAV_H;
-    bool bar  = !grid && h > NAV_HANDLE_H;
-
-    if (grid) lv_obj_clear_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
-    else      lv_obj_add_flag(navgrid, LV_OBJ_FLAG_HIDDEN);
-    if (bar)  lv_obj_clear_flag(navbar, LV_OBJ_FLAG_HIDDEN);
-    else      lv_obj_add_flag(navbar, LV_OBJ_FLAG_HIDDEN);
-    if (!grid && !bar) lv_obj_clear_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
-    else               lv_obj_add_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_set_y(navbar, 480 - h);
-    lv_obj_set_y(navgrid, 480 - h);
+    /* Panel si drzi svou velikost a jen vyjizdi zpod spodni hrany, takze
+     * se v nem nic nepreklada. Uchyt je videt jen dokud panel nevyjel. */
+    bool out = h > NAV_HANDLE_H;
+    if (out) {
+        lv_obj_clear_flag(navpanel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(navpanel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(navhandle, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_set_y(navpanel, 480 - h);
 }
 
 static void nav_anim_cb(void *p, int32_t v) { (void)p; nav_apply((lv_coord_t)v); }
@@ -573,7 +696,7 @@ static void nav_release_cb(lv_event_t *e)
     /* Rychle svihnuti prepne o stupen, i kdyz prst neurazil ani pulku
      * cesty - tak se bottom sheet chova na telefonu a cekat na pulku by
      * bylo liknave. Pomale tazeni rozhoduje podle pixelu, ne po
-     * tretinach: stavy nejsou stejne daleko (44 / 124 / 300 px). */
+     * tretinach: stavy nejsou stejne daleko (44 / 152 / 416 px). */
     int s;
     if (nav_drag_vel >= NAV_FLING)       s = nav_drag_state0 + 1;
     else if (nav_drag_vel <= -NAV_FLING) s = nav_drag_state0 - 1;
@@ -588,7 +711,7 @@ static void nav_release_cb(lv_event_t *e)
     set_nav_state(s);       /* zapadnuti animaci a novy odpocet 5 s */
 }
 
-/* Panely navigace reaguji na tah prstem. Tlacitka stranek a dlazdice maji
+/* Panel navigace reaguje na tah prstem. Tlacitka stranek i dlazdice maji
  * EVENT_BUBBLE, takze tah zacaty na nich dojde sem taky. */
 static void nav_attach_drag(lv_obj_t *o)
 {
@@ -600,34 +723,105 @@ static void nav_attach_drag(lv_obj_t *o)
 }
 
 /* ---------------------------------------------------------------------
- * Gesto na obrazovce
+ * Gesta
  *
- * Jeden tah musi udelat nejvys jednu vec. LVGL si sice pamatuje, ze uz
- * gesto z tohoto stisku poslalo, ale jakmile se objekt pod prstem zmeni
- * - a prepnuti stranky ho zmeni - priznak zahodi a zbytek tehoz tahu
- * posle gesto znovu. Jedno svihnuti pak proletelo dve az tri stranky.
- * lv_indev_wait_release() zbytek stisku zahodi, takze dalsi gesto prijde
- * az z noveho doteku.
+ * Akce se spousti az PO PUSTENI prstu. LVGL ohlasi gesto uz ve chvili,
+ * kdy prst prekroci prah, a driv se podle toho rovnou prepinalo: komu
+ * sjel prst pri jine praci, tomu to udelalo "zpet" omylem a nedalo se
+ * to vzit zpatky. Ted gesto jen NAPNE priznak a pri pusteni se jeste
+ * jednou zmeri, kam prst doopravdy dosel - kdyz se vratil pod prah,
+ * neudela se nic. Behem napnuteho gesta zpet sviti u leveho okraje
+ * pruh, takze je videt, co se chysta.
+ *
+ * Tim se zaroven vyresilo, ze jedno svihnuti proletelo dve az tri
+ * stranky: LVGL po zmene objektu pod prstem posilalo gesto znovu, ale
+ * ted se akce deje jen pri pusteni a priznak se shazuje pri kazdem
+ * stisku, takze jeden tah udela nejvys jednu vec i bez
+ * lv_indev_wait_release().
+ *
+ * Plati pro vsechna gesta stejne - prepnuti stranky, tah od okraje i
+ * vysouvani navigace.
  * ------------------------------------------------------------------- */
+#define GEST_PX   50    /* stejny prah jako LV_INDEV_DEF_GESTURE_LIMIT */
+#define GEST_EDGE 70    /* odkud se pocita tah "od leveho okraje" */
+
+static lv_obj_t *gest_hint;     /* pruh u leveho okraje, napoveda ZPET */
+
+/* Napoveda zije na HORNI VRSTVE, ne na obrazovce: musi byt videt i nad
+ * otevrenym dialogem a prezit prestavbu UI po zmene jazyka. */
+static void gest_hint_build(void)
+{
+    if (gest_hint) return;
+    gest_hint = lv_obj_create(lv_layer_top());
+    lv_obj_set_pos(gest_hint, 0, TOP_H);
+    lv_obj_set_size(gest_hint, 10, 480 - TOP_H);
+    lv_obj_set_style_bg_color(gest_hint, lv_color_hex(C_DEMAND), 0);
+    lv_obj_set_style_bg_opa(gest_hint, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(gest_hint, 0, 0);
+    lv_obj_set_style_radius(gest_hint, 0, 0);
+    lv_obj_clear_flag(gest_hint, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(gest_hint, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void gest_hint_show(bool on)
+{
+    if (!gest_hint) return;
+    if (on) lv_obj_clear_flag(gest_hint, LV_OBJ_FLAG_HIDDEN);
+    else    lv_obj_add_flag(gest_hint, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Smer podle toho, kde prst JE TED - ne podle toho, kudy sel. */
+static lv_dir_t gest_dir_now(void)
+{
+    lv_indev_t *in = lv_indev_get_act();
+    if (!in) return LV_DIR_NONE;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    lv_coord_t dx = p.x - press_x, dy = p.y - press_y;
+    if (LV_ABS(dx) < GEST_PX && LV_ABS(dy) < GEST_PX) return LV_DIR_NONE;
+    if (LV_ABS(dx) >= LV_ABS(dy)) return dx > 0 ? LV_DIR_RIGHT : LV_DIR_LEFT;
+    return dy > 0 ? LV_DIR_BOTTOM : LV_DIR_TOP;
+}
+
+static bool gest_back_ready(bool edge_only)
+{
+    return gest_armed && gest_dir_now() == LV_DIR_RIGHT &&
+           (!edge_only || press_x < GEST_EDGE);
+}
+
 static void gesture_cb(lv_event_t *e)
 {
     (void)e;
-    lv_indev_t *in = lv_indev_get_act();
-    switch (lv_indev_get_gesture_dir(in)) {
+    gest_armed = true;
+    gest_hint_show(gest_back_ready(true));
+}
+
+/* Napoveda jede s prstem: kdyz se vrati, zhasne a akce uz nebude. */
+static void gest_pressing_cb(lv_event_t *e)
+{
+    (void)e;
+    gest_hint_show(gest_back_ready(true));
+}
+
+static void gest_release_cb(lv_event_t *e)
+{
+    (void)e;
+    gest_hint_show(false);
+    if (!gest_armed) return;
+    gest_armed = false;
+    switch (gest_dir_now()) {
         case LV_DIR_RIGHT:
             /* tah od leveho okraje = zpet na hlavni obrazovku */
-            if (press_x < 70 && cur_page != PG_HLAVNI) ui_show_page(PG_HLAVNI);
+            if (press_x < GEST_EDGE && cur_page != PG_HLAVNI) ui_show_page(PG_HLAVNI);
             else ui_show_page(cur_page + 1);
             break;
-        case LV_DIR_LEFT:  ui_show_page(cur_page - 1); break;
-        /* Kdyz tah zacal na navigaci, uz si ho vyridilo tazeni prstem -
-         * jinak by se stav prepnul dvakrat. Tah pokracuje, takze se stisk
-         * nesmi zahodit. */
-        case LV_DIR_TOP:    if (nav_drag) return; set_nav_state(nav_state + 1); break;
-        case LV_DIR_BOTTOM: if (nav_drag) return; set_nav_state(nav_state - 1); break;
-        default: return;
+        case LV_DIR_LEFT: ui_show_page(cur_page - 1); break;
+        /* Kdyz tah zacal na navigaci, vyridilo si ho tazeni prstem -
+         * jinak by se stav prepnul dvakrat. */
+        case LV_DIR_TOP:    if (!nav_drag) set_nav_state(nav_state + 1); break;
+        case LV_DIR_BOTTOM: if (!nav_drag) set_nav_state(nav_state - 1); break;
+        default: break;     /* prst se vratil, gesto se rusi */
     }
-    lv_indev_wait_release(in);
 }
 
 /* ---------------------------------------------------------------------
@@ -665,8 +859,14 @@ static void modal_forget(void)
     hold_num   = NULL;
     hold_action = NULL;
     hold_done   = false;
-    btn_bl_mode = NULL;
-    for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[i] = NULL;
+    btn_bl_topbar = NULL;
+    dbg_raw     = NULL;
+    dbg_mem     = NULL;
+    dbg_perf_btn = NULL;
+    for (int m = 0; m < BL_MODES; m++) {
+        btn_bl_mode[m] = NULL;
+        for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[m][i] = NULL;
+    }
     /* Timer odpoctu kresli do popisku v dialogu, takze musi skoncit tady.
      * Ukazatele uz jsou NULL, takze i kdyby se jeste jednou spustil,
      * nema do ceho psat. */
@@ -684,18 +884,31 @@ static void modal_deleted_cb(lv_event_t *e)
 
 static void modal_close_cb(lv_event_t *e) { (void)e; if (modal) lv_obj_del(modal); }
 
+/* Zpetne gesto dela totez co tlacitko ZPET, a to kdekoliv na dialogu -
+ * tedy i nad klavesnici nebo seznamem siti. Stejne jako gesta na
+ * obrazovce se ale provede az PRI PUSTENI, takze se da vzit zpatky, a
+ * zbytek tahu uz nikam nepropadne: dialog mizi ve chvili, kdy je prst
+ * nahore. */
 static void modal_gesture_cb(lv_event_t *e)
 {
     (void)e;
-    /* Zpetne gesto dela totez co tlacitko ZPET, a to kdekoliv na dialogu -
-     * tedy i nad klavesnici nebo seznamem siti. Zbytek tahu se musi
-     * zahodit: dialog pod prstem zmizi, LVGL si vsimne zmeny objektu,
-     * odemkne gesto a zbyvajicich par desitek pixelu tehoz tahu by uz
-     * dostala obrazovka a prepnula stranku. */
-    lv_indev_t *in = lv_indev_get_act();
-    if (lv_indev_get_gesture_dir(in) != LV_DIR_RIGHT) return;
-    lv_indev_wait_release(in);
-    modal_close_cb(NULL);
+    gest_armed = true;
+    gest_hint_show(gest_back_ready(false));
+}
+
+static void modal_pressing_cb(lv_event_t *e)
+{
+    (void)e;
+    gest_hint_show(gest_back_ready(false));
+}
+
+static void modal_release_cb(lv_event_t *e)
+{
+    (void)e;
+    gest_hint_show(false);
+    if (!gest_armed) return;
+    gest_armed = false;
+    if (gest_dir_now() == LV_DIR_RIGHT) modal_close_cb(NULL);
 }
 
 static lv_obj_t *modal_open(const char *title, uint32_t accent)
@@ -719,8 +932,16 @@ static lv_obj_t *modal_open(const char *title, uint32_t accent)
     lv_obj_clear_flag(modal, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(modal, modal_gesture_cb, LV_EVENT_GESTURE, NULL);
     lv_obj_add_event_cb(modal, modal_deleted_cb, LV_EVENT_DELETE, NULL);
+    /* Dialog musi vedet, kde tah zacal a kdy skoncil - gesto se
+     * vyhodnocuje az pri pusteni. Tlacitka, klavesnice i seznam siti
+     * maji EVENT_BUBBLE, takze sem dojde i tah zacaty na nich. */
+    lv_obj_add_event_cb(modal, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(modal, modal_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(modal, modal_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(modal, modal_release_cb, LV_EVENT_PRESS_LOST, NULL);
 
     lv_obj_t *s = lv_obj_create(modal);
+    lv_obj_clear_flag(s, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_pos(s, 0, 0); lv_obj_set_size(s, 800, 6);
     lv_obj_set_style_bg_color(s, lv_color_hex(accent), 0);
     lv_obj_set_style_border_width(s, 0, 0); lv_obj_set_style_radius(s, 0, 0);
@@ -734,16 +955,6 @@ static lv_obj_t *modal_open(const char *title, uint32_t accent)
                   C_LABEL, modal_close_cb, NULL);
     }
     return modal;
-}
-
-static void show_info(const char *title, const char *body, uint32_t accent)
-{
-    lv_obj_t *m = modal_open(title, accent);
-    lv_obj_t *b = mk_lbl(m, body, UI_FONT_20, C_LABEL, 30, 100);
-    lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(b, 740);
-    mk_button(m, 30, 330, 360, 120, T(STR_OK), UI_FONT_32,
-              accent, modal_close_cb, NULL);
 }
 
 /* ---------------------------------------------------------------------
@@ -873,7 +1084,7 @@ static void show_confirm(const char *title, const char *body,
     lv_obj_set_style_border_width(hold_panel, 2, 0);
     lv_obj_set_style_radius(hold_panel, 0, 0);
     lv_obj_set_style_pad_all(hold_panel, 0, 0);
-    lv_obj_clear_flag(hold_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(hold_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(hold_panel, LV_OBJ_FLAG_HIDDEN);
 
     hold_ring = mk_arc(hold_panel, (800 - HOLD_RING_D) / 2,
@@ -985,7 +1196,8 @@ static void regen_cb(lv_event_t *e)
  * tlacitko v radku by bylo pod 120 px dotykovy cil.
  * ------------------------------------------------------------------- */
 #define WIFI_SCAN_MS   15000    /* po teto dobe se sken vzdava */
-#define WIFI_ROWS      12       /* kolik siti se vejde do seznamu */
+#define WIFI_ROWS      12       /* kolik radku se do seznamu postavi;
+                                   zbytek se spocita do posledniho radku */
 
 static char wifi_ssid[33];      /* sit, ke ktere se prave zadava heslo */
 static char wifi_target[33];    /* sit urcena k zapomenuti; musi prezit
@@ -1061,6 +1273,9 @@ static void ssid_pick_cb(lv_event_t *e)
     lv_obj_set_style_bg_color(wifi_ta, lv_color_hex(C_PANEL), 0);
     lv_obj_set_style_text_color(wifi_ta, lv_color_hex(C_BRIGHT), 0);
     lv_obj_set_style_border_color(wifi_ta, lv_color_hex(C_DEMAND), 0);
+    /* Vstupni pole si dotek nechava (kurzor), takze ho musi poslat dal
+     * dialogu - ten z nej sklada gesto zpet. */
+    lv_obj_add_flag(wifi_ta, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     wifi_kb = lv_keyboard_create(m);
     lv_obj_set_size(wifi_kb, 800, 370);
@@ -1072,6 +1287,9 @@ static void ssid_pick_cb(lv_event_t *e)
     lv_keyboard_set_textarea(wifi_kb, wifi_ta);
     lv_obj_add_event_cb(wifi_kb, kb_ok_cb, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(wifi_kb, modal_close_cb, LV_EVENT_CANCEL, NULL);
+    /* Dotek klavesnice musi dojit dialogu, jinak by z ni neslo udelat
+     * gesto zpet - to se vyhodnocuje az pri pusteni. */
+    lv_obj_add_flag(wifi_kb, LV_OBJ_FLAG_EVENT_BUBBLE);
 }
 
 static void wifi_forget_ok_cb(lv_event_t *e)
@@ -1105,12 +1323,16 @@ static void wifi_scan_cb(lv_event_t *e)
     lv_obj_set_style_pad_all(wifi_list, 0, 0);
     lv_obj_set_style_pad_row(wifi_list, 0, 0);
     /* Seznam roluje jen svisle. Vodorovny tah tim zustane gestem a zavre
-     * dialog, misto aby se zaradil v seznamu. */
+     * dialog, misto aby se zaradil v seznamu - dotek ale musi dojit az
+     * dialogu, ktery gesto vyhodnocuje pri pusteni. */
     lv_obj_set_scroll_dir(wifi_list, LV_DIR_VER);
+    lv_obj_add_flag(wifi_list, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    mk_button(m, 650, 90, 120, 120, T(STR_CLOSE), UI_FONT_20,
-              C_DEMAND, modal_close_cb, NULL);
-    mk_button(m, 650, 240, 120, 120, T(STR_WIFI_RETRY), UI_FONT_20,
+    /* Jedno tlacitko navic, ne dve: ZAVRIT delalo totez co ZPET vpravo
+     * nahore, ktere ma kazdy dialog. ZNOVU proto stoji samo ve stejnem
+     * sloupci jako ZPET - stejne x i sirka, at nejsou na pohled
+     * rozhazena. */
+    mk_button(m, 660, 150, 124, 120, T(STR_WIFI_RETRY), UI_FONT_20,
               C_ACTUAL, wifi_scan_cb, NULL);
     mk_lbl(m, T(STR_WIFI_SAVED), UI_FONT_16, C_LABEL, 30, 392);
 
@@ -1152,11 +1374,20 @@ static void wifi_poll(void)
         lv_obj_set_style_min_height(b, 58, 0);
         wifi_row_style(b, known ? C_SAGE : C_BRIGHT);
         lv_obj_add_event_cb(b, press_cb, LV_EVENT_PRESSED, NULL);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_EVENT_BUBBLE);
         /* SHORT_CLICKED, ne CLICKED: po dlouhem stisku posila LVGL oboji,
          * takze by se sit zaroven zapomnela i pripojila. */
         lv_obj_add_event_cb(b, drag_guard_cb, LV_EVENT_SHORT_CLICKED, NULL);
         lv_obj_add_event_cb(b, ssid_pick_cb, LV_EVENT_SHORT_CLICKED, NULL);
         if (known) lv_obj_add_event_cb(b, ssid_forget_cb, LV_EVENT_LONG_PRESSED, NULL);
+    }
+
+    /* Co se nevejde, se nesmi tise ztratit: v dilne s vic pristupovymi
+     * body by hledana sit proste nebyla a nic by nenaznacilo proc. */
+    if (n > WIFI_ROWS) {
+        char more[32];
+        snprintf(more, sizeof(more), T(STR_WIFI_MORE), n - WIFI_ROWS);
+        wifi_row_style(lv_list_add_text(wifi_list, more), C_LABEL);
     }
 }
 
@@ -1267,10 +1498,41 @@ static void blank_cb(lv_event_t *e)
  * udrzet prst na jednom miste; za jizdy se obe veci nepovedou. Tlacitko
  * ma pevnou polohu, takze se da zmacknout naslepo.
  *
- * Urovne plati pro prave zapnuty rezim. Nocni se tedy nastavi tak, ze
- * se prepne na noc a vybere uroven - stejna tlacitka, zadna druha
- * obrazovka a zadne "upravit nocni jas".
+ * Dialog ma RADEK NA KAZDY REZIM: vlevo rezim i s jeho ulozenou
+ * hodnotou, vpravo jeho urovne. Driv platily urovne pro prave zapnuty
+ * rezim a prepinalo se jednim tlacitkem DEN/NOC: nebylo videt, co je
+ * ulozene v tom druhem, a nocni uroven slo nastavit jen pres prepnuti
+ * rezimu. Ted je na jeden pohled videt, ktery rezim bezi (silna svetla
+ * obruba), co ma ulozeno ten druhy (tlumena obruba u jeho urovne), a
+ * nocni uroven je jedno tuknuti misto tri.
+ *
+ * Pod radky je treti rezim PODLE VOZU. Vozidlo stav osvetleni po
+ * sbernici hlasi, ale CAN jeste na UI napojeny neni, takze tlacitko
+ * neni klikaci a stoji vedle nej duvod. Predstirat funkci, ktera neni,
+ * je horsi nez ji nenabidnout.
+ *
+ * Mrizka je 5 urovni x 2 rezimy. Na 800 px vyjde uroven 104 px siroka =
+ * 12,2 mm, tedy pod 14 mm z docs/ui.md - pet urovni vedle popisku
+ * rezimu se sirsich nevejde. Vyska 128 px = 15,0 mm je nad doporucenim,
+ * mezery 8 px odstup jeste zvetsuji a jas se meni jednim tuknutim, ne
+ * v serii, takze to je prijatelna cena za to, ze jsou oba rezimy videt
+ * najednou.
  * ------------------------------------------------------------------- */
+#define BL_ROW_H    128
+#define BL_ROW_Y(m) (104 + (m) * (BL_ROW_H + 8))
+#define BL_MODE_W   180
+#define BL_MODE_X   20
+#define BL_LVL_W    104
+#define BL_LVL_X(i) (212 + (i) * (BL_LVL_W + 8))
+#define BL_VEH_Y    (BL_ROW_Y(BL_MODES - 1) + BL_ROW_H + 8)
+#define BL_VEH_H    86
+#define BL_TOP_X    548
+#define BL_TOP_W    216
+
+/* obsluha tlacitka urovne dostane rezim i procenta v jednom cisle */
+#define BL_UD(m, p) ((void *)(intptr_t)((m) * 1000 + (p)))
+
+static int bl_mode_level(int m) { return m ? cfg.bright_night : cfg.bright_day; }
 
 /* Popisek tlacitka JAS v nastaveni. Je i v build_nastav(), aby tlacitko
  * uz pri stavbe ukazovalo uroven z NVS a ne natvrdo zadanou. */
@@ -1282,80 +1544,140 @@ static void bright_btn_paint(void)
     lv_label_set_text(lv_obj_get_child(btn_bright, 0), b);
 }
 
-/* Prepinac den/noc je na dvou mistech najednou - v nastaveni a v
- * dialogu - a oba musi ukazovat totez. */
+/* Prepinac den/noc v nastaveni ukazuje, ktery rezim prave bezi. */
 static void daynight_btn_paint(void)
 {
-    const char *t = T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY);
-    if (btn_daynight) lv_label_set_text(lv_obj_get_child(btn_daynight, 0), t);
-    if (btn_bl_mode)  lv_label_set_text(lv_obj_get_child(btn_bl_mode, 0), t);
+    if (!btn_daynight) return;
+    lv_label_set_text(lv_obj_get_child(btn_daynight, 0),
+                      T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY));
 }
 
-/* Vybrana uroven ma silnejsi obrubu. Barva se nemeni: modra a kostena
- * maji v tehle aplikaci pevny vyznam (zadano / skutecnost) a vyber
- * tlacitka mezi ne nepatri. */
-static void bl_level_paint(void)
+/* Oba radky dialogu najednou: nazev rezimu s jeho hodnotou a vybrana
+ * uroven v kazdem z nich. Vypln tlacitek se nemeni - modra a kostena
+ * maji v teto aplikaci pevny vyznam (zadano / skutecnost) a vyber mezi
+ * ne nepatri, takze vyber nese obruba. */
+static void bl_rows_paint(void)
 {
-    for (int i = 0; i < BL_LEVELS; i++) {
-        if (!btn_bl_level[i]) continue;
-        bool sel = BL_LEVEL[i] == bl_level();
-        lv_obj_set_style_border_color(btn_bl_level[i],
-            lv_color_hex(sel ? C_BRIGHT : C_RULE), 0);
-        lv_obj_set_style_border_width(btn_bl_level[i], sel ? 3 : 1, 0);
+    int live = cfg.night ? 1 : 0;
+    for (int m = 0; m < BL_MODES; m++) {
+        if (btn_bl_mode[m]) {
+            char cap[40];
+            snprintf(cap, sizeof(cap), "%s\n%d %%",
+                     T(m ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY), bl_mode_level(m));
+            lv_label_set_text(lv_obj_get_child(btn_bl_mode[m], 0), cap);
+            lv_obj_set_style_bg_color(btn_bl_mode[m],
+                lv_color_hex(m == live ? C_RULE : C_PANEL), 0);
+            lv_obj_set_style_border_color(btn_bl_mode[m],
+                lv_color_hex(m == live ? C_BRIGHT : C_RULE), 0);
+            lv_obj_set_style_border_width(btn_bl_mode[m], m == live ? 3 : 1, 0);
+        }
+        for (int i = 0; i < BL_LEVELS; i++) {
+            if (!btn_bl_level[m][i]) continue;
+            bool sel = BL_LEVEL[i] == bl_mode_level(m);
+            lv_obj_set_style_border_color(btn_bl_level[m][i],
+                lv_color_hex(sel ? (m == live ? C_BRIGHT : C_LABEL) : C_RULE), 0);
+            lv_obj_set_style_border_width(btn_bl_level[m][i], sel ? 3 : 1, 0);
+        }
     }
 }
 
+/* Ikonka v horni liste se prekresluje spolu s dialogem; definice je az
+ * u jeji kresby, tady staci ohlaska. */
+static void dn_icon_paint(void);
 static void bl_level_cb(lv_event_t *e)
 {
-    int p = (int)(intptr_t)lv_event_get_user_data(e);
-    if (cfg.night) cfg.bright_night = p;
-    else           cfg.bright_day = p;
-    bl_apply();
+    int ud = (int)(intptr_t)lv_event_get_user_data(e);
+    int m = ud / 1000, p = ud % 1000;
+    if (m) cfg.bright_night = p;
+    else   cfg.bright_day = p;
+    /* Uroven toho druheho rezimu se jen ulozi: menit kvuli ni jas,
+     * ktery prave sviti, by bylo prekvapeni. */
+    if (m == (cfg.night ? 1 : 0)) bl_apply();
     save_cfg();
-    bl_level_paint();
+    bl_rows_paint();
     bright_btn_paint();
 }
 
+/* Jedine misto, kde se rezim meni - at uz na nej tukne dialog, tlacitko
+ * v nastaveni nebo ikonka v horni liste. Vsechny tri tim delaji totez
+ * vcetne ulozeni do NVS a vsechna tri mista se prekresli. */
+static void bl_mode_apply(void)
+{
+    bl_apply();
+    save_cfg();
+    daynight_btn_paint();
+    dn_icon_paint();
+    bl_rows_paint();
+    bright_btn_paint();
+}
+
+/* V dialogu se rezim VOLI (tlacitko rika, ktery to bude)... */
+static void bl_mode_cb(lv_event_t *e)
+{
+    cfg.night = (int)(intptr_t)lv_event_get_user_data(e) != 0;
+    bl_mode_apply();
+}
+
+/* ...kdezto tlacitko v nastaveni a ikonka v liste mezi rezimy PREPINAJI. */
 static void daynight_cb(lv_event_t *e)
 {
     (void)e;
     cfg.night = !cfg.night;
-    bl_apply();
-    save_cfg();
-    daynight_btn_paint();
-    bl_level_paint();
-    bright_btn_paint();
+    bl_mode_apply();
 }
 
-/* Pet tlacitek po 140 px s mezerou 8 px: 30 + 4*148 + 140 = 762, takze
- * se vejdou na sirku i s okraji. Vyska 120 px je minimalni dotykovy cil
- * z docs/ui.md, stejny jako u ostatnich dialogovych tlacitek. */
-#define BL_BTN_W    140
-#define BL_BTN_H    120
-#define BL_BTN_X(i) (30 + (i) * (BL_BTN_W + 8))
+static void bl_topbar_paint(void)
+{
+    if (!btn_bl_topbar) return;
+    char cap[48];
+    snprintf(cap, sizeof(cap), "%s\n%s", T(STR_BRIGHT_TOPBAR),
+             T(cfg.topbar_dn ? STR_ON : STR_OFF));
+    lv_label_set_text(lv_obj_get_child(btn_bl_topbar, 0), cap);
+}
+
+static void bl_topbar_cb(lv_event_t *e)
+{
+    (void)e;
+    cfg.topbar_dn = !cfg.topbar_dn;
+    save_cfg();
+    bl_topbar_paint();
+    dn_icon_paint();
+}
 
 static void bright_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *m = modal_open(T(STR_BRIGHT_TITLE), C_ACTUAL);
 
-    lv_obj_t *info = mk_lbl(m, T(STR_BRIGHT_INFO), UI_FONT_16, C_LABEL, 30, 96);
-    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(info, 740);
-
-    for (int i = 0; i < BL_LEVELS; i++) {
-        char cap[8];
-        snprintf(cap, sizeof(cap), "%d %%", BL_LEVEL[i]);
-        btn_bl_level[i] = mk_button(m, BL_BTN_X(i), 200, BL_BTN_W, BL_BTN_H,
-                                    cap, UI_FONT_24, C_ACTUAL, bl_level_cb,
-                                    (void *)(intptr_t)BL_LEVEL[i]);
+    for (int md = 0; md < BL_MODES; md++) {
+        btn_bl_mode[md] = mk_button(m, BL_MODE_X, BL_ROW_Y(md), BL_MODE_W,
+                                    BL_ROW_H, "", UI_FONT_28, C_DEMAND,
+                                    bl_mode_cb, (void *)(intptr_t)md);
+        for (int i = 0; i < BL_LEVELS; i++) {
+            char cap[8];
+            snprintf(cap, sizeof(cap), "%d %%", BL_LEVEL[i]);
+            btn_bl_level[md][i] = mk_button(m, BL_LVL_X(i), BL_ROW_Y(md),
+                                            BL_LVL_W, BL_ROW_H, cap,
+                                            UI_FONT_24, C_ACTUAL,
+                                            bl_level_cb, BL_UD(md, BL_LEVEL[i]));
+        }
     }
-    bl_level_paint();
+    bl_rows_paint();
 
-    mk_lbl(m, T(STR_SET_DAYNIGHT), UI_FONT_14, C_LABEL, 30, 338);
-    btn_bl_mode = mk_button(m, 30, 358, 300, BL_BTN_H - 10, "", UI_FONT_32,
-                            C_DEMAND, daynight_cb, NULL);
-    daynight_btn_paint();
+    /* Rezim podle vozu: zadna obsluha, tlumene barvy a duvod vedle. */
+    lv_obj_t *veh = mk_panel(m, BL_MODE_X, BL_VEH_Y, BL_MODE_W, BL_VEH_H);
+    lv_obj_set_style_radius(veh, 6, 0);
+    lv_obj_t *vl = mk_lbl(veh, T(STR_BRIGHT_VEHICLE), UI_FONT_20, C_LABEL, 0, 0);
+    lv_obj_center(vl);
+    mk_lbl(m, T(STR_BRIGHT_VEHICLE_NA), UI_FONT_16, C_LABEL,
+           BL_LVL_X(0), BL_VEH_Y + 32);
+
+    /* Rychly prepinac v horni liste je volitelny: lista je uzka a ne
+     * kazdy ho tam chce. Zapina se tady, aby bylo nastaveni jasu na
+     * jednom miste, a drzi se v NVS. */
+    btn_bl_topbar = mk_button(m, BL_TOP_X, BL_VEH_Y, BL_TOP_W, BL_VEH_H, "",
+                              UI_FONT_16, C_DEMAND, bl_topbar_cb, NULL);
+    bl_topbar_paint();
 }
 
 /* ---------------- stranky ---------------- */
@@ -1370,6 +1692,9 @@ static lv_obj_t *mk_page(lv_obj_t *scr)
     lv_obj_set_style_radius(p, 0, 0);
     lv_obj_set_style_pad_all(p, 0, 0);
     lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+    /* Tah zacaty na strance musi dojit obrazovce: ta z nej vyhodnocuje
+     * gesta, a to az pri pusteni prstu. */
+    lv_obj_add_flag(p, LV_OBJ_FLAG_EVENT_BUBBLE);
     return p;
 }
 
@@ -1442,6 +1767,9 @@ static void build_tlak(lv_obj_t *scr)
     chart = lv_chart_create(p);
     lv_obj_set_pos(chart, 12, 10);
     lv_obj_set_size(chart, 530, 230);
+    /* Graf se necte dotykem, takze dotek musi propadnout strance a z ni
+     * obrazovce - jinak by z nej neslo svihnout na jinou stranku. */
+    lv_obj_clear_flag(chart, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(chart, lv_color_hex(C_PANEL), 0);
     lv_obj_set_style_border_color(chart, lv_color_hex(C_RULE), 0);
     lv_obj_set_style_border_width(chart, 1, 0);
@@ -1487,20 +1815,31 @@ static void build_dpf(lv_obj_t *scr)
                                 C_ACTUAL, regen_state_cb, NULL);
     regen_demo_label();
 
-    /* Nize uz nez 250 px to nejde: od 292 px zacina prekryv navigace. */
-    mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 20, 250);
+    /* Vys nez driv: vysunuta lista stranek zacina uz na 264 px. */
+    mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 20, 242);
 }
 
 /* Nastaveni ma tri rady. Prvni ctyri tlacitka prepinaji jednu hodnotu
  * tuknutim, druha rada otevira dialogy a prepina den/noc, treti nese
- * vypinac displeje a diagnostiku. Nic se nesmi dostat pod 292 px: od tam
- * dolu to prekryva vysunuta lista stranek. */
+ * vypinac displeje a diagnostiku.
+ *
+ * Nic se nesmi dostat pod SET_BOTTOM: od tam dolu stranku prekryva
+ * vysunuta lista stranek. Lista vyrostla kvuli vetsim tlacitkum
+ * stranek, takze rady sedi vys a tlacitka jsou o 8 px nizsi: 68 px =
+ * 8,0 mm pri 8,54 px/mm. Pod doporucenim 14 mm byla uz driv (76 px =
+ * 8,9 mm); nastaveni se dela na stojacku, kdezto stranky se prepinaji
+ * za jizdy, takze misto dostaly ony. */
+#define SET_BOTTOM  (PAGE_H - NAV_BAR_H)
 #define SET_BW      160
-#define SET_BH      76
+#define SET_BH      68
 #define SET_PITCH   176
 #define SET_X(i)    (20 + (i) * SET_PITCH)
-#define SET_ROW2    132         /* druha rada tlacitek */
-#define SET_ROW3    216         /* treti rada, konci presne na 292 */
+#define SET_ROW1    28
+#define SET_ROW2    (SET_ROW1 + SET_BH + 24)    /* nad radou je jeste popisek */
+#define SET_ROW3    (SET_ROW2 + SET_BH + 6)
+
+_Static_assert(SET_ROW3 + SET_BH <= SET_BOTTOM,
+               "treti rada nastaveni by zmizela pod vysunutou listou");
 
 static void build_nastav(lv_obj_t *scr)
 {
@@ -1509,17 +1848,19 @@ static void build_nastav(lv_obj_t *scr)
     char b[24];
 
     mk_lbl(p, T(STR_SET_SPEED), UI_FONT_14, C_LABEL, SET_X(0), 8);
-    btn_units_v = mk_button(p, SET_X(0), 28, BW, BH, cfg.mph ? "mph" : "km/h",
+    btn_units_v = mk_button(p, SET_X(0), SET_ROW1, BW, BH,
+                            cfg.mph ? "mph" : "km/h",
                             UI_FONT_24, C_DEMAND, units_v_cb, NULL);
     mk_lbl(p, T(STR_SET_TEMP), UI_FONT_14, C_LABEL, SET_X(1), 8);
-    btn_units_t = mk_button(p, SET_X(1), 28, BW, BH, cfg.fahrenheit ? "F" : "C",
+    btn_units_t = mk_button(p, SET_X(1), SET_ROW1, BW, BH,
+                            cfg.fahrenheit ? "F" : "C",
                             UI_FONT_24, C_DEMAND, units_t_cb, NULL);
     mk_lbl(p, T(STR_SET_BLANK), UI_FONT_14, C_LABEL, SET_X(2), 8);
     blank_label(b, sizeof(b), cfg.blank_s);
-    btn_blank = mk_button(p, SET_X(2), 28, BW, BH, b,
+    btn_blank = mk_button(p, SET_X(2), SET_ROW1, BW, BH, b,
                           UI_FONT_24, C_DEMAND, blank_cb, NULL);
     mk_lbl(p, T(STR_SET_LANG), UI_FONT_14, C_LABEL, SET_X(3), 8);
-    mk_button(p, SET_X(3), 28, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
+    mk_button(p, SET_X(3), SET_ROW1, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
               C_SAGE, lang_cb, NULL);
 
     mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, 20, SET_ROW2 - 20);
@@ -1549,7 +1890,7 @@ static void build_nastav(lv_obj_t *scr)
 
     lbl_wifi = mk_lbl(p, T(STR_WIFI_NOT_CONN), UI_FONT_20, C_LABEL,
                       20, SET_ROW3);
-    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, SET_ROW3 + 36);
+    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, SET_ROW3 + 32);
 
     /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne jako
      * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
@@ -1561,8 +1902,8 @@ static void build_nastav(lv_obj_t *scr)
 
 /* Sloupec je vysoky jako stranka, ale jeho obsah musi zustat nad uchytem
  * navigace - ten je videt porad. Listu a mrizku UI naopak prekryt necha:
- * obe samy spadnou po peti vterinach a posouvat kvuli nim hodnotu vys by
- * znamenalo drzet volnych 300 px, ktere jsou jinak k nicemu. */
+ * obe samy spadnou po peti vterinach a drzet kvuli nim volnou spodni
+ * tretinu obrazovky by znamenalo prijit o ni i po zbytek casu. */
 static const int RAIL_TICK_G[2] = {12, 18};
 
 static void layout_rail(void)
@@ -1591,6 +1932,285 @@ static void layout_rail(void)
     }
 }
 
+/* ---------------------------------------------------------------------
+ * Rychly prepinac den/noc v horni liste
+ *
+ * Volitelny, zapina se v dialogu jasu a drzi se v NVS: lista je uzka a
+ * ne kazdy chce mit v ni dalsi vec. Dela PRESNE totez co prepinac v
+ * nastaveni - obe cesty vedou do daynight_cb(), takze se nemuzou
+ * rozejit ani v tom, ze se stav uklada.
+ *
+ * KRESBA je slozena z obycejnych objektu LVGL, ne ze znaku fontu:
+ * Montserrat nema slunicko ani mesicek (a diakritiku taky nemel, coz
+ * nas uz jednou stalo cas), LV_SYMBOL_* je nema take a lv_canvas by si
+ * kvuli dvema obrazkum rekl o vlastni obrazovou pamet. Slunce je tedy
+ * kolecko se ctyrmi paprsky a ctyrmi teckami v uhloprickach, mesic je
+ * kolecko, kteremu druhe kolecko v barve listy ukousne srp. Obe kresby
+ * vzniknou jednou a pak se jen jedna z nich schova.
+ *
+ * VEDLE IKONKY JE SLOVO (DEN / NOC). Samotny obrazek rika, ktery rezim
+ * bezi, jen tomu, kdo uz vi, ze se tim da prepinat; se slovem to pozna
+ * i ten, kdo to vidi poprve.
+ *
+ * DOTYKOVY CIL je 120 x 64 px = 14,1 x 7,5 mm. Na sirku doporuceni 14 mm
+ * z docs/ui.md plati, na vysku NE a splnit se neda: horni lista je
+ * vysoka 64 px. Aby mel cil 14 mm i na vysku, musela by lista narust na
+ * 120 px a kazda stranka prijit o 56 px - za jedno tlacitko, ktere je
+ * navic volitelne a ma nahradu v nastaveni, to nestoji. Minuti stoji
+ * jedno tuknuti navic, ne chybnou akci.
+ * ------------------------------------------------------------------- */
+#define DN_W   120
+#define DN_X   (800 - DN_W - 8)
+#define DN_D   40                       /* strana ctverce s kresbou */
+#define DN_IX  6                        /* kresba vlevo, slovo vpravo */
+#define DN_IY  ((TOP_H - DN_D) / 2)
+
+static lv_obj_t *mk_shape(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
+                          lv_coord_t w, lv_coord_t h, lv_coord_t r, uint32_t c)
+{
+    lv_obj_t *o = lv_obj_create(p);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_radius(o, r, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(c), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    return o;
+}
+
+/* prusvitny ctverec, do ktereho se kresli jedna ikonka */
+static lv_obj_t *dn_canvas(lv_obj_t *p)
+{
+    lv_obj_t *o = mk_shape(p, DN_IX, DN_IY, DN_D, DN_D, 0, C_PANEL);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    return o;
+}
+
+static void dn_icon_paint(void)
+{
+    if (!dn_btn) return;
+    if (cfg.topbar_dn) lv_obj_clear_flag(dn_btn, LV_OBJ_FLAG_HIDDEN);
+    else               lv_obj_add_flag(dn_btn, LV_OBJ_FLAG_HIDDEN);
+    if (cfg.night) {
+        lv_obj_add_flag(dn_sun, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(dn_moon, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(dn_sun, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(dn_moon, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(dn_lbl, T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY));
+}
+
+static void dn_build(lv_obj_t *bar)
+{
+    /* Dotykova oblast je cela lista nad kresbou; obrazek zabira jen jeji
+     * levou tretinu, takze cil je vyrazne vetsi nez to, co je videt. */
+    dn_btn = mk_shape(bar, DN_X, 0, DN_W, TOP_H, 0, C_PANEL);
+    lv_obj_add_flag(dn_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(dn_btn, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(dn_btn, drag_guard_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(dn_btn, daynight_cb, LV_EVENT_CLICKED, NULL);
+
+    /* slunce: kotouc, ctyri paprsky a ctyri tecky v uhloprickach */
+    dn_sun = dn_canvas(dn_btn);
+    mk_shape(dn_sun, 11, 11, 18, 18, LV_RADIUS_CIRCLE, C_BRIGHT);
+    mk_shape(dn_sun, 18, 0, 4, 7, 1, C_BRIGHT);
+    mk_shape(dn_sun, 18, 33, 4, 7, 1, C_BRIGHT);
+    mk_shape(dn_sun, 0, 18, 7, 4, 1, C_BRIGHT);
+    mk_shape(dn_sun, 33, 18, 7, 4, 1, C_BRIGHT);
+    mk_shape(dn_sun, 5, 5, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
+    mk_shape(dn_sun, 30, 5, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
+    mk_shape(dn_sun, 5, 30, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
+    mk_shape(dn_sun, 30, 30, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
+
+    /* mesic: kotouc, kteremu druhy kotouc v barve listy ukousne srp */
+    dn_moon = dn_canvas(dn_btn);
+    mk_shape(dn_moon, 8, 6, 28, 28, LV_RADIUS_CIRCLE, C_BRIGHT);
+    mk_shape(dn_moon, 0, 2, 26, 26, LV_RADIUS_CIRCLE, C_PANEL);
+
+    dn_lbl = mk_lbl(dn_btn, "", UI_FONT_16, C_LABEL, DN_IX + DN_D + 6, 22);
+    dn_icon_paint();
+}
+
+/* ---------------------------------------------------------------------
+ * Diagnostika (dlazdice DEBUG v mrizce navigace)
+ *
+ * LVGL ma LV_USE_PERF_MONITOR i LV_USE_MEM_MONITOR, jenze to jsou
+ * PREKLADOVE prepinace: z menu se zapnout nedaji a prekryv by byl videt
+ * porad. Mereni je proto vlastni. monitor_cb ovladace displeje se vola
+ * po kazdem OPRAVDU prekreslenem snimku, takze staci scitat snimky a
+ * cas kresleni a jednou za vterinu z toho udelat FPS.
+ *
+ * Volnou pamet LVGL rika lv_mem_monitor(). Pri LV_MEM_CUSTOM = 1 - a tak
+ * je to tady - zadny vlastni pool neni a funkce vraci nuly; vypsat
+ * "0 kB volno" by byla lez, takze se v tom pripade rekne rovnou, ze
+ * LVGL bere pamet ze systemu, a plati cisla z desky (heap, PSRAM).
+ *
+ * Statistiky sbernice jsou zatim PRAZDNE RADKY. can_stats_t v
+ * src/can/twai.h existuje, ale CAN na UI jeste napojeny neni. Radky se
+ * jmenuji stejne jako polozky te struktury a misto cisel maji pomlcku,
+ * aby bylo videt, ze data nejsou - vymyslet si je by bylo horsi nez je
+ * neukazat.
+ * ------------------------------------------------------------------- */
+#define PERF_WIN_MS 1000
+#define DBG_COL2    400
+
+static const char *const DBG_BUS_ROW[] = {
+    "rx", "tx", "tx_fail", "rx_lost", "ring_lost", "bus_err", "arb_lost", "bus_off"
+};
+#define DBG_BUS_ROWS ((int)(sizeof(DBG_BUS_ROW) / sizeof(DBG_BUS_ROW[0])))
+
+static void perf_monitor_cb(lv_disp_drv_t *drv, uint32_t time, uint32_t px)
+{
+    (void)drv; (void)px;
+    perf_frames++;
+    perf_draw_sum += time;
+}
+
+/* Radek o pameti LVGL. Pri LV_MEM_CUSTOM = 1 zadny vlastni pool neni a
+ * lv_mem_monitor() vraci nuly - vypsat "0 kB volno" by byla lez, takze
+ * se rekne rovnou, odkud LVGL pamet bere. */
+static int lvgl_mem_line(char *b, size_t n)
+{
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    if (mon.total_size)
+        return snprintf(b, n, "lvgl %u kB volno  frag %u %%",
+                        (unsigned)(mon.free_size / 1024), (unsigned)mon.frag_pct);
+    return snprintf(b, n, "lvgl bere pamet ze systemu");
+}
+
+static void perf_paint(void)
+{
+    if (!perf_lbl) return;
+    char b[96];
+    int at = snprintf(b, sizeof(b), "FPS %d.%d   KRESLENI %d.%d ms\n",
+                      perf_fps10 / 10, perf_fps10 % 10,
+                      perf_draw10 / 10, perf_draw10 % 10);
+    snprintf(b + at, sizeof(b) - (size_t)at, "HEAP %u kB  PSRAM %u kB",
+             host_heap_kb(), host_psram_kb());
+    lv_label_set_text(perf_lbl, b);
+}
+
+static void perf_tick(uint32_t now)
+{
+    uint32_t el = now - perf_win_start;
+    if (el < PERF_WIN_MS) return;
+    perf_fps10  = (int)(perf_frames * 10000u / el);
+    perf_draw10 = perf_frames ? (int)(perf_draw_sum * 10u / perf_frames) : 0;
+    perf_frames = 0;
+    perf_draw_sum = 0;
+    perf_win_start = now;
+    if (perf_on) perf_paint();
+}
+
+static void dbg_perf_paint(void)
+{
+    if (!dbg_perf_btn) return;
+    char cap[48];
+    snprintf(cap, sizeof(cap), "%s\n%s", T(STR_DBG_PERF),
+             T(perf_on ? STR_ON : STR_OFF));
+    lv_label_set_text(lv_obj_get_child(dbg_perf_btn, 0), cap);
+}
+
+static void dbg_perf_cb(lv_event_t *e)
+{
+    (void)e;
+    perf_on = !perf_on;
+    if (perf_lbl) {
+        if (perf_on) lv_obj_clear_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+    perf_paint();
+    dbg_perf_paint();
+}
+
+/* Pripojeni na konec bufferu, ktere nemuze prerust jeho velikost.
+ * snprintf vraci delku, kterou by ZAPSAL, ne kolik zapsal - prosty soucet
+ * by pri delsim textu ukazal za konec pole a dalsi volani by dostalo
+ * zapornou velikost. Dnes se sem simulovana data vejdou, ale cely smysl
+ * teto stranky je ukazovat jednou SKUTECNE hodnoty z CAN. */
+static int dbg_add(char *b, int at, int n, const char *fmt, ...)
+{
+    if (at >= n - 1) return n - 1;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(b + at, (size_t)(n - at), fmt, ap);
+    va_end(ap);
+    if (w < 0) return at;
+    at += w;
+    return at > n - 1 ? n - 1 : at;
+}
+
+/* Hodnoty jsou syrove: zadne jednotky, zadne zaokrouhleni na ukazatele,
+ * jen cilova a zobrazena hodnota v setinach, jak je UI drzi. */
+static int dbg_val(char *b, int at, int n, const char *name, const val_t *v)
+{
+    return dbg_add(b, at, n, "%s %d %d\n", name,
+                   (int)(v->target * 100.0f), (int)(v->shown * 100.0f));
+}
+
+static void dbg_paint(void)
+{
+    if (!dbg_raw) return;
+
+    char b[384];
+    int n = (int)sizeof(b);
+    int at = dbg_add(b, 0, n, "page %d  nav %d  regen %d %d\n",
+                     cur_page, nav_state, (int)regen_state, regen_pct);
+    at = dbg_val(b, at, n, "speed", &v_speed);
+    at = dbg_val(b, at, n, "rpm", &v_rpm);
+    at = dbg_val(b, at, n, "temp", &v_temp);
+    at = dbg_val(b, at, n, "boost", &v_boost);
+    at = dbg_val(b, at, n, "boost_sp", &v_boost_sp);
+    at = dbg_val(b, at, n, "vnt", &v_vnt);
+    at = dbg_val(b, at, n, "rail", &v_rail);
+    dbg_val(b, at, n, "soot", &v_soot);
+    lv_label_set_text(dbg_raw, b);
+
+    if (!dbg_mem) return;
+    char m[192];
+    int mn = (int)sizeof(m);
+    unsigned up = (unsigned)(lv_tick_get() / 1000);
+    at = dbg_add(m, 0, mn, "heap %u kB\npsram %u kB\n",
+                 host_heap_kb(), host_psram_kb());
+    at += lvgl_mem_line(m + at, (size_t)(mn - at));
+    if (at > mn - 1) at = mn - 1;
+    dbg_add(m, at, mn, "\nbeh %u:%02u:%02u\nfps %d.%d\nkresleni %d.%d ms",
+            up / 3600, (up / 60) % 60, up % 60,
+            perf_fps10 / 10, perf_fps10 % 10,
+            perf_draw10 / 10, perf_draw10 % 10);
+    lv_label_set_text(dbg_mem, m);
+}
+
+static void debug_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *m = modal_open(T(STR_DBG_TITLE), C_DEMAND);
+
+    dbg_perf_btn = mk_button(m, 30, 96, 300, 120, "", UI_FONT_20,
+                             C_ACTUAL, dbg_perf_cb, NULL);
+    dbg_perf_paint();
+
+    mk_lbl(m, T(STR_DBG_RAW), UI_FONT_14, C_LABEL, 30, 232);
+    dbg_raw = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, 30, 254);
+
+    mk_lbl(m, T(STR_DBG_BUS), UI_FONT_14, C_LABEL, DBG_COL2, 96);
+    mk_lbl(m, T(STR_DBG_BUS_NA), UI_FONT_20, C_DEFICIT, DBG_COL2, 116);
+    char rows[192];
+    int at = 0;
+    for (int i = 0; i < DBG_BUS_ROWS; i++)
+        at += snprintf(rows + at, sizeof(rows) - (size_t)at, "%s  -\n",
+                       DBG_BUS_ROW[i]);
+    mk_lbl(m, rows, UI_FONT_16, C_LABEL, DBG_COL2, 150);
+
+    mk_lbl(m, T(STR_DBG_MEM), UI_FONT_14, C_LABEL, DBG_COL2, 322);
+    dbg_mem = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_COL2, 344);
+    dbg_paint();
+}
+
 /* ---------------- chrome ---------------- */
 static void build_chrome(lv_obj_t *scr)
 {
@@ -1598,7 +2218,8 @@ static void build_chrome(lv_obj_t *scr)
     mk_lbl(bar, "TALENTO", UI_FONT_20, C_BRIGHT, 16, 20);
     mk_lbl(bar, T(STR_TOP_TEMP), UI_FONT_14, C_LABEL, 320, 8);
     lbl_temp = mk_lbl(bar, "--", UI_FONT_32, C_BRIGHT, 320, 24);
-    lbl_state = mk_lbl(bar, "DEMO", UI_FONT_16, C_DEFICIT, 640, 22);
+    lbl_state = mk_lbl(bar, "DEMO", UI_FONT_16, C_DEFICIT, 560, 22);
+    dn_build(bar);
 
     /* Zadny panel: stejne pozadi jako obsah, zadny ramecek. Oddeluje
      * jen vlasova linka po leve hrane. */
@@ -1610,7 +2231,10 @@ static void build_chrome(lv_obj_t *scr)
     lv_obj_set_style_border_width(rail, 0, 0);
     lv_obj_set_style_radius(rail, 0, 0);
     lv_obj_set_style_pad_all(rail, 0, 0);
-    lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE);
+    /* Sloupec je ukazatel, ne ovladaci prvek. Na dotek nereaguje ani on,
+     * ani nic v nem, takze tah zacaty u praveho okraje je porad gesto
+     * obrazovky - a tam zacina svihnuti na dalsi stranku. */
+    lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     rail_rule = lv_obj_create(rail);
     lv_obj_set_pos(rail_rule, 0, 0);
@@ -1618,6 +2242,7 @@ static void build_chrome(lv_obj_t *scr)
     lv_obj_set_style_bg_opa(rail_rule, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(rail_rule, 0, 0);
     lv_obj_set_style_radius(rail_rule, 0, 0);
+    lv_obj_clear_flag(rail_rule, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *rail_lbl = mk_lbl(rail, "DPF", UI_FONT_14, C_LABEL, 0, 4);
     lv_obj_set_width(rail_lbl, RAIL_W);
@@ -1636,6 +2261,7 @@ static void build_chrome(lv_obj_t *scr)
     lv_obj_set_style_bg_color(rail_bar, lv_color_hex(C_SAGE), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(rail_bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(rail_bar, 0, LV_PART_INDICATOR);
+    lv_obj_clear_flag(rail_bar, LV_OBJ_FLAG_CLICKABLE);
 
     /* Rysky vznikaji az po baru, takze se kresli nad vypln. */
     for (int i = 0; i < 4; i++) {
@@ -1645,6 +2271,7 @@ static void build_chrome(lv_obj_t *scr)
         lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(t, 0, 0);
         lv_obj_set_style_radius(t, 0, 0);
+        lv_obj_clear_flag(t, LV_OBJ_FLAG_CLICKABLE);
     }
 
     rail_val = mk_lbl(rail, "--", UI_FONT_24, C_SAGE, 0, 0);
@@ -1672,34 +2299,53 @@ static void build_chrome(lv_obj_t *scr)
         lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE);
     }
 
-    /* lista se sesti strankami */
-    navbar = mk_panel(scr, 0, 480 - NAV_H, 800, NAV_H);
-    nav_attach_drag(navbar);
-    for (int i = 0; i < N_PAGES; i++) {
-        navbtn[i] = mk_button(navbar, 4 + i * 132, 6, 128, NAV_H - 14,
-                              T(PAGE_STR[i]), UI_FONT_20,
-                              C_DEMAND, nav_cb, (void *)(intptr_t)i);
-        /* Aby slo tahat i z tlacitka, musi se jeho dotyk dostat na listu.
-         * Klik si tlacitko vyridi samo a hlidac tahu v mk_button() ho pri
-         * tazeni zahodi, takze stranka se neprepne. */
-        lv_obj_add_flag(navbtn[i], LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
+    /* Lista stranek a mrizka dlazdic jsou JEDEN panel, ne dva: lista
+     * nahore, dlazdice pod ni. Panel ma porad vysku NAV_FULL_H a jen
+     * vyjizdi zespodu, takze ve stavu 1 kouka nad spodni hranu jeho
+     * horni pruh s tlacitky stranek a ve stavu 2 se pod nimi odkryji
+     * dlazdice. Driv to byly dva panely, mrizka listu prekryla a z
+     * mrizky nebylo kam prepnout stranku. */
+    navpanel = mk_panel(scr, 0, 480 - NAV_FULL_H, 800, NAV_FULL_H);
+    /* Panel navigace je vyjimka z pravidla u mk_panel(): dotek na nem
+     * chce sam, protoze se jim tahne. */
+    lv_obj_add_flag(navpanel, LV_OBJ_FLAG_CLICKABLE);
+    nav_attach_drag(navpanel);
+    for (int i = 0; i < N_PAGES; i++)
+        navbtn[i] = mk_button(navpanel, NAV_BTN_X(i), NAV_BTN_Y,
+                              NAV_BTN_W, NAV_BTN_H, T(PAGE_STR[i]),
+                              UI_FONT_28, C_DEMAND, nav_cb,
+                              (void *)(intptr_t)i);
 
-    /* mrizka 3 rady x 6 sloupcu pro budouci ikony - zatim prazdna */
-    navgrid = mk_panel(scr, 0, 480 - NAV_GRID_H, 800, NAV_GRID_H);
-    nav_attach_drag(navgrid);
-    mk_lbl(navgrid, T(STR_NAV_PLACEHOLDER), UI_FONT_14,
-           C_LABEL, 16, 6);
-    for (int r = 0; r < 3; r++)
-        for (int c = 0; c < 6; c++) {
-            lv_obj_t *t = mk_panel(navgrid, 6 + c * 132, 28 + r * 90, 126, 84);
+    mk_lbl(navpanel, T(STR_NAV_PLACEHOLDER), UI_FONT_14, C_LABEL,
+           16, NAV_BAR_H + 2);
+    for (int r = 0; r < NAV_TILE_ROWS; r++)
+        for (int c = 0; c < NAV_TILE_COLS; c++) {
+            lv_coord_t x = NAV_BTN_X(c), y = NAV_TILE_Y(r);
+            if (r * NAV_TILE_COLS + c == NAV_TILE_DEBUG) {
+                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
+                          T(STR_NAV_DEBUG), UI_FONT_20, C_DEMAND,
+                          debug_cb, NULL);
+                continue;
+            }
+            /* zatim prazdne misto; dotek na nem patri panelu, takze se
+             * z dlazdice tahne stejne jako odkudkoliv jinud */
+            lv_obj_t *t = mk_panel(navpanel, x, y, NAV_BTN_W, NAV_TILE_H);
             lv_obj_set_style_bg_color(t, lv_color_hex(C_INK), 0);
             lv_obj_set_style_border_color(t, lv_color_hex(C_RULE), 0);
-            /* az dlazdice neco budou delat, pujdou z nich tahat stejne
-             * jako z tlacitek stranek */
-            lv_obj_add_flag(t, LV_OBJ_FLAG_EVENT_BUBBLE);
         }
 
+    /* Prekryv s FPS a pameti. Zije porad a je vetsinou schovany, aby ho
+     * slo z diagnostiky zapnout bez prestavby UI. */
+    perf_lbl = mk_lbl(scr, "", UI_FONT_14, C_BRIGHT, 496, 70);
+    lv_obj_set_style_bg_color(perf_lbl, lv_color_hex(C_PANEL), 0);
+    lv_obj_set_style_bg_opa(perf_lbl, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(perf_lbl, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_border_width(perf_lbl, 1, 0);
+    lv_obj_set_style_pad_all(perf_lbl, 6, 0);
+    if (!perf_on) lv_obj_add_flag(perf_lbl, LV_OBJ_FLAG_HIDDEN);
+    perf_paint();
+
+    gest_hint_build();
     set_nav_state(0);
 }
 
@@ -1744,8 +2390,13 @@ void ui_tick(void)
         bg = C_REGEN_DIM;               /* pokus o spusteni: jen podkres */
         if (regen_state == UI_REGEN_ACTIVE) {
             if (regen_demo == 3) {      /* rucni ukazka misto dat z CAN */
-                regen_pct = (int)(el * 100 / RGN_SIM_MS);
-                if (regen_pct > 100) regen_pct = 100;
+                /* Cas se orezava PRED nasobenim: el * 100 pretece po
+                 * necelych dvanacti hodinach a orez az na vysledku by
+                 * to nezachranil - vypln by skocila na nahodnou uroven,
+                 * ktera vypada jako namerene cislo. Prepinac zapnuty
+                 * pres noc je presne to pouziti, pro ktere existuje. */
+                uint32_t t = el > RGN_SIM_MS ? RGN_SIM_MS : el;
+                regen_pct = (int)(t * 100 / RGN_SIM_MS);
             }
             int done = regen_pct;
             if (done < 0) {
@@ -1788,9 +2439,7 @@ void ui_tick(void)
         break; }
     case PG_NASTAV:
         lv_label_set_text_fmt(lbl_heap, "heap %u kB   PSRAM %u kB   %s",
-            (host && host->heap_kb) ? host->heap_kb() : 0u,
-            (host && host->psram_kb) ? host->psram_kb() : 0u,
-            host_wifi_ip());
+            host_heap_kb(), host_psram_kb(), host_wifi_ip());
         if (host_wifi_connected()) {
             lv_label_set_text(lbl_wifi, host_wifi_ssid());
             lv_obj_set_style_text_color(lbl_wifi, lv_color_hex(C_SAGE), 0);
@@ -1802,6 +2451,8 @@ void ui_tick(void)
     }
 
     wifi_poll();
+    perf_tick(now);
+    dbg_paint();        /* jen kdyz je otevrena diagnostika */
 
     /* Lista i dlazdice spadnou samy zpet na uchyt, aby nekradly plochu.
      * Dotek kamkoliv po obrazovce odpocet resetuje. */
@@ -1823,7 +2474,7 @@ void ui_tick(void)
     } else if (cfg.blank_s && backlight_on && idle > cfg.blank_s * 1000UL) {
         blank_begin();
     }
-    blank_step();
+    bl_step();
 }
 
 /* ---------------- stavba ---------------- */
@@ -1833,9 +2484,14 @@ void ui_build(void)
     lv_obj_set_style_bg_color(scr, lv_color_hex(C_INK), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    /* Gesto se jen napne, provede se az pri pusteni - a k tomu je
+     * potreba vedet, kde tah zacal (press_cb) a kam dosel. Stranky i
+     * tlacitka maji EVENT_BUBBLE, takze sem dojde i tah zacaty na nich. */
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
-    /* zacatek tahu potrebujeme pro rozliseni gesta od leveho okraje */
     lv_obj_add_event_cb(scr, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(scr, gest_pressing_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(scr, gest_release_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(scr, gest_release_cb, LV_EVENT_PRESS_LOST, NULL);
 
     build_chrome(scr);
     build_hlavni(scr);
@@ -1849,9 +2505,15 @@ void ui_build(void)
     /* Navigace je prekryv, takze musi byt v z-poradi nad strankami.
      * Stranky vznikaji az po chrome, takze bez tohohle by se lista
      * kreslila pod ne a pri vysunuti by nebyla videt. */
-    lv_obj_move_foreground(navbar);
-    lv_obj_move_foreground(navgrid);
+    lv_obj_move_foreground(navpanel);
     lv_obj_move_foreground(navhandle);
+    lv_obj_move_foreground(perf_lbl);
+
+    /* Mereni snimku. LV_USE_PERF_MONITOR je PREKLADOVY prepinac, takze
+     * se z menu zapnout neda; monitor_cb ovladace displeje se zavola po
+     * kazdem opravdu prekreslenem snimku a stoji jen dve scitani. */
+    lv_disp_t *disp = lv_disp_get_default();
+    if (disp && disp->driver) disp->driver->monitor_cb = perf_monitor_cb;
 
     /* Jas z NVS musi platit od prvniho snimku, ne az od prvniho tuknuti
      * do nastaveni. Deska uz PWM nastavenou ma, tohle do ni jen posle

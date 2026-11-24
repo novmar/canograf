@@ -50,6 +50,12 @@ target_compile_definitions(lvgl PUBLIC
   LV_CONF_INCLUDE_SIMPLE
   LV_LVGL_H_INCLUDE_SIMPLE
   LV_COLOR_16_SWAP=0
+  # Na desce assert LVGL zatuhne a watchdog desku restartuje. Tady by
+  # nekonecna smycka znamenala zkousku, ktera nikdy neskonci a nic
+  # nerekne, takze assert musi spadnout s nenulovym navratovym kodem.
+  # strednik se escapuje, jinak ho CMake vezme jako oddelovac seznamu
+  "LV_ASSERT_HANDLER=abort()\;"
+  "LV_ASSERT_HANDLER_INCLUDE=<stdlib.h>"
 )
 target_compile_options(lvgl PRIVATE -w)
 
@@ -68,5 +74,8 @@ target_include_directories(lv_shot PRIVATE
   "${FW_SRC_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
 )
-target_compile_options(lv_shot PRIVATE -Wall -Wextra)
+# Hostitelsky build je jedine misto, kde se src/ui.c preklada s -Wall
+# -Wextra - firmware jde pres PlatformIO s vychozimi volbami. Varovani
+# tu proto maji vahu chyby; vendorovane zdroje maji -w nastavene vyse.
+target_compile_options(lv_shot PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(lv_shot PRIVATE lvgl m)

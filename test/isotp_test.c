@@ -33,11 +33,15 @@ typedef struct {
 static sent_frame_t g_tx[TX_CAP];
 static int  g_ntx;
 static bool g_send_ok;
+/* Poradi ramce (od 1), ktery se "neodesle". 0 = odesilani vzdy projde.
+ * Diky tomu jde selhat az na consecutive frame nebo az na nasem flow
+ * control, ne hned na prvnim ramci. */
+static int  g_send_fail_at;
 
 static bool fake_send(void *user, uint32_t id, const uint8_t *data, uint8_t dlc)
 {
     (void)user;
-    if (!g_send_ok) {
+    if (!g_send_ok || (g_send_fail_at != 0 && g_ntx + 1 == g_send_fail_at)) {
         return false;
     }
     if (g_ntx < TX_CAP) {
@@ -61,6 +65,7 @@ static void setup(void)
 
     g_ntx = 0;
     g_send_ok = true;
+    g_send_fail_at = 0;
     memset(g_tx, 0, sizeof(g_tx));
 
     isotp_cfg_default(&cfg);
@@ -79,6 +84,18 @@ static void feed(uint32_t now, const uint8_t *bytes, uint8_t n)
     memset(d, 0, sizeof(d));
     memcpy(d, bytes, n);
     isotp_on_frame(&g_link, ECU_RX, d, 8u, now);
+}
+
+/* Totez, ale s delkou ramce presne takovou, jaka se preda - kratke DLC
+ * jsou na sbernici bezne (jednotky se starym protokolem Renault ramce
+ * nedoplnuji) a kontroly delky se jinak nedaji otestovat. */
+static void feed_dlc(uint32_t now, const uint8_t *bytes, uint8_t n, uint8_t dlc)
+{
+    uint8_t d[8];
+
+    memset(d, 0, sizeof(d));
+    memcpy(d, bytes, n);
+    isotp_on_frame(&g_link, ECU_RX, d, dlc, now);
 }
 
 /* ------------------------------------------------------------------
@@ -428,10 +445,13 @@ static void test_response_pending(void)
     CHECK(isotp_state(&g_link) == ISOTP_WAITING);   /* chyba to neni */
     CHECK(g_link.n_pending == 1u);
 
-    /* P2 by uz davno vyprselo, P2* ne */
+    /* P2 by uz davno vyprselo, P2* ne. Cisla jsou pevna zamerne: s
+     * P2* zkracenym treba na 1,5 s by tahle vetev prestala mit smysl a
+     * test to ma poznat. */
     CHECK(isotp_poll(&g_link, 1100u) == ISOTP_WAITING);
+    CHECK(isotp_poll(&g_link, 3000u) == ISOTP_WAITING);
 
-    feed(2000u, rsp, sizeof(rsp));
+    feed(3100u, rsp, sizeof(rsp));
     CHECK(isotp_state(&g_link) == ISOTP_DONE);
     CHECK(isotp_take(&g_link, out, sizeof(out)) == 4u);
     CHECK(out[0] == 0x59);
@@ -462,6 +482,347 @@ static void test_n_cs_guard(void)
     CHECK(isotp_poll(&g_link, 200u) == ISOTP_FAILED);
     CHECK(isotp_error(&g_link) == ISOTP_ERR_N_CS);
     CHECK(g_ntx == 1);
+}
+
+/* Druha strana te same pojistky: strop nesmi byt TESNY. Smycka v
+ * main.cpp ma delay(20), takze mezi dvema isotp_poll() bezne uplynou
+ * desitky milisekund - kdyby byl N_Cs treba 10 ms, neproslo by ani jedno
+ * viceramcove odeslani. Cislo je pevne zamerne. */
+static void test_n_cs_room_for_loop(void)
+{
+    static const uint8_t fc[] = { 0x30, 0x01, 0x05 };
+    uint8_t msg[20];
+
+    memset(msg, 0x77, sizeof(msg));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+    feed(0u, fc, sizeof(fc));
+
+    /* o pet kol smycky pozdeji - porad se musi odeslat, ne zahlasit N_Cs */
+    CHECK(isotp_poll(&g_link, 100u) == ISOTP_SENDING);
+    CHECK(isotp_error(&g_link) == ISOTP_OK);
+    CHECK(g_ntx == 2);
+    CHECK(g_tx[1].data[0] == 0x21);
+}
+
+/* ------------------------------------------------------------------
+ * 7. Pojistky proti prenosu, ktery nikdy neskonci
+ * ------------------------------------------------------------------ */
+
+/* Jednotka posila 7F xx 78 porad dokola. Musi to skoncit, a to drive,
+ * nez nam dojde trpelivost - pevne cislo, aby mutace stropu spadla. */
+static void test_pending_forever(void)
+{
+    static const uint8_t req[]     = { 0x19, 0x02, 0xAF };
+    static const uint8_t pending[] = { 0x03, 0x7F, 0x19, 0x78 };
+    uint32_t t = 10u;
+    int i;
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    for (i = 0; i < 64; i++) {
+        feed(t, pending, sizeof(pending));
+        if (isotp_state(&g_link) == ISOTP_FAILED) {
+            break;
+        }
+        t += 10u;
+    }
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_PENDING_MAX);
+    CHECK(!isotp_busy(&g_link));          /* spoj nezustal viset */
+}
+
+/* Presne ISOTP_PENDING_MAX pendingu a pak skutecna odpoved musi JESTE
+ * projit - jinak by test vyse slo splnit tim, ze se 0x78 nepodporuje. */
+static void test_pending_limit(void)
+{
+    static const uint8_t req[]     = { 0x19, 0x02, 0xAF };
+    static const uint8_t pending[] = { 0x03, 0x7F, 0x19, 0x78 };
+    static const uint8_t rsp[]     = { 0x04, 0x59, 0x02, 0xFF, 0x01 };
+    uint8_t out[8];
+    uint32_t t = 10u;
+    unsigned i;
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    for (i = 0; i < (unsigned)ISOTP_PENDING_MAX; i++) {
+        feed(t, pending, sizeof(pending));
+        t += 10u;
+    }
+    CHECK(isotp_state(&g_link) == ISOTP_WAITING);
+    CHECK(isotp_error(&g_link) == ISOTP_OK);
+
+    feed(t, rsp, sizeof(rsp));
+    CHECK(isotp_state(&g_link) == ISOTP_DONE);
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 4u);
+}
+
+/* Pomalu kapajici pendingy: kazdy sam o sobe limit P2* dodrzi a pocet
+ * stropu nedosahne, prenos presto nesmi bezet donekonecna. Tohle hlida
+ * celkovy strop, ktery je na poctu pendingu nezavisly. */
+static void test_transaction_cap(void)
+{
+    static const uint8_t req[]     = { 0x19, 0x02, 0xAF };
+    static const uint8_t pending[] = { 0x03, 0x7F, 0x19, 0x78 };
+    uint32_t t = 0u;
+    int i;
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    for (i = 0; i < 64; i++) {
+        t += 4000u;                        /* pod P2*, takze timeout nenastane */
+        feed(t, pending, sizeof(pending));
+        if (isotp_poll(&g_link, t + 1u) == ISOTP_FAILED) {
+            break;
+        }
+    }
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_TXN);
+    CHECK(g_link.pending < (uint16_t)ISOTP_PENDING_MAX);  /* ne poctem, casem */
+}
+
+/* ------------------------------------------------------------------
+ * 8. Co nesmi podvrhnout vysledek
+ * ------------------------------------------------------------------ */
+
+/* Odpoved, ktera dojde az po timeoutu, uz patri minulosti. Kdyby ji
+ * vrstva prijala, vydala by se jako odpoved na DALSI otazku - UI by
+ * ukazalo spravne vypadajici hodnotu ciziho datoveho identifikatoru. */
+static void test_late_response_ignored(void)
+{
+    static const uint8_t req[] = { 0x22, 0xF4, 0x05 };
+    static const uint8_t rsp[] = { 0x05, 0x62, 0xF4, 0x05, 0x01, 0x2C };
+    uint8_t out[8], ff[8];
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    CHECK(isotp_poll(&g_link, 1000u) == ISOTP_FAILED);
+
+    feed(1100u, rsp, sizeof(rsp));
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_TIMEOUT);
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 0u);
+
+    /* a totez pro zacatek viceramcove odpovedi - nesmi nastartovat
+     * skladani ani vyvolat nas flow control */
+    ff[0] = 0x10; ff[1] = 20;
+    memset(&ff[2], 0x33, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1200u);
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(g_ntx == 1);
+}
+
+/* Na necinnem spoji se neprijima nic - nikdo se neptal. */
+static void test_idle_frame_ignored(void)
+{
+    static const uint8_t rsp[] = { 0x05, 0x62, 0xF4, 0x05, 0x01, 0x2C };
+    uint8_t out[8], ff[8];
+
+    feed(10u, rsp, sizeof(rsp));
+    CHECK(isotp_state(&g_link) == ISOTP_IDLE);
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 0u);
+
+    ff[0] = 0x10; ff[1] = 20;
+    memset(&ff[2], 0x44, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 20u);
+    CHECK(isotp_state(&g_link) == ISOTP_IDLE);
+    CHECK(g_ntx == 0);                  /* zadny flow control do prazdna */
+}
+
+/* Single frame uprostred skladani viceramcove odpovedi nesmi rozdelanou
+ * zpravu zahodit ani se vydat za ni. */
+static void test_sf_during_receive(void)
+{
+    static const uint8_t req[]   = { 0x22, 0x21, 0x46 };
+    static const uint8_t other[] = { 0x03, 0x7F, 0x22, 0x31 };
+    uint8_t ff[8], cf[8], out[32];
+    uint8_t body[20];
+    int i;
+
+    for (i = 0; i < 20; i++) {
+        body[i] = (uint8_t)(0xC0 + i);
+    }
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+
+    ff[0] = 0x10; ff[1] = 20;
+    memcpy(&ff[2], &body[0], 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1u);
+
+    feed(2u, other, sizeof(other));
+    CHECK(isotp_state(&g_link) == ISOTP_RECEIVING);   /* porad skladame */
+
+    cf[0] = 0x21;
+    memcpy(&cf[1], &body[6], 7);
+    isotp_on_frame(&g_link, ECU_RX, cf, 8u, 3u);
+    cf[0] = 0x22;
+    memcpy(&cf[1], &body[13], 7);
+    isotp_on_frame(&g_link, ECU_RX, cf, 8u, 4u);
+
+    CHECK(isotp_state(&g_link) == ISOTP_DONE);
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 20u);
+    CHECK(memcmp(out, body, 20) == 0);
+}
+
+/* Proud consecutive frames s dlc=1 nenese zadna data. Brat "co prislo"
+ * by znamenalo prijem, ktery bezi navzdy a nepribyva v nem ani bajt. */
+static void test_empty_consecutive_frames(void)
+{
+    static const uint8_t req[] = { 0x22, 0x21, 0x46 };
+    uint8_t ff[8], cf[1];
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    ff[0] = 0x10; ff[1] = 20;
+    memset(&ff[2], 0x11, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1u);
+
+    cf[0] = 0x21;
+    isotp_on_frame(&g_link, ECU_RX, cf, 1u, 2u);
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_CF_SHORT);
+}
+
+/* ------------------------------------------------------------------
+ * 9. Kontroly delky ramce
+ *
+ * feed() posila vzdy osm bajtu, takze kontroly delky by bez feed_dlc()
+ * zustaly neotestovane a dalo by se je beztrestne smazat.
+ * ------------------------------------------------------------------ */
+static void test_truncated_frames(void)
+{
+    static const uint8_t req[] = { 0x22, 0xF4, 0x05 };
+    static const uint8_t sf[]  = { 0x05, 0x62, 0xF4 };  /* rika pet, nese dva */
+    static const uint8_t ff[]  = { 0x10, 0x14, 0xAA };  /* FF kratsi nez osm */
+    uint8_t out[8];
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    feed_dlc(10u, sf, sizeof(sf), 3u);
+    CHECK(isotp_state(&g_link) == ISOTP_WAITING);     /* nic se neprevzalo */
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 0u);
+
+    feed_dlc(20u, ff, sizeof(ff), 3u);
+    CHECK(isotp_state(&g_link) == ISOTP_WAITING);
+    CHECK(g_ntx == 1);                                /* zadny flow control */
+}
+
+/* Osekany flow control neni flow control - nesmi rozjet odesilani. */
+static void test_truncated_flow_control(void)
+{
+    static const uint8_t fc[] = { 0x30, 0x01 };
+    uint8_t msg[20];
+
+    memset(msg, 0x5A, sizeof(msg));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+
+    feed_dlc(10u, fc, sizeof(fc), 2u);
+    CHECK(isotp_poll(&g_link, 20u) == ISOTP_SENDING);
+    CHECK(g_ntx == 1);
+    CHECK(isotp_poll(&g_link, 1000u) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_NO_FC);
+}
+
+/* ------------------------------------------------------------------
+ * 10. Kdyz neodejde ramec uprostred prenosu
+ * ------------------------------------------------------------------ */
+static void test_consecutive_frame_send_fails(void)
+{
+    static const uint8_t fc[] = { 0x30, 0x01, 0x05 };
+    uint8_t msg[20];
+
+    memset(msg, 0x5A, sizeof(msg));
+    g_send_fail_at = 2;                 /* first frame projde, CF uz ne */
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+    feed(2u, fc, sizeof(fc));
+
+    CHECK(isotp_poll(&g_link, 10u) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_SEND);
+}
+
+static void test_flow_control_send_fails(void)
+{
+    static const uint8_t req[] = { 0x22, 0x21, 0x46 };
+    uint8_t ff[8];
+
+    g_send_fail_at = 2;                 /* pozadavek projde, nas FC uz ne */
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+
+    ff[0] = 0x10; ff[1] = 20;
+    memset(&ff[2], 0x11, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1u);
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_SEND);
+}
+
+/* ------------------------------------------------------------------
+ * 11. Vyzvednuti zpravy do maleho bufferu
+ * ------------------------------------------------------------------ */
+static void test_take_truncates(void)
+{
+    static const uint8_t req[] = { 0x22, 0x21, 0x46 };
+    uint8_t ff[8], cf[8];
+    uint8_t body[20];
+    uint8_t small[4 + 4];
+    uint16_t n;
+    int i;
+
+    for (i = 0; i < 20; i++) {
+        body[i] = (uint8_t)(0x30 + i);
+    }
+    memset(small, 0xEE, sizeof(small));   /* za bufferem hlidaci bajty */
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    ff[0] = 0x10; ff[1] = 20;
+    memcpy(&ff[2], &body[0], 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1u);
+    cf[0] = 0x21;
+    memcpy(&cf[1], &body[6], 7);
+    isotp_on_frame(&g_link, ECU_RX, cf, 8u, 2u);
+    cf[0] = 0x22;
+    memcpy(&cf[1], &body[13], 7);
+    isotp_on_frame(&g_link, ECU_RX, cf, 8u, 3u);
+
+    CHECK(isotp_msg_len(&g_link) == 20u);   /* zjistitelne predem */
+
+    n = isotp_take(&g_link, small, 4u);
+    CHECK(n == 4u);                         /* nikdy vic nez cap */
+    CHECK(memcmp(small, body, 4) == 0);
+    CHECK(small[4] == 0xEE && small[5] == 0xEE &&
+          small[6] == 0xEE && small[7] == 0xEE);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_OVERFLOW);  /* a je to videt */
+    CHECK(isotp_msg_len(&g_link) == 0u);
+}
+
+/* ------------------------------------------------------------------
+ * 12. Cesta z chyby
+ *
+ * isotp.h slibuje, ze novy pozadavek je zpusob, jak se z FAILED dostat,
+ * a ze isotp_abort() uklidi rozdelany prenos. Oboji musi platit.
+ * ------------------------------------------------------------------ */
+static void test_recover_after_failure(void)
+{
+    static const uint8_t req[] = { 0x22, 0xF4, 0x05 };
+    static const uint8_t rsp[] = { 0x05, 0x62, 0xF4, 0x05, 0x01, 0x2C };
+    uint8_t out[8];
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    CHECK(isotp_poll(&g_link, 1000u) == ISOTP_FAILED);
+
+    /* novy pozadavek ze stavu FAILED musi projit */
+    CHECK(isotp_send(&g_link, req, sizeof(req), 1100u));
+    CHECK(isotp_state(&g_link) == ISOTP_WAITING);
+    CHECK(isotp_error(&g_link) == ISOTP_OK);
+    CHECK(g_ntx == 2);
+
+    feed(1150u, rsp, sizeof(rsp));
+    CHECK(isotp_take(&g_link, out, sizeof(out)) == 5u);
+}
+
+static void test_abort_releases_link(void)
+{
+    uint8_t msg[20];
+
+    memset(msg, 0x5A, sizeof(msg));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+    CHECK(isotp_busy(&g_link));
+
+    isotp_abort(&g_link);
+    CHECK(isotp_state(&g_link) == ISOTP_IDLE);
+    CHECK(!isotp_busy(&g_link));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 10u));
 }
 
 /* ------------------------------------------------------------------
@@ -556,6 +917,21 @@ static const struct {
     { "prilis dlouha odpoved",              test_receive_too_long },
     { "responsePending 0x78",               test_response_pending },
     { "pojistka N_Cs 150 ms",               test_n_cs_guard },
+    { "N_Cs ma misto pro smycku",           test_n_cs_room_for_loop },
+    { "0x78 donekonecna",                   test_pending_forever },
+    { "0x78 na hranici",                    test_pending_limit },
+    { "celkovy strop prenosu",              test_transaction_cap },
+    { "opozdena odpoved se zahodi",         test_late_response_ignored },
+    { "ramec na necinnem spoji",            test_idle_frame_ignored },
+    { "SF uprostred skladani",              test_sf_during_receive },
+    { "prazdne consecutive frames",         test_empty_consecutive_frames },
+    { "osekane ramce",                      test_truncated_frames },
+    { "osekany flow control",               test_truncated_flow_control },
+    { "neodeslany consecutive frame",       test_consecutive_frame_send_fails },
+    { "neodeslany flow control",            test_flow_control_send_fails },
+    { "vyzvednuti do maleho bufferu",       test_take_truncates },
+    { "novy pozadavek po chybe",            test_recover_after_failure },
+    { "isotp_abort uvolni spoj",            test_abort_releases_link },
     { "spatne poradove cislo",              test_bad_sequence },
     { "zadna odpoved",                      test_no_response },
     { "cizi ramce na sbernici",             test_foreign_frames },

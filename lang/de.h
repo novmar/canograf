@@ -85,28 +85,38 @@ static const char *const LANG_DE[] = {
     "kein Netz gefunden",
     "Suche fehlgeschlagen - erneut versuchen",
     "NOCHMAL",
+    "+%d weitere Netze gefunden",
 
     /* Dialoge */
     "ZURÜCK",
-    "FERTIG",
     "VERSTANDEN",
     "ABBRECHEN",
     "%d s HALTEN",
     "FERTIG",
+    "EIN",
+    "AUS",
 
     /* Helligkeit der Hintergrundbeleuchtung */
     "Helligkeit",
-    "Die Stufen unten gelten für den gerade eingeschalteten Modus. "
-    "Nachts wird von Hand umgeschaltet: die Platine hat zwar eine Uhr, "
-    "aber niemand hat sie gestellt, und nach der Tageszeit zu raten "
-    "wäre schlechter als ein Knopf.",
     "Auf dieser Platine nicht. Dimmen braucht einen Draht von GPIO6 zum "
     "BL-Pad; ohne ihn ist die Beleuchtung nur ein Schalter.",
     "TAG",
     "NACHT",
+    "NACH FAHRZEUG",
+    "erfordert eine Fahrzeugverbindung",
+    "SCHALTER IN KOPFZEILE",
 
     /* Navigation */
     "PLATZ FÜR WEITERE FUNKTIONEN",
+    "DEBUG",
+
+    /* Diagnose */
+    "Diagnose",
+    "FPS + SPEICHER",
+    "ROHWERTE  (Soll / angezeigt, x100)",
+    "CAN-BUS",
+    "nicht verbunden - noch keine Daten",
+    "SPEICHER UND LAUFZEIT",
 };
 
 #endif /* LANG_DE_H */

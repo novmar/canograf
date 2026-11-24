@@ -80,9 +80,15 @@ cmake --build test/build
 ```
 
 No LVGL, nothing downloaded, a couple of seconds. Covered: single frame both
-ways, multi-frame receive, multi-frame send with block size 1, a flow control
-that never arrives, the 150 ms N_Cs guard and `0x78` responsePending. CI runs
-the same binary on every push.
+ways, multi-frame receive, multi-frame send with block size 1, flow control
+that never arrives or says WAIT forever, the 150 ms N_Cs guard, `0x78`
+responsePending and its ceiling, truncated frames, and the rule that a reply
+is only accepted while a request is outstanding. CI runs the same binary on
+every push.
+
+Every guard in the layer is checked by mutation: flipping a constant or
+removing a check in `src/can/isotp.c` has to make at least one test fail.
+A guard no test defends is a guard that is not there.
 
 ## Configuration
 

@@ -25,6 +25,7 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <esp_wifi.h>
 #include <esp_chip_info.h>
 #include <esp_flash.h>
 
@@ -138,6 +139,7 @@ static void host_save_cfg(const ui_cfg_t *c)
     prefs.putInt("blday", c->bright_day);
     prefs.putInt("blnight", c->bright_night);
     prefs.putBool("blnight_on", c->night);
+    prefs.putBool("tbdn", c->topbar_dn);
     prefs.end();
 }
 
@@ -234,22 +236,70 @@ static void saved_put(const char *ssid, const char *pass)
     snprintf(saved_pass[0], sizeof(saved_pass[0]), "%s", pass ? pass : "");
     saved_store();
 }
+/* ---------------------------------------------------------------------
+ * Sken siti
+ *
+ * Radic umi bud hledat, nebo se pripojovat, ne oboje najednou. Dokud
+ * bezi NEDOKONCENY pokus o pripojeni - a ten bezi po celou dobu, co
+ * deska marne hleda ulozenou sit, protoze ji Arduino samo porad zkousi
+ * znovu - vraci esp_wifi_scan_start() chybu ESP_ERR_WIFI_STATE a sken
+ * se vubec nerozjede. V UI to vypada jako "hledani se nezdarilo".
+ *
+ * Zmereno na desce (ulozena sit mimo dosah, 4 s po startu):
+ *
+ *     WiFi[pred]: mode=1 status=DISCONNECTED(6) scanComplete=-2
+ *     A) esp_wifi_scan_start            -> ESP_ERR_WIFI_STATE
+ *     B) esp_wifi_disconnect            -> ESP_OK
+ *     C) esp_wifi_scan_start po disconnect -> ESP_OK   (a nasel 2 site)
+ *
+ * Podstatne je, ze WiFi.disconnect() z Arduina tohle NESPRAVI: kdyz
+ * spojeni nestoji, tise se vrati a radic zustane ve stavu "pripojuji
+ * se". Zastavit to umi az esp_wifi_disconnect() primo. Spolu s tim se
+ * musi vypnout i automaticke obnovovani spojeni, jinak se pokus do
+ * vteriny rozjede znovu a dalsi sken (tlacitko ZNOVU) by zase selhal.
+ *
+ * Po dobehnuti skenu se pokus zase obnovi - deska nesmi prestat hledat
+ * ulozenou sit jen proto, ze se nekdo kouknul do seznamu.
+ * ------------------------------------------------------------------- */
+static bool wifi_connect_paused = false;
+
+static void wifi_pause_connect(void)
+{
+    if (WiFi.status() == WL_CONNECTED) return;   /* hotove spojeni sken snese */
+    WiFi.setAutoReconnect(false);
+    esp_wifi_disconnect();
+    wifi_connect_paused = true;
+}
+
+static void wifi_resume_connect(void)
+{
+    if (!wifi_connect_paused) return;
+    wifi_connect_paused = false;
+    WiFi.setAutoReconnect(true);
+    if (saved_n && WiFi.status() != WL_CONNECTED)
+        WiFi.begin(saved_ssid[0], saved_pass[0]);
+}
 
 static void host_wifi_scan_start(void)
 {
-    /* Sken se nerozjede, kdyz radio neni v rezimu STA nebo kdyz prave
-     * bezi nedokonceny pokus o pripojeni - esp_wifi_scan_start v tom
-     * stavu vrati chybu a scanComplete() pak hlasi -2 az do smrti.
-     * Fungujici spojeni se nerusi, pri nem sken na ESP32 projde. */
     WiFi.mode(WIFI_STA);
-    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false, false);
+    wifi_pause_connect();
     WiFi.scanDelete();
     int16_t r = WiFi.scanNetworks(true);
-    if (r == WIFI_SCAN_FAILED) Serial.println("WiFi: sken se nerozjel");
+    if (r == WIFI_SCAN_FAILED) {
+        Serial.printf("WiFi: sken se nerozjel (mode=%d status=%d)\n",
+                      (int)WiFi.getMode(), (int)WiFi.status());
+        wifi_resume_connect();
+    }
 }
 
 /* -1 jeste bezi, -2 nerozjelo se, jinak pocet siti */
-static int host_wifi_scan_result(void) { return WiFi.scanComplete(); }
+static int host_wifi_scan_result(void)
+{
+    int n = WiFi.scanComplete();
+    if (n != WIFI_SCAN_RUNNING) wifi_resume_connect();
+    return n;
+}
 
 static const char *host_wifi_scan_ssid(int i)
 {
@@ -260,6 +310,8 @@ static const char *host_wifi_scan_ssid(int i)
 static void host_wifi_connect(const char *ssid, const char *pass)
 {
     saved_put(ssid, pass);
+    wifi_connect_paused = false;    /* vlastni volba prebiji navrat k ulozene */
+    WiFi.setAutoReconnect(true);
     WiFi.begin(ssid, pass);
 }
 
@@ -273,6 +325,8 @@ static bool host_wifi_connect_known(const char *ssid)
     char pass[sizeof(saved_pass[0])];
     memcpy(pass, saved_pass[i], sizeof(pass));
     saved_put(ssid, pass);
+    wifi_connect_paused = false;
+    WiFi.setAutoReconnect(true);
     WiFi.begin(ssid, pass);
     return true;
 }
@@ -311,27 +365,32 @@ static unsigned host_heap_kb(void)  { return (unsigned)(ESP.getFreeHeap() / 1024
 static unsigned host_psram_kb(void) { return (unsigned)(ESP.getFreePsram() / 1024); }
 
 /* Neni const: kdyz se PWM nerozjede, musi se bl_set_percent za behu
- * vynulovat, at UI stmivani nenabizi. */
+ * vynulovat, at UI stmivani nenabizi.
+ *
+ * Polozky jsou jmenovane zamerne. Tri dvojice maji shodny typ
+ * (wifi_known/wifi_connect_known, heap_kb/psram_kb), takze prehozeni
+ * dvou radku v ui.h by pozicni seznam prelozil bez jedineho varovani a
+ * deska by zacala volat jine funkce. */
 static ui_host_t UI_HOST = {
-    host_backlight,
+    .backlight          = host_backlight,
 #if CANOGRAF_BL_PWM_PIN >= 0
-    host_bl_percent,
+    .bl_set_percent     = host_bl_percent,
 #else
-    nullptr,                /* bez dratku na plosce BL se stmivat neda */
+    .bl_set_percent     = nullptr,  /* bez dratku na plosce BL se neda stmivat */
 #endif
-    host_save_cfg,
-    host_wifi_scan_start,
-    host_wifi_scan_result,
-    host_wifi_scan_ssid,
-    host_wifi_connect,
-    host_wifi_connected,
-    host_wifi_ssid,
-    host_wifi_ip,
-    host_wifi_known,
-    host_wifi_connect_known,
-    host_wifi_forget,
-    host_heap_kb,
-    host_psram_kb,
+    .save_cfg           = host_save_cfg,
+    .wifi_scan_start    = host_wifi_scan_start,
+    .wifi_scan_result   = host_wifi_scan_result,
+    .wifi_scan_ssid     = host_wifi_scan_ssid,
+    .wifi_connect       = host_wifi_connect,
+    .wifi_connected     = host_wifi_connected,
+    .wifi_ssid          = host_wifi_ssid,
+    .wifi_ip            = host_wifi_ip,
+    .wifi_known         = host_wifi_known,
+    .wifi_connect_known = host_wifi_connect_known,
+    .wifi_forget        = host_wifi_forget,
+    .heap_kb            = host_heap_kb,
+    .psram_kb           = host_psram_kb,
 };
 
 /* ---------------- obnovovani ---------------- */
@@ -357,6 +416,7 @@ void setup()
     cfg.bright_day = prefs.getInt("blday", 100);
     cfg.bright_night = prefs.getInt("blnight", 35);
     cfg.night = prefs.getBool("blnight_on", false);
+    cfg.topbar_dn = prefs.getBool("tbdn", false);
     prefs.end();
 
     g_board = new Board();

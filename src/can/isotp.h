@@ -73,6 +73,20 @@ extern "C" {
 #define ISOTP_P2_STAR_MS    5000u   /* totez po 7F xx 78 */
 #define ISOTP_FC_WAIT_MAX      8u   /* kolik FS=WAIT za sebou jeste snesem */
 
+/* Dve nezavisle pojistky proti prenosu, ktery nikdy neskonci.
+ *
+ * Jednotka smi odpovidat 7F xx 78 a tim si rikat o dalsich P2*. Kdyz to
+ * dela porad dokola, bez stropu by spoj zustal navzdy v ISOTP_WAITING:
+ * UI by neuvidelo ani odpoved, ani chybu, jen ticho. Na X82 to neni
+ * teorie - plny seznam chyb z 19 02 i routine control pro regeneraci
+ * DPF posilaji 0x78 opakovane.
+ *
+ * Strop poctu je na opakovane 0x78, celkovy cas je na VSECHNO ostatni
+ * (pomalu kapajici pendingy, stridani prijmu a odesilani). Jsou schvalne
+ * oddelene: kazda chyti jiny zpusob, jak prenos uvazne. */
+#define ISOTP_PENDING_MAX     16u   /* kolik 7F xx 78 za jeden pozadavek */
+#define ISOTP_TXN_MAX_MS   30000u   /* nejdelsi cely prenos, od isotp_send */
+
 /* Zaporna odpoved "requestCorrectlyReceived-ResponsePending" */
 #define ISOTP_NRC_PENDING   0x78u
 
@@ -100,8 +114,11 @@ typedef enum {
     ISOTP_ERR_N_CS,         /* nestihli jsme odeslat CF do 150 ms */
     ISOTP_ERR_NO_CF,        /* dalsi consecutive frame nedosel do N_Cr */
     ISOTP_ERR_SEQ,          /* spatne poradove cislo CF */
+    ISOTP_ERR_CF_SHORT,     /* CF kratsi nez sedm bajtu, a neni posledni */
     ISOTP_ERR_TIMEOUT,      /* jednotka neodpovedela do P2 / P2* */
-    ISOTP_ERR_OVERFLOW      /* odpoved se nevejde do naseho bufferu */
+    ISOTP_ERR_OVERFLOW,     /* odpoved se nevejde do naseho bufferu */
+    ISOTP_ERR_PENDING_MAX,  /* 7F xx 78 porad dokola, viz ISOTP_PENDING_MAX */
+    ISOTP_ERR_TXN           /* cely prenos prekrocil ISOTP_TXN_MAX_MS */
 } isotp_err_t;
 
 /* ------------------------------------------------------------------
@@ -136,8 +153,9 @@ typedef struct {
     isotp_cfg_t   cfg;
     isotp_state_t state;
     isotp_err_t   err;
-    bool          awaiting;      /* ceka se na odpoved na nas pozadavek */
     bool          wait_fc;       /* ve stavu SENDING: stojime na FC */
+    uint16_t      pending;       /* 7F xx 78 v TOMTO prenosu */
+    uint32_t      t_txn_late;    /* dokdy musi cely prenos skoncit */
 
     uint8_t  tx_buf[ISOTP_BUF_SIZE];
     uint16_t tx_len;
@@ -190,7 +208,14 @@ bool isotp_send(isotp_link_t *l, const uint8_t *msg, uint16_t len,
                 uint32_t now_ms);
 
 /* Jeden prijaty CAN ramec. Ramce s jinym identifikatorem nez cfg.rx_id
- * se tise ignoruji, takze se sem da sypat cela sbernice. */
+ * se tise ignoruji, takze se sem da sypat cela sbernice.
+ *
+ * Spoj je klient: zacatek zpravy (SF nebo FF) prijima JEN ve stavu
+ * ISOTP_WAITING, tedy kdyz na odpoved opravdu ceka. Opozdena odpoved na
+ * predchozi otazku, provoz jine jednotky na stejne adrese ani SF
+ * uprostred skladani viceramcove odpovedi tim nemuzou podvrhnout
+ * vysledek - a to je dulezitejsi, nez umet odposlouchavat cizi relaci.
+ * Kdo chce videt vsechno, cte kruhovy zasobnik v twai.h. */
 void isotp_on_frame(isotp_link_t *l, uint32_t id, const uint8_t *data,
                     uint8_t dlc, uint32_t now_ms);
 
@@ -198,9 +223,22 @@ void isotp_on_frame(isotp_link_t *l, uint32_t id, const uint8_t *data,
  * smycky tak casto, aby mezi dvema volanimi neuplynulo 150 ms. */
 isotp_state_t isotp_poll(isotp_link_t *l, uint32_t now_ms);
 
-/* Vyzvedne slozenou zpravu a vrati spoj do ISOTP_IDLE. Vraci delku
- * zpravy (i kdyz je vetsi nez cap - tolik bajtu se zkopiruje), 0 kdyz
- * neni co vyzvednout. */
+/* Delka slozene zpravy, dokud je spoj v ISOTP_DONE; jinak 0. Slouzi k
+ * tomu, aby si volajici mohl rict o dost velky buffer DRIV, nez zpravu
+ * vyzvedne. */
+uint16_t isotp_msg_len(const isotp_link_t *l);
+
+/* Vyzvedne slozenou zpravu a vrati spoj do ISOTP_IDLE.
+ *
+ * Vraci POCET SKUTECNE ZKOPIROVANYCH bajtu, nikdy vic nez cap - takze
+ * `n = isotp_take(l, buf, sizeof buf); for (i = 0; i < n; i++)` je vzdy
+ * v mezich bufferu. Kdyz se zprava nevesla, zkopiruje se jeji zacatek a
+ * isotp_error() vrati ISOTP_ERR_OVERFLOW; cela delka se da zjistit
+ * predem pres isotp_msg_len().
+ *
+ * Zahazovat spravne prijatou odpoved kvuli malemu bufferu volajiciho by
+ * znamenalo poslat celou otazku do vozidla znovu, proto orezani, a ne
+ * odmitnuti. Tiche to ale neni ani pred odebranim, ani po nem. */
 uint16_t isotp_take(isotp_link_t *l, uint8_t *out, uint16_t cap);
 
 static inline isotp_state_t isotp_state(const isotp_link_t *l) { return l->state; }

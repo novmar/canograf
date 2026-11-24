@@ -84,27 +84,38 @@ static const char *const LANG_CS[] = {
     "žádná síť nenalezena",
     "hledání se nezdařilo - zkuste znovu",
     "ZNOVU",
+    "+%d dalších nalezených sítí",
 
     /* dialogy */
     "ZPĚT",
-    "ZAVŘÍT",
     "ROZUMÍM",
     "ZRUŠIT",
     "DRŽ %d s",
     "HOTOVO",
+    "ZAP",
+    "VYP",
 
     /* jas podsviceni */
     "Jas",
-    "Úrovně níže nastavují ten režim, který je právě zapnutý. Noční se "
-    "přepíná ručně: deska sice hodiny má, ale nikdo je nenastavil, "
-    "takže hádat podle času by bylo horší než jedno tlačítko.",
     "Na této desce ne. Stmívání potřebuje drátek z GPIO6 na plošku BL; "
     "bez něj je podsvícení jen vypínač.",
     "DEN",
     "NOC",
+    "PODLE VOZU",
+    "vyžaduje připojení k vozidlu",
+    "PŘEPÍNAČ V LIŠTĚ",
 
     /* navigace */
     "MÍSTO PRO DALŠÍ FUNKCE",
+    "DEBUG",
+
+    /* diagnostika */
+    "Diagnostika",
+    "FPS + PAMĚŤ",
+    "SYROVÉ HODNOTY  (cíl / zobrazeno, x100)",
+    "SBĚRNICE CAN",
+    "nepřipojeno - zatím bez dat",
+    "PAMĚŤ A DOBA BĚHU",
 };
 
 #endif /* LANG_CS_H */

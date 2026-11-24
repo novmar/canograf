@@ -86,27 +86,38 @@ static const char *const LANG_EN[] = {
     "no network found",
     "scan failed - try again",
     "RETRY",
+    "+%d more networks found",
 
     /* dialogs */
     "BACK",
-    "CLOSE",
     "GOT IT",
     "CANCEL",
     "HOLD %d s",
     "OK",
+    "ON",
+    "OFF",
 
     /* backlight brightness */
     "Brightness",
-    "The levels below set the mode that is switched on. Night mode is "
-    "switched by hand: the board has a clock, but nobody has set it, so "
-    "guessing from the time of day would be worse than one button.",
     "Not on this board. Dimming needs a wire from GPIO6 to the BL pad; "
     "without it the backlight is only an on/off switch.",
     "DAY",
     "NIGHT",
+    "BY VEHICLE",
+    "requires a vehicle connection",
+    "TOGGLE IN TOP BAR",
 
     /* navigation */
     "ROOM FOR MORE FUNCTIONS",
+    "DEBUG",
+
+    /* diagnostics */
+    "Diagnostics",
+    "FPS + MEMORY",
+    "RAW VALUES  (target / shown, x100)",
+    "CAN BUS",
+    "not connected - no data yet",
+    "MEMORY AND UPTIME",
 };
 
 #endif /* LANG_EN_H */

@@ -36,6 +36,9 @@ typedef struct {
     int      bright_day;    /* jas 0..100 % ve dne */
     int      bright_night;  /* jas 0..100 % v noci */
     bool     night;         /* prave plati nocni uroven */
+    /* Rychly prepinac den/noc v horni liste. Volitelny, protoze lista je
+     * uzka; zapina se v dialogu jasu. Vychozi je vypnuty. */
+    bool     topbar_dn;
 } ui_cfg_t;
 
 typedef struct {

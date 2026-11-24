@@ -24,7 +24,7 @@ extern "C" {
 
 enum {
     /* nazvy stranek - zaroven popisky navigacnich tlacitek,
-     * vejit se musi do 128 px pri fontu 20 */
+     * vejit se musi do 129 px pri fontu 28 */
     STR_PAGE_MAIN = 0,
     STR_PAGE_ENGINE,
     STR_PAGE_BOOST,
@@ -91,24 +91,37 @@ enum {
     STR_WIFI_NONE,          /* sken dobehl a nic nenasel */
     STR_WIFI_FAILED,        /* sken se nerozjel nebo se nedockal */
     STR_WIFI_RETRY,
+    STR_WIFI_MORE,          /* jedno %d = kolik siti se do seznamu neveslo */
 
     /* dialogy */
     STR_BACK,
-    STR_CLOSE,
     STR_OK,
     STR_CANCEL,
     STR_HOLD_FMT,       /* "HOLD %d s" - potvrzeni drzenim */
     STR_HOLD_DONE,      /* potvrzeno - ukaze se na chvili misto odpoctu */
+    STR_ON,
+    STR_OFF,
 
     /* jas podsviceni */
     STR_BRIGHT_TITLE,
-    STR_BRIGHT_INFO,
     STR_BRIGHT_NA,          /* deska stmivat neumi - misto tlacitek */
     STR_BRIGHT_DAY,
     STR_BRIGHT_NIGHT,
+    STR_BRIGHT_VEHICLE,     /* treti rezim: podle osvetleni vozidla */
+    STR_BRIGHT_VEHICLE_NA,  /* a duvod, proc zatim nejde zvolit */
+    STR_BRIGHT_TOPBAR,      /* rychly prepinac den/noc v horni liste */
 
     /* navigace */
     STR_NAV_PLACEHOLDER,
+    STR_NAV_DEBUG,          /* popisek dlazdice diagnostiky */
+
+    /* diagnostika */
+    STR_DBG_TITLE,
+    STR_DBG_PERF,           /* prepinac prekryvu s FPS a pameti */
+    STR_DBG_RAW,            /* syrove hodnoty, ktere UI prave ukazuje */
+    STR_DBG_BUS,
+    STR_DBG_BUS_NA,         /* CAN jeste neni na UI napojeny */
+    STR_DBG_MEM,
 
     STR__COUNT
 };

@@ -31,7 +31,6 @@ static void fail(isotp_link_t *l, isotp_err_t e)
 {
     l->state = ISOTP_FAILED;
     l->err = e;
-    l->awaiting = false;
     l->wait_fc = false;
     l->n_err++;
 }
@@ -101,7 +100,7 @@ void isotp_abort(isotp_link_t *l)
 {
     l->state = ISOTP_IDLE;
     l->err = ISOTP_OK;
-    l->awaiting = false;
+    l->pending = 0u;
     l->wait_fc = false;
     l->tx_len = 0u;
     l->tx_sent = 0u;
@@ -131,8 +130,13 @@ bool isotp_send(isotp_link_t *l, const uint8_t *msg, uint16_t len,
     l->tx_sent = 0u;
     l->err = ISOTP_OK;
     l->fc_waits = 0u;
+    l->pending = 0u;
     l->rx_len = 0u;
     l->rx_got = 0u;
+    /* Strop na cely prenos, nezavisly na jednotlivych casovacich. Drzi
+     * i tehdy, kdyz kazdy dilci limit sam o sobe porad dokola ozivaji
+     * prichozi ramce - treba pomalu kapajici 7F xx 78. */
+    l->t_txn_late = now_ms + ISOTP_TXN_MAX_MS;
 
     if (len <= 7u) {
         d[0] = (uint8_t)len;
@@ -143,7 +147,6 @@ bool isotp_send(isotp_link_t *l, const uint8_t *msg, uint16_t len,
         }
         l->tx_sent = len;
         l->n_msg_tx++;
-        l->awaiting = true;
         l->state = ISOTP_WAITING;
         l->t_rx_late = now_ms + ISOTP_P2_MS;
         return true;
@@ -162,7 +165,6 @@ bool isotp_send(isotp_link_t *l, const uint8_t *msg, uint16_t len,
     l->tx_bs = 0u;
     l->tx_bs_left = 0u;
     l->tx_st_min = 0u;
-    l->awaiting = true;
     l->wait_fc = true;
     l->state = ISOTP_SENDING;
     l->t_fc_late = now_ms + ISOTP_N_BS_MS;
@@ -214,32 +216,45 @@ static void send_cf(isotp_link_t *l, uint32_t now_ms)
 
 /* Zprava je kompletni. Zaporna odpoved 7F xx 78 ale neni odpoved -
  * jednotka jen rika "pracuji na tom", takze se ceka dal s delsim
- * limitem. Bez tohohle konci kazde 19 02 chybou. */
+ * limitem. Bez tohohle konci kazde 19 02 chybou.
+ *
+ * Opakovat to ale smi jen ISOTP_PENDING_MAX krat. Jednotka, ktera posila
+ * 0x78 donekonecna, by jinak spoj navzdy drzela v ISOTP_WAITING a UI by
+ * neuvidelo ani odpoved, ani chybu. */
 static void rx_complete(isotp_link_t *l, uint32_t now_ms)
 {
-    if (l->awaiting && l->rx_len >= 3u &&
+    if (l->rx_len >= 3u &&
         l->rx_buf[0] == 0x7Fu && l->rx_buf[2] == ISOTP_NRC_PENDING) {
         l->n_pending++;
+        l->pending++;
         l->rx_len = 0u;
         l->rx_got = 0u;
+        if (l->pending > (uint16_t)ISOTP_PENDING_MAX) {
+            fail(l, ISOTP_ERR_PENDING_MAX);
+            return;
+        }
         l->state = ISOTP_WAITING;
         l->t_rx_late = now_ms + ISOTP_P2_STAR_MS;
         return;
     }
     l->n_msg_rx++;
-    l->awaiting = false;
     l->state = ISOTP_DONE;
 }
 
+/* Zacatek zpravy (SF i FF) bereme JEN kdyz na odpoved opravdu cekame.
+ * Jinak by opozdena odpoved na predchozi otazku prepsala stav FAILED na
+ * DONE a vydala se jako odpoved na otazku novou - tedy spravne vypadajici
+ * hodnota ciziho datoveho identifikatoru. Ze stejneho duvodu SF uprostred
+ * skladani viceramcove odpovedi nic nezahazuje. */
 static void on_sf(isotp_link_t *l, const uint8_t *d, uint8_t dlc, uint32_t now)
 {
     uint8_t len = (uint8_t)(d[0] & 0x0Fu);
 
+    if (l->state != ISOTP_WAITING) {
+        return;
+    }
     if (len == 0u || len > 7u || (uint8_t)(len + 1u) > dlc) {
         return;  /* poskozeny ramec, nic s nim nedelame */
-    }
-    if (l->state == ISOTP_SENDING) {
-        return;  /* rozdelane odesilani ma prednost */
     }
     memcpy(l->rx_buf, &d[1], len);
     l->rx_len = len;
@@ -251,7 +266,7 @@ static void on_ff(isotp_link_t *l, const uint8_t *d, uint8_t dlc, uint32_t now)
 {
     uint16_t len;
 
-    if (dlc < 8u || l->state == ISOTP_SENDING) {
+    if (l->state != ISOTP_WAITING || dlc < 8u) {
         return;
     }
     len = (uint16_t)(((uint16_t)(d[0] & 0x0Fu) << 8) | d[1]);
@@ -291,7 +306,12 @@ static void on_cf(isotp_link_t *l, const uint8_t *d, uint8_t dlc, uint32_t now)
     left = (uint16_t)(l->rx_len - l->rx_got);
     n = (left > 7u) ? 7u : (uint8_t)left;
     if ((uint8_t)(n + 1u) > dlc) {
-        n = (uint8_t)(dlc - 1u);  /* kratsi ramec nez cekame, vezmi co je */
+        /* Podle ISO 15765-2 smi byt kratsi jen POSLEDNI consecutive
+         * frame. Kdyby se tu bralo "co prislo", stacil by proud ramcu s
+         * dlc=1 a spravnym poradovym cislem, aby prijem bezel navzdy a
+         * nepribyl ani bajt. */
+        fail(l, ISOTP_ERR_CF_SHORT);
+        return;
     }
     memcpy(&l->rx_buf[l->rx_got], &d[1], n);
     l->rx_got = (uint16_t)(l->rx_got + n);
@@ -376,6 +396,14 @@ void isotp_on_frame(isotp_link_t *l, uint32_t id, const uint8_t *data,
  * ------------------------------------------------------------------ */
 isotp_state_t isotp_poll(isotp_link_t *l, uint32_t now_ms)
 {
+    /* Strop na cely prenos plati ve vsech bezicich stavech a nic ho
+     * neumi posunout. Dilci casovace prichozi ramce ozivaji, takze samy
+     * o sobe neskoncivsi prenos nezastavi. */
+    if (isotp_busy(l) && reached(now_ms, l->t_txn_late)) {
+        fail(l, ISOTP_ERR_TXN);
+        return l->state;
+    }
+
     switch (l->state) {
     case ISOTP_SENDING:
         if (l->wait_fc) {
@@ -413,21 +441,38 @@ isotp_state_t isotp_poll(isotp_link_t *l, uint32_t now_ms)
     return l->state;
 }
 
+uint16_t isotp_msg_len(const isotp_link_t *l)
+{
+    return (l->state == ISOTP_DONE) ? l->rx_len : 0u;
+}
+
 uint16_t isotp_take(isotp_link_t *l, uint8_t *out, uint16_t cap)
 {
     uint16_t len;
+    uint16_t n;
 
     if (l->state != ISOTP_DONE) {
         return 0u;
     }
     len = l->rx_len;
-    if (out != NULL && cap > 0u) {
-        memcpy(out, l->rx_buf, (len < cap) ? len : cap);
+    n = (len < cap) ? len : cap;
+    if (out == NULL) {
+        n = 0u;
+    } else if (n > 0u) {
+        memcpy(out, l->rx_buf, n);
+    }
+    /* Vraci se pocet zkopirovanych bajtu, nikdy vic nez cap - volajici,
+     * ktery podle navratove hodnoty prochazi buffer, nemuze vyjet ven.
+     * Oriznuti se nezatlouka: je videt pred odebranim (isotp_msg_len) i
+     * po nem (isotp_error). */
+    if (n < len) {
+        l->err = ISOTP_ERR_OVERFLOW;
+        l->n_err++;
     }
     l->rx_len = 0u;
     l->rx_got = 0u;
     l->state = ISOTP_IDLE;
-    return len;
+    return n;
 }
 
 const char *isotp_err_name(isotp_err_t e)
@@ -444,8 +489,11 @@ const char *isotp_err_name(isotp_err_t e)
     case ISOTP_ERR_N_CS:        return "n-cs-exceeded";
     case ISOTP_ERR_NO_CF:       return "no-consecutive-frame";
     case ISOTP_ERR_SEQ:         return "bad-sequence";
+    case ISOTP_ERR_CF_SHORT:    return "short-consecutive-frame";
     case ISOTP_ERR_TIMEOUT:     return "no-response";
     case ISOTP_ERR_OVERFLOW:    return "message-too-long";
+    case ISOTP_ERR_PENDING_MAX: return "response-pending-forever";
+    case ISOTP_ERR_TXN:         return "transfer-too-long";
     default:                    return "?";
     }
 }

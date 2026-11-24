@@ -30,9 +30,14 @@
  * takze odposlech v UI nebere ramce transportni vrstve a naopak.
  *
  * Vlakna: zapisuje jen ten, kdo vola can_poll() a can_send(), a to musi
- * byt jedno vlakno. Cteni pres can_next()/can_at() je proti nemu
- * nejhure o preskoceny ramec ve vypisu - zasobnik se mezitim pretocil.
- * Transportni vrstve to nevadi, ta bezi ve stejnem vlakne jako pumpa.
+ * byt jedno vlakno. Ctenaru muze byt vic a smi byt na jinem jadru -
+ * kazdy slot je seqlock (cislo ramce se vystavuje az po naplneni a
+ * ctenar ho overi pred kopii i po ni), takze ctenar bud dostane cely
+ * jeden ramec, nebo nedostane nic. Co se tim NESLIBUJE: ze se ke
+ * ctenari dostane kazdy ramec - kdyz zasobnik predbehne pomaleho
+ * ctenare, preskoci se na nejstarsi drzeny a ztrata se spocita do
+ * ring_lost. Transportni vrstve to nevadi, ta bezi ve stejnem vlakne
+ * jako pumpa.
  *
  * Tenhle soubor je jedina cast src/can/, ktera zna ESP-IDF. Logika
  * ISO-TP v isotp.h ne - ta se preklada i na hostiteli.
@@ -117,7 +122,8 @@ bool can_running(void);
 can_mode_t can_mode(void);
 /* Prepnuti rezimu za behu. Radic se musi zastavit a znovu rozjet, takze
  * se tim zahodi, co prave lezi ve fronte. Na zastavenem CAN vrati false
- * - rezim se voli uz v can_start(). */
+ * - rezim se voli uz v can_start(). Kdyz se novy rezim nerozjede, vraci
+ * se puvodni nastaveni a do logu jde proc; CAN tedy nezustane mrtvy. */
 bool can_set_mode(can_mode_t m);
 
 /* Odeslani jednoho ramce. V listen-only vrati false a zvysi tx_fail -
@@ -151,6 +157,9 @@ bool can_at(uint32_t seq, can_frame_t *out);
 uint32_t can_seq(void);
 unsigned can_depth(void);
 
+/* Citace od posledniho can_stats_reset(). Resetuji se i ty, ktere
+ * pochazi z radice a vynulovat nejdou - drzi se k nim zaklad, ktery se
+ * odecita, takze po resetu nikdy nenaskoci stara epocha. */
 const can_stats_t *can_stats(void);
 void can_stats_reset(void);
 

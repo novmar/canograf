@@ -14,16 +14,31 @@
 
 static const char *TAG = "can";
 
-/* Kolik ramcu nejvyse prevezmeme z ovladace v jednom can_poll(). Pri
- * 500 kbit/s a plne sbernici chodi radove 2000 ramcu za sekundu; kdyby
- * se vybiralo do prazdna, hlavni smycka by prestala kreslit. Co se
- * nevybere ted, vybere se za 5 ms znovu. */
-#define CAN_POLL_BUDGET 32
+/* Kolik ramcu nejvyse prevezmeme z ovladace v jednom can_poll().
+ *
+ * Rovna se delce prijmove fronty ovladace zamerne: jedno zavolani tak
+ * dokaze frontu vzdy vyprazdnit celou a pretect muze jen tehdy, kdyz je
+ * sbernice rychlejsi nez cela smycka. Pri 500 kbit/s a plne sbernici jde
+ * o radove 2000 ramcu za sekundu, zatimco smycka s delay(20) stiha 50
+ * kol - na odposlech VSEHO to nestaci a nestacilo by ani s vetsim
+ * rozpoctem, protoze limit je fronta ovladace, ne tohle cislo. Ztrata
+ * neni tise: ukaze se v can_stats()->rx_lost. Kdo potrebuje presny
+ * zaznam, ma nastavit filtr (pro diagnostiku staci 0x700/0x700, tedy
+ * jen odpovedi jednotek) nebo cist castej. */
+#define CAN_RX_QUEUE_LEN 64
+#define CAN_POLL_BUDGET  CAN_RX_QUEUE_LEN
 
 static can_cfg_t   s_cfg;
 static can_stats_t s_stats;
 static bool        s_running;
 static bool        s_recovering;
+
+/* Citace radice jsou kumulativni od instalace ovladace a vynulovat se
+ * nedaji. Abychom pres can_stats_reset() nemichali dve epochy, drzime si
+ * zaklad a odecitame ho. */
+static uint32_t s_base_rx_lost;
+static uint32_t s_base_bus_err;
+static uint32_t s_base_arb_lost;
 
 /* Kruhovy zasobnik poslednich ramcu. seq zacina na 1, nula znamena
  * "prazdne misto" - diky tomu nemusi mit zasobnik zvlast priznak
@@ -41,10 +56,12 @@ static void ring_push(uint32_t id, const uint8_t *data, uint8_t dlc, bool tx)
     uint32_t seq = s_head;
     can_frame_t *slot = &s_ring[seq % CAN_RING_DEPTH];
 
-    /* Nejdriv misto zneplatnit, pak naplnit a az nakonec vystavit cislo.
-     * Ctenar si po kopii cislo overi znovu, takze z pretoceneho mista
-     * nikdy neodnese slepenec ze dvou ramcu. */
-    slot->seq = 0u;
+    /* Seqlock na jeden slot: nejdriv misto zneplatnit, pak naplnit a az
+     * nakonec vystavit cislo zapisem s uvolnenim. Ctenar cte cislo pres
+     * acquire pred kopii i po ni, takze pretoceni pozna a slepenec ze
+     * dvou ramcu neodnese. */
+    __atomic_store_n(&slot->seq, 0u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     slot->ts_ms = can_now_ms();
     slot->id = id;
     slot->dlc = (dlc > 8u) ? 8u : dlc;
@@ -53,8 +70,8 @@ static void ring_push(uint32_t id, const uint8_t *data, uint8_t dlc, bool tx)
         memcpy(slot->data, data, slot->dlc);
     }
     slot->tx = tx;
-    slot->seq = seq;
-    s_head = seq + 1u;
+    __atomic_store_n(&slot->seq, seq, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_head, seq + 1u, __ATOMIC_RELEASE);
 }
 
 void can_cfg_default(can_cfg_t *c)
@@ -141,7 +158,7 @@ bool can_start(const can_cfg_t *c)
                                          : TWAI_MODE_LISTEN_ONLY);
     /* Vychozi fronty maji po peti ramcich. Pri 500 kbit/s je to par
      * milisekund provozu a hlavni smycka kresli - pretekalo by to. */
-    g.rx_queue_len = 64;
+    g.rx_queue_len = CAN_RX_QUEUE_LEN;
     g.tx_queue_len = 16;
     filter_for(c, &f);
 
@@ -160,6 +177,10 @@ bool can_start(const can_cfg_t *c)
     s_cfg = *c;
     s_running = true;
     s_recovering = false;
+    /* Novy ovladac = citace radice zase od nuly, takze i nas zaklad. */
+    s_base_rx_lost = 0u;
+    s_base_bus_err = 0u;
+    s_base_arb_lost = 0u;
     ESP_LOGI(TAG, "TX=%d RX=%d %u bit/s %s", c->tx_pin, c->rx_pin,
              (unsigned)c->bitrate,
              (c->mode == CAN_MODE_NORMAL) ? "normal" : "listen-only");
@@ -183,6 +204,7 @@ can_mode_t can_mode(void) { return s_cfg.mode; }
 
 bool can_set_mode(can_mode_t m)
 {
+    can_cfg_t prev = s_cfg;
     can_cfg_t next = s_cfg;
 
     if (!s_running) {
@@ -197,7 +219,17 @@ bool can_set_mode(can_mode_t m)
      * stejne zacina jina etapa prace. */
     next.mode = m;
     can_stop();
-    return can_start(&next);
+    if (can_start(&next)) {
+        return true;
+    }
+    /* Clovek prepina rezim typicky az v aute, se zapojenym konektorem.
+     * Nechat mu misto toho mrtvy CAN bez cesty zpet je to nejhorsi, co
+     * jde udelat - zkus se vratit tam, kde to fungovalo. */
+    ESP_LOGE(TAG, "prepnuti rezimu selhalo, vracim puvodni");
+    if (!can_start(&prev)) {
+        ESP_LOGE(TAG, "ani navrat se nepovedl, CAN je zastaveny");
+    }
+    return false;
 }
 
 bool can_send(uint32_t id, const uint8_t *data, uint8_t dlc)
@@ -250,11 +282,15 @@ static void pump_status(void)
     if (twai_get_status_info(&st) != ESP_OK) {
         return;
     }
-    /* Citace radice jsou kumulativni od instalace ovladace, takze se
-     * prebiraji, ne pricitaji. */
-    s_stats.rx_lost = st.rx_missed_count + st.rx_overrun_count;
-    s_stats.bus_err = st.bus_error_count;
-    s_stats.arb_lost = st.arb_lost_count;
+    /* Citace radice jsou kumulativni od instalace ovladace a nedaji se
+     * vynulovat, takze se prebiraji minus zaklad z posledniho
+     * can_stats_reset(). Bez toho by clovek, ktery si v UI vynuluje
+     * citace, aby zmeril efekt zasahu do kabelaze, cetl michanici dvou
+     * epoch. */
+    s_stats.rx_lost = (st.rx_missed_count + st.rx_overrun_count)
+                      - s_base_rx_lost;
+    s_stats.bus_err = st.bus_error_count - s_base_bus_err;
+    s_stats.arb_lost = st.arb_lost_count - s_base_arb_lost;
 
     if (st.state == TWAI_STATE_BUS_OFF && !s_recovering) {
         /* Prerusene vedeni nebo spatna rychlost - radic se odpoji sam.
@@ -301,26 +337,26 @@ unsigned can_poll(void)
 bool can_at(uint32_t seq, can_frame_t *out)
 {
     const can_frame_t *slot;
-    const volatile uint32_t *stamp;
 
-    if (seq == 0u || seq >= s_head || out == NULL) {
+    if (seq == 0u || seq >= can_seq() || out == NULL) {
         return false;
     }
     slot = &s_ring[seq % CAN_RING_DEPTH];
-    /* Cislo se cte pres volatile, aby ho prekladac nemohl schovat do
-     * registru - jinak by kontrola po kopii nic neoverila. */
-    stamp = &slot->seq;
-    if (*stamp != seq) {
+    /* Druha polovina seqlocku ze ring_push(): cislo se cte s prevzetim
+     * pred kopii i po ni. Prvni cteni rekne, ze v miste lezi prave nas
+     * ramec, druhe, ze se pod rukama nezacal prepisovat. Pri neshode
+     * radsi nic nez slepenec ze dvou ramcu. */
+    if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != seq) {
         return false;
     }
     *out = *slot;
-    /* Mohlo se to pod rukama pretocit - tim by kopie byla slepenec. */
-    return *stamp == seq;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == seq;
 }
 
 bool can_next(uint32_t *cursor, can_frame_t *out)
 {
-    uint32_t head = s_head;
+    uint32_t head = can_seq();
     uint32_t oldest = (head > (uint32_t)CAN_RING_DEPTH)
                         ? head - (uint32_t)CAN_RING_DEPTH : 1u;
 
@@ -347,11 +383,11 @@ bool can_next(uint32_t *cursor, can_frame_t *out)
     return true;
 }
 
-uint32_t can_seq(void) { return s_head; }
+uint32_t can_seq(void) { return __atomic_load_n(&s_head, __ATOMIC_ACQUIRE); }
 
 unsigned can_depth(void)
 {
-    uint32_t used = s_head - 1u;
+    uint32_t used = can_seq() - 1u;
     return (used > (uint32_t)CAN_RING_DEPTH) ? (unsigned)CAN_RING_DEPTH
                                              : (unsigned)used;
 }
@@ -360,5 +396,15 @@ const can_stats_t *can_stats(void) { return &s_stats; }
 
 void can_stats_reset(void)
 {
+    twai_status_info_t st;
+
     memset(&s_stats, 0, sizeof(s_stats));
+    /* Citace radice vynulovat nejdou, takze se posune zaklad, od ktereho
+     * se odecitaji. Jinak by hned pri dalsim can_poll() naskocily zpet
+     * na kumulativni hodnoty od startu. */
+    if (s_running && twai_get_status_info(&st) == ESP_OK) {
+        s_base_rx_lost = st.rx_missed_count + st.rx_overrun_count;
+        s_base_bus_err = st.bus_error_count;
+        s_base_arb_lost = st.arb_lost_count;
+    }
 }
