@@ -32,6 +32,8 @@ sim/                host build that renders screens to PNG
 boards/             PlatformIO board definition
 docs/vehicles/      per-vehicle data identifier maps
 docs/hardware/      per-board pinouts and measurements
+config/             layered build configuration, see config/README.md
+scripts/            PlatformIO pre-build scripts
 ```
 
 ## Build
@@ -52,6 +54,27 @@ docs/hardware/      per-board pinouts and measurements
 
 Reference for all of the above:
 `esp-arduino-libs/ESP32_Display_Panel`, `examples/platformio/lvgl_v8_port`.
+
+**Configuration is not done by editing `platformio.ini`.** That file holds the
+pinned toolchain and nothing worth changing; build options live in layered
+`.env` files instead:
+
+```
+config/default.env             defaults, and the list of every valid key
+config/board/<board>.env       one board
+config/vehicle/<vehicle>.env   one vehicle platform
+local.env                      yours only, gitignored, highest priority
+```
+
+`scripts/build_config.py` merges them into `-D` macros before every build and
+prints a table of the result with the originating file for each value. A key
+that is not in `config/default.env` is a typo and stops the build - silently
+ignoring one would hand you firmware whose write protection is not in the state
+you just read. Details and the full key list: [config/README.md](config/README.md).
+
+This is also where write protection is switched: `CANOGRAF_ALLOW_WRITE=off`
+(the default) keeps write code out of the image entirely, and the script backs
+that up by excluding `src/write/` from the build.
 
 ## Conventions
 

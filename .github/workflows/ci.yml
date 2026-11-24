@@ -72,3 +72,34 @@ jobs:
           name: screenshots
           path: shots/*.png
           if-no-files-found: error
+
+  # Po pushi na main prekresli nahledy obrazovek a commitne je zpet, aby
+  # README ukazovalo aktualni stav. Artefakty z CI se do README vlozit nedaji,
+  # musi byt v repozitari.
+  publish-screens:
+    needs: screenshots
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - name: Render screens
+        run: |
+          cmake -S sim -B sim/build
+          cmake --build sim/build -j"$(nproc)"
+          mkdir -p docs/img/screens
+          ./sim/build/lv_shot docs/img/screens
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- docs/img/screens; then
+            echo "nahledy se nezmenily"
+            exit 0
+          fi
+          git add docs/img/screens
+          git commit -m "ci: prekresleni nahledu obrazovek [skip ci]"
+          git push

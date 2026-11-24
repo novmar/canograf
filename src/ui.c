@@ -368,10 +368,101 @@ static void show_info(const char *title, const char *body, uint32_t accent)
               accent, modal_close_cb, NULL);
 }
 
+/* ---------------------------------------------------------------------
+ * Potvrzovaci dialog pro akce, ktere neco opravdu provedou.
+ *
+ * Proti show_info() ma tri veci navic:
+ *   - dve STEJNE VELIKA tlacitka. Kdyby bylo zruseni mensi, cetlo by se jako
+ *     druhoradá volba, a u akce, ktera umi poskodit vuz, to je spatne.
+ *   - potvrzeni se musi DRZET 3 vteriny a odpocet je videt primo na tlacitku.
+ *     Omylem se takove tlacitko stisknout neda.
+ *   - gesto od leveho okraje dialog zavre, stejne jako jinde v UI
+ * ------------------------------------------------------------------- */
+#define HOLD_MS 3000
+
+static lv_obj_t *hold_btn_lbl = NULL;
+static lv_timer_t *hold_timer = NULL;
+static uint32_t hold_start = 0;
+static lv_event_cb_t hold_action = NULL;
+
+static void hold_reset(void)
+{
+    if (hold_timer) { lv_timer_del(hold_timer); hold_timer = NULL; }
+    if (hold_btn_lbl) {
+        char b[32];
+        snprintf(b, sizeof(b), T(STR_HOLD_FMT), HOLD_MS / 1000);
+        lv_label_set_text(hold_btn_lbl, b);
+    }
+}
+
+static void hold_tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    uint32_t el = lv_tick_get() - hold_start;
+    if (el >= HOLD_MS) {
+        lv_event_cb_t a = hold_action;
+        hold_reset();
+        if (a) a(NULL);
+        else modal_close_cb(NULL);
+        return;
+    }
+    if (hold_btn_lbl) {
+        char b[32];
+        snprintf(b, sizeof(b), T(STR_HOLD_FMT),
+                 (int)((HOLD_MS - el + 999) / 1000));
+        lv_label_set_text(hold_btn_lbl, b);
+    }
+}
+
+static void hold_press_cb(lv_event_t *e)
+{
+    lv_event_code_t c = lv_event_get_code(e);
+    if (c == LV_EVENT_PRESSED) {
+        hold_start = lv_tick_get();
+        if (!hold_timer) hold_timer = lv_timer_create(hold_tick_cb, 100, NULL);
+    } else {
+        hold_reset();       /* pusteni driv = zacina se znovu */
+    }
+}
+
+static void modal_gesture_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_get_act());
+    if (d == LV_DIR_RIGHT) { hold_reset(); modal_close_cb(NULL); }
+}
+
+static void show_confirm(const char *title, const char *body,
+                         uint32_t accent, lv_event_cb_t on_ok)
+{
+    lv_obj_t *m = modal_open(title, accent);
+    lv_obj_add_flag(m, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(m, modal_gesture_cb, LV_EVENT_GESTURE, NULL);
+
+    lv_obj_t *b = mk_lbl(m, body, UI_FONT_20, C_LABEL, 30, 100);
+    lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(b, 740);
+
+    hold_action = on_ok;
+    char cap[32];
+    snprintf(cap, sizeof(cap), T(STR_HOLD_FMT), HOLD_MS / 1000);
+    lv_obj_t *ok = mk_button(m, 30, 330, 360, 120, cap, UI_FONT_32,
+                             accent, NULL, NULL);
+    hold_btn_lbl = lv_obj_get_child(ok, 0);
+    lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ok, hold_press_cb, LV_EVENT_PRESS_LOST, NULL);
+
+    mk_button(m, 410, 330, 360, 120, T(STR_CANCEL), UI_FONT_32,
+              C_LABEL, modal_close_cb, NULL);
+}
+
 static void regen_cb(lv_event_t *e)
 {
     (void)e;
-    show_info(T(STR_REGEN_TITLE), T(STR_REGEN_BODY), C_DEFICIT);
+    /* Zatim jen informuje - vozidlo neni pripojene. Az bude, sem prijde
+     * skutecna akce; potvrzeni drzenim uz je na svem miste. */
+    show_confirm(T(STR_REGEN_TITLE), T(STR_REGEN_BODY), C_DEFICIT, NULL);
 }
 
 /* ---------------- WiFi ---------------- */
@@ -534,6 +625,19 @@ static void blank_label(char *buf, size_t n, uint32_t s)
     if (s == 0)      snprintf(buf, n, "%s", T(STR_BLANK_NEVER));
     else if (s < 60) snprintf(buf, n, "%u s", (unsigned)s);
     else             snprintf(buf, n, "%u min", (unsigned)(s / 60));
+}
+
+/* Zhasne podsviceni okamzite, bez cekani na timeout. Hlavni duvod existence:
+ * merit na ploskach BL/GND se zhasnutym podsvicenim.
+ * Probuzeni resi kontrola necinnosti v ui_tick(). Aby se displej nerozsvitil
+ * hned zpatky od doteku, ktery tohle tlacitko prave zmackl, dame kratkou
+ * ochrannou lhutu - behem ni se probuzeni ignoruje. */
+static uint32_t blank_guard_ms = 0;
+static void display_off_cb(lv_event_t *e)
+{
+    (void)e;
+    backlight(false);
+    blank_guard_ms = lv_tick_get();
 }
 
 static void blank_cb(lv_event_t *e)
@@ -777,7 +881,14 @@ static void build_nastav(lv_obj_t *scr)
     mk_button(p, 360, 120, 320, BH + 20, T(STR_WIFI_PICK), UI_FONT_24,
               C_DEMAND, wifi_scan_cb, NULL);
 
-    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, 215);
+    /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne jako
+     * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
+     * Hlavni duvod existence: merit na ploskach BL/GND se zhasnutym
+     * podsvicenim, aniz by se cekalo na timeout. */
+    mk_button(p, 20, 230, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
+              C_ACTUAL, display_off_cb, NULL);
+
+    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, 320);
 }
 
 /* Sloupec se musi vejit do toho, co po sobe nechala navigace, takze se
@@ -996,7 +1107,10 @@ void ui_tick(void)
     uint32_t idle = lv_disp_get_inactive_time(NULL);
     /* kdyz bezi pokus s PWM, nesmi mu do podsviceni mluvit zhasinani */
     if (!host_pwm_running()) {
-        if (idle < 300 && !backlight_on) backlight(true);
+        /* ochranna lhuta po rucnim zhasnuti - jinak by displej probudil
+         * tentyz dotek, kterym se zhasinalo */
+        if (idle < 300 && !backlight_on &&
+            (lv_tick_get() - blank_guard_ms) > 1500) backlight(true);
         if (cfg.blank_s && backlight_on && idle > cfg.blank_s * 1000UL) backlight(false);
     }
 }

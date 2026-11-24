@@ -65,6 +65,38 @@ python3 -m venv .pio-venv
 Versions in `platformio.ini` are pinned on purpose - see
 [CLAUDE.md](CLAUDE.md) for why.
 
+## Configuration
+
+Write protection, the vehicle profile, the board profile and the optional
+modules are switched through layered `.env` files, **not** by editing
+`platformio.ini`. Layers, from lowest priority to highest:
+
+```
+config/default.env             defaults, and the list of every valid key
+config/board/<board>.env       one board
+config/vehicle/<vehicle>.env   one vehicle platform
+local.env                      yours only, never in the repository
+```
+
+Every build prints a table of the resulting configuration and the file each
+value came from, so it is always clear what was built.
+
+For settings that apply only to your bench:
+
+```sh
+cp local.env.example local.env
+```
+
+```sh
+# local.env - overrides everything else, gitignored
+CANOGRAF_DEFAULT_LANG="cs"
+CANOGRAF_ALLOW_WRITE=on        # write code in the image, still behind the gate
+```
+
+A key that is not in `config/default.env` stops the build rather than being
+ignored. Full list of keys and how to add a board or a vehicle:
+[`config/README.md`](config/README.md).
+
 ## Writing to the vehicle
 
 Reading is safe and never restricted - live values, fault memory and stored
@@ -131,11 +163,20 @@ a translation-only pull request is welcome. The fonts already carry Czech and
 German diacritics; other scripts need the fonts regenerated, which is one
 command. See [`lang/README.md`](lang/README.md).
 
-## Screen previews
+## Screens
 
-CI builds the UI for the host and renders every screen to PNG, so changes are
-visible in a pull request without owning the board. See [`sim/`](sim/).
-`lv_shot` takes a language code, so a translation can be checked the same way.
+| | |
+|---|---|
+| ![Main](docs/img/screens/00-MAIN.png) | ![Engine](docs/img/screens/01-ENGINE.png) |
+| ![Boost](docs/img/screens/02-BOOST.png) | ![DPF](docs/img/screens/04-DPF.png) |
+
+These are not mock-ups. They are rendered from the real UI code by a host
+build, so they cannot drift from what the device shows. CI regenerates them on
+every push to `main` and commits the result, which also means a pull request
+that changes the interface shows the difference as an image diff.
+
+Values are simulated until the CAN layer lands. See [`sim/`](sim/) to run it
+yourself - no board needed.
 
 ## Documentation
 
@@ -148,6 +189,7 @@ visible in a pull request without owning the board. See [`sim/`](sim/).
 | [`docs/ui.md`](docs/ui.md) | Why the interface looks the way it does |
 | [`docs/safety.md`](docs/safety.md) | The gate between reading and writing, and why it is built that way |
 | [`lang/README.md`](lang/README.md) | How to add a language |
+| [`config/README.md`](config/README.md) | Build configuration layers, every key, adding a board or a vehicle |
 
 ## Licence
 

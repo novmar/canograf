@@ -75,6 +75,7 @@ enum {
     /* WiFi */
     STR_WIFI_NOT_CONN,
     STR_WIFI_PICK,
+    STR_SET_DISPLAY_OFF,
     STR_WIFI_TITLE,
     STR_WIFI_SEARCHING,
     STR_WIFI_PASS_FOR,      /* jedno %s = nazev site */
@@ -84,6 +85,8 @@ enum {
     STR_BACK,
     STR_CLOSE,
     STR_OK,
+    STR_CANCEL,
+    STR_HOLD_FMT,       /* "HOLD %d s" - potvrzeni drzenim */
 
     /* pokus s PWM podsvicenim */
     STR_BRIGHT_TITLE,

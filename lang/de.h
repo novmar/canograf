@@ -68,6 +68,7 @@ static const char *const LANG_DE[] = {
     /* WLAN */
     "nicht verbunden",
     "NETZ WÄHLEN",
+    "DISPLAY AUS",
     "WLAN-Netze",
     "suche...",
     "PASSWORT FÜR  %s",
@@ -77,6 +78,8 @@ static const char *const LANG_DE[] = {
     "ZURÜCK",
     "FERTIG",
     "VERSTANDEN",
+    "ABBRECHEN",
+    "%d s HALTEN",
 
     /* Versuch mit PWM-Hintergrundbeleuchtung */
     "Helligkeit - Versuch mit Software-PWM",

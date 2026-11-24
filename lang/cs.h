@@ -67,6 +67,7 @@ static const char *const LANG_CS[] = {
     /* WiFi */
     "nepřipojeno",
     "VYBRAT SÍŤ",
+    "ZHASNOUT DISPLEJ",
     "WiFi sítě",
     "hledám...",
     "HESLO PRO  %s",
@@ -76,6 +77,8 @@ static const char *const LANG_CS[] = {
     "ZPĚT",
     "ZAVŘÍT",
     "ROZUMÍM",
+    "ZRUŠIT",
+    "DRŽ %d s",
 
     /* pokus s PWM podsvicenim */
     "Jas - pokus se softwarovým PWM",

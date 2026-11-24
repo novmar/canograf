@@ -15,7 +15,12 @@
  *                 CANOGRAF_WRITE_UNLOCKED=1 -> brana prelozena otevrena,
  *                 pro toho, kdo vi co dela a nechce byt otravovan.
  *   2. nastaveni  prepinac "Enable write functions", vychozi vypnuto
- *   3. sekvence   ctyri tvary, pet kroku, zopakovat po stroji
+ *   3. sekvence   ctyri ikony, ctyri kroky, zopakovat po stroji
+ *
+ * Captchu (stupen 3) jde vypnout tremi zpusoby, od nejlepsiho:
+ * CANOGRAF_ALLOW_WRITE=0 (zapis v obrazu neni), CANOGRAF_WRITE_UNLOCKED=1
+ * (zapis je, brana ne) a prepinac v debug menu za behu - viz
+ * safety_bypass_set() nize.
  *
  * Odemceni NEMA casovy limit a NIKAM se neuklada. Plati do restartu, pak
  * je zase zamceno. Jedna sekvence na jedno zapnuti pristroje.
@@ -153,14 +158,14 @@ void safety_channel_drop(safety_channel_t ch);
  *
  * Logika je tady, protoze je to pravidlo, ne obrazek: generovani,
  * porovnavani, pocitani pokusu a cooldown se daji otestovat na hostiteli
- * bez LVGL. ui.c jen kresli ctyri tvary a hlasi doteky.
+ * bez LVGL. ui.c jen kresli ctyri ikony a hlasi doteky.
  *
- * Ctyri znaky se lisi TVAREM (plny/duty kruh, plny/duty ctverec) a
- * CISLICI, barva je jen navic. Zadna ctverice barev neprezije vsechny tri
- * dichromazie - zmereno, viz docs/safety.md - takze barva nesmi byt
- * jediny nosic.
+ * Ctyri znaky jsou IKONY s vyrazne odlisnou siluetou (dum, blesk, ozubene
+ * kolo, klic) plus cislice. Barva nenese zadnou informaci - rozsviceny
+ * znak se pozna inverzi, ne odstinem - takze dialog funguje pro kazdou
+ * poruchu barvocitu i na slunci. Viz docs/safety.md.
  * ------------------------------------------------------------------ */
-#define SAFETY_SEQ_LEN        5    /* kroku v sekvenci */
+#define SAFETY_SEQ_LEN        4    /* kroku v sekvenci */
 #define SAFETY_SEQ_TOKENS     4    /* kolik ruznych znaku */
 #define SAFETY_SEQ_ATTEMPTS   3    /* pokusu, pak cooldown */
 #define SAFETY_SEQ_ON_MS      700  /* jak dlouho sviti jeden znak */
@@ -189,11 +194,10 @@ typedef enum {
 } safety_seq_result_t;
 
 /* Nova nahodna sekvence. Pri opakovanem pokusu se generuje VZDY znovu:
- * se stejnou sekvenci a okamzitou zpetnou vazbou by sla vylustit po
- * jednom kroku (nejvys 20 doteku misto 1024 moznosti). Nahodnost bere
- * z host->random32(); dva bity na znak, zadne modulo, zadna zaujatost.
- * Opakovani stejneho znaku se nevylucuje - zakaz by zmensil prostor z
- * 1024 na 324. */
+ * se stejnou sekvenci a okamzitou zpetnou vazbou by sla lustit po jednom
+ * kroku misto 256 moznosti. Nahodnost bere z host->random32(); dva bity
+ * na znak, zadne modulo, zadna zaujatost. Opakovani stejneho znaku se
+ * nevylucuje - zakaz by zmensil prostor z 256 na 108. */
 void safety_seq_begin(safety_seq_t *s);
 
 /* Jeden dotek uzivatele. */
@@ -204,6 +208,41 @@ int safety_seq_token(const safety_seq_t *s, int i);
 
 /* Kolik sekund jeste trva cooldown po vycerpani pokusu; 0 = lze zkusit. */
 uint32_t safety_seq_cooldown_s(void);
+
+/* ------------------------------------------------------------------
+ * Debug menu - treti zpusob, jak captchu vypnout
+ *
+ * Prepinac v debug panelu (dlazdice ve vysuvne mrizce) preskoci sekvenci:
+ * safety_request_unlock() odemkne rovnou. Nepersistuje - po restartu je
+ * zase vypnuty, a nesmi se dostat ani do profilu v NVS, jinak by to byla
+ * trvale vypnuta ochrana, kterou na pristroji nikdo nepozna. Duvody a
+ * text, ktery u prepinace stoji na obrazovce, jsou v docs/safety.md.
+ *
+ * Co NEobchazi: SAFETY_CLASS_FORBIDDEN, predpoklady (motor, rychlost,
+ * napeti, zaloha bloku) ani potvrzeni u jednotlivych zapisu. Vypina jen
+ * stupen 3. Dokud je zapnuty, UI o tom drzi odznak v horni liste a kazde
+ * takhle povolene odemceni jde do auditu.
+ *
+ * V buildu bez zapisu (CANOGRAF_ALLOW_WRITE=0) je prepinac videt, ale
+ * neaktivni - neni co odemykat.
+ * ------------------------------------------------------------------ */
+bool safety_bypass_get(void);
+void safety_bypass_set(bool on);
+
+/* "TRY CAPTCHA" - zkouska sekvence nanecisto. Ukaze stejny dialog,
+ * ohlasi, jestli ji clovek zvladl, a NIC neodemkne ani neposle. Slouzi
+ * k vyzkouseni mechanismu bez vozidla a bez chuti skutecne zapisovat.
+ *
+ * Zamerne samostatna funkce, ne parametr safety_request_unlock():
+ * odemykat smi jen jedna cesta v celem programu. Priznak "tohle je jen
+ * zkouska" prochazejici odemykaci funkci by stacilo prohodit a brana by
+ * se otevrela potichu; takhle je safety_unlock_grant() volana z jednoho
+ * mista a da se to overit grepem. Sekvencni logiku obe cesty sdileji.
+ *
+ * Zkouska bezi v kazdem buildu, i tam, kde se zapis vubec neprelozil, a
+ * jeji neuspechy se nezapocitavaji do cooldownu ostreho odemykani -
+ * nacvik nesmi zablokovat praci. */
+void safety_demo_sequence(void);
 
 /* ------------------------------------------------------------------
  * Vzdalene kanaly

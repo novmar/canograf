@@ -69,6 +69,7 @@ static const char *const LANG_EN[] = {
     /* WiFi */
     "not connected",
     "PICK NETWORK",
+    "DISPLAY OFF",
     "WiFi networks",
     "scanning...",
     "PASSWORD FOR  %s",
@@ -78,6 +79,8 @@ static const char *const LANG_EN[] = {
     "BACK",
     "CLOSE",
     "GOT IT",
+    "CANCEL",
+    "HOLD %d s",
 
     /* backlight PWM experiment */
     "Brightness - software PWM experiment",

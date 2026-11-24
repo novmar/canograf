@@ -47,7 +47,7 @@ Everything below exists for one of those four.
 |---|---|---|---|
 | 1 - the build | `platformio.ini` / `config`, `#if` | writing not compiled in | rebuild with a flag, deliberately |
 | 2 - the switch | Settings, RAM only | off | one tap, which starts gate 3 |
-| 3 - the sequence | Full-screen dialog | - | read the warning, repeat five steps |
+| 3 - the sequence | Full-screen dialog | - | read the warning, repeat four steps |
 
 Three gates in series, and one rule that holds them together:
 
@@ -126,7 +126,7 @@ PLATFORMIO_BUILD_FLAGS="-DCANOGRAF_ALLOW_WRITE=1 -DCANOGRAF_WRITE_UNLOCKED=1" \
 ```
 
 Somebody who writes to control units all day should not have to repeat a
-five-step sequence forty times an afternoon. A protection its own author routes
+four-step sequence forty times an afternoon. A protection its own author routes
 around is already dead, so the way around it is official, documented and one
 command long.
 
@@ -207,8 +207,8 @@ This was the open question, and it is the only thing about gate 2 left to decide
 - **The per-write risk is already covered, and covered better.** Every individual
   write keeps its own plain confirmation showing the module, the identifier and
   the bytes about to be sent. That dialog has *content*; the sequence does not.
-  Against a wrong value, a confirmation that shows the value is worth more than a
-  colour game, and the colour game would crowd it out.
+  Against a wrong value, a confirmation that shows the value is worth more than
+  a pattern game, and the pattern game would crowd it out.
 - **A restart is the natural scope.** A visit to a vehicle is one power-up. With
   ignition sensing on the roadmap the device will sleep with the vehicle, so
   "until restart" becomes "until you get out of the van".
@@ -226,7 +226,7 @@ second attempt.
 ## Gate 3 - the sequence
 
 Two screens. First the warning, which is not a one-liner. Then the sequence: the
-device plays five steps in a strip and the user repeats them on four large
+device plays four steps in a strip and the user repeats them on four large
 tokens. Simon says, with the showing and the answering in separate places so
 there is never a doubt about whose turn it is.
 
@@ -297,13 +297,13 @@ for formatted text is sized in **UTF-8 bytes**, not characters.
 | ENABLE WRITING                                     [ BACK ]|
 |                                                            |
 | A wrong value can disable       +---------+ +---------+    |
-| the vehicle. Repeat the         |   (1)   | |  [ 2 ]  |    |  180 x 180
-| sequence to continue.           |  solid  | |  solid  |    |  = 21 mm
+| the vehicle. Repeat the         |  house  | |  bolt   |    |  180 x 180
+| sequence to continue.           |    1    | |    2    |    |  = 21 mm
 |                                 +---------+ +---------+    |
-| [#][#][ ][ ][ ]                                            |
+| [#][#][ ][ ]                                               |
 |                                 +---------+ +---------+    |
-| WATCH                           |   (3)   | |  [ 4 ]  |    |
-| +----------------------------+  | outline | | outline |    |
+| WATCH                           |  gear   | |   key   |    |
+| +----------------------------+  |    3    | |    4    |    |
 | |       SHOW IT AGAIN        |  +---------+ +---------+    |
 | +----------------------------+                             |
 +============================================================+
@@ -312,7 +312,7 @@ for formatted text is sized in **UTF-8 bytes**, not characters.
 | Element | Position | Size |
 |---|---|---|
 | token grid, 2 x 2 | x 400 / 600, y 90 / 290 | 180 x 180, 20 px gaps |
-| sequence strip, 5 slots | x 30, y 264 | 60 x 60, 10 px gaps |
+| sequence strip, 4 slots | x 30, y 264 | 76 x 76, 12 px gaps |
 | short warning line | x 30, y 90, width 340 | font 20, wrapped |
 | state caption | x 30, y 340 | font 20 |
 | SHOW IT AGAIN | x 30, y 366 | 340 x 100 |
@@ -326,38 +326,42 @@ column, and the worst outcome of hitting it by accident is that the sequence
 plays again - which is the thing the user wanted. A control whose failure mode is
 "you got what you asked for" does not need 14 mm.
 
-### Length: five steps, not four
+### Length: four steps
 
-Four tokens over four steps is 256 combinations, over five it is 1024. The
-combination count is not really the point - nobody brute-forces a dashboard - but
-the length is:
+Four icons over four steps is 256 orders. The count is not really the point -
+nobody brute-forces a dashboard - but the length is:
 
-- Four steps fit inside everyone's immediate span and can be repeated without
-  encoding them, which is exactly the "I clicked through it" failure we are
-  trying to prevent. Five forces a deliberate pass.
-- Five steps at 1 s each is a 5 s playback plus 3-4 s of input: about ten seconds
-  of attention, once per session. That is the right price for switching a vehicle
-  tool into writing mode.
-- On brute force anyway: three attempts then a 60 s cooldown is about 1.5
-  attempts a minute, so random tapping needs on the order of **eleven hours** on
-  average. A child in the passenger seat or a bag resting on the panel will not
-  get there.
+- Four steps is a sequence an adult holds without effort after one playback,
+  which is the aim: a deliberate pass, not a memory test. A fifth step buys
+  four times the combinations and nothing that matters here, because the thing
+  being defended against is a mis-tap, not a search.
+- Four steps at 1 s each is a 4 s playback plus about 3 s of input: under ten
+  seconds of attention, once per power-up.
+- On blind tapping: three attempts then a 60 s cooldown is about 1.5 attempts a
+  minute, so stumbling onto the right order takes **getting on for three hours**
+  on average. A child in the passenger seat or a bag resting on the panel will
+  not get there, and that is the whole bar this has to clear.
+
+This is **a captcha against a mistake, not a defence against a person**. Anyone
+holding the device can flash their own firmware; the sequence exists so that no
+single accidental touch - and no sequence of accidental touches - can start
+writing to a vehicle. The barrier is sized for that and no higher.
 
 ### Timing
 
 | Phase | Time | Why |
 |---|---|---|
 | lead-in after WATCH appears | 500 ms | the eye has to arrive before the first token lights |
-| token lit | 700 ms | long enough to read a shape and a digit, short enough not to drift |
+| token lit | 700 ms | long enough to read an icon and a digit, short enough not to drift |
 | gap between tokens | 300 ms | **not optional**, see below |
 | tap feedback | 150 ms full-background swap | the feedback rule from `docs/ui.md` |
 | longest pause between taps | 10 s | a half-entered sequence does not sit waiting |
 | dialog idle timeout | 60 s | it closes itself |
 
 The 300 ms dark gap is load-bearing. Repeated tokens are allowed, so when steps 3
-and 4 are both the filled circle, the gap is the only thing that says "two" and
-not "one, held". Forbidding repeats instead would shrink the space from 1024 to
-324 and make the sequence easier - the wrong trade.
+and 4 are both the gear, the gap is the only thing that says "two" and not
+"one, held". Forbidding repeats instead would shrink the space from 256 to 108
+and make the sequence easier - the wrong trade.
 
 Taps during playback are **ignored**, not counted as errors, and the tokens are
 drawn dimmed while the strip plays. Eagerness is not inattention.
@@ -375,8 +379,8 @@ The alternatives and why they lost:
   attend. A mistake should cost ten seconds, not a navigation task.
 - *Retry with the same sequence.* This one is actually unsafe. Immediate feedback
   on the first wrong tap plus a fixed sequence is Mastermind: you learn one
-  position per attempt, so the whole thing falls in at most 20 taps instead of
-  1024 possibilities. **Regenerating on every attempt is a correctness
+  position per attempt, so the whole thing falls in at most 16 taps instead of
+  256 orders. **Regenerating on every attempt is a correctness
   requirement, not a preference.**
 - *Unlimited attempts.* Turns an inattention barrier into a toy that eventually
   opens.
@@ -385,47 +389,53 @@ Replays do not count as attempts and are unlimited. The barrier is
 deliberateness, not memory; failing a legitimate repair because somebody has a
 poor working memory is a bad outcome with no safety gain.
 
-### The four tokens, and colour blindness
+### The four tokens are pictures, not colours
 
-Shape and digit carry the identity. Colour is redundancy.
+| # | Icon | FontAwesome 5 Solid | Silhouette |
+|---|---|---|---|
+| 1 | house | `F015` | wide, angular, pitched roof over a flat base |
+| 2 | lightning bolt | `F0E7` | narrow, diagonal, asymmetric, sparse |
+| 3 | gear | `F013` | round, toothed, dense |
+| 4 | key | `F084` | elongated, horizontal, round eye and a bitted end |
 
-| # | Shape | Colour | Hex | L* | contrast vs `ink` |
-|---|---|---|---|---|---|
-| 1 | filled circle | yellow | `#F0E442` | 89.1 | 14.4 |
-| 2 | filled square | sky blue | `#56B4E9` | 69.8 | 8.3 |
-| 3 | outline circle, 14 px ring | bluish green | `#009E73` | 57.7 | 5.6 |
-| 4 | outline square, 14 px border | orange | `#E69F00` | 70.6 | 8.5 |
+Each token also carries its digit, so the sequence can be rehearsed as "house,
+gear, gear, bolt" or as "1, 3, 3, 2" - whichever the user's head prefers.
 
-Each token also carries its digit, centred, in Montserrat 48.
+Pictures rather than colours, and the reason is not a preference. Four colours
+cannot be made to work for everyone: run any four hex values through dichromat
+simulations and at least one pair collapses - with the Okabe-Ito colour-blind
+safe set, yellow and orange land 10 units of L\* apart under deuteranopia, and
+green and orange are closer still under tritanopia. Shapes have no such
+failure mode. Four silhouettes that differ in aspect, curvature and corner
+count are told apart by everyone, including in bright sunlight where hue washes
+out long before contrast does.
 
-This is not a guess. The hues are the Okabe-Ito colour-blind safe set, and the
-pairs were checked by running the actual hex values through dichromat
-simulations:
+So **colour carries no information in this dialog at all**:
 
-```
-deuteranopia   1 yellow vs 4 orange   dL* 10.2   contrast 1.32
-protanopia     1 yellow vs 4 orange   dL* 12.9   contrast 1.43
-tritanopia     3 green  vs 4 orange   dL*  2.4   contrast 1.09
-```
+- All four tokens are drawn the same way - `bright` icon on `panel` ground.
+- A lit token **inverts** instead of changing hue: `ink` icon on a `bright`
+  ground. Inversion is the strongest signal a 16-bit panel has, it reads in
+  peripheral vision, and it is achromatic.
+- The only colour in the whole dialog is the vermillion error flash, which
+  therefore cannot be confused with anything.
 
-**No set of four colours survives all three dichromacies.** Yellow and orange
-collapse together for the red-green cases, green and orange for the blue case.
-Prettier hex values do not fix it. The conclusion is that colour cannot be a
-channel we rely on, which is why the shape system is systematic - filled/outline
-crossed with circle/square, four combinations with no accidental similarity - and
-why every token carries a digit.
+The icons come from FontAwesome 5 Solid, which the project already builds into
+its fonts - `tools/gen_fonts.sh` whitelists eight LVGL widget glyphs today, and
+these four are four more codepoints on that line. They are deliberately **not**
+`F00C` OK or `F00D` CLOSE: a tick or a cross inside a confirmation dialog would
+be read as "confirm" or "cancel" rather than as a token.
 
-Two consequences worth stating:
+The one new asset is a font containing **only these four glyphs at 120 px**, so
+a token fills its 180 px button instead of sitting at 48 px inside it. Four
+glyphs at bpp 4 is on the order of 30 kB of flash; a full 120 px Montserrat
+would be ten times that and is not needed.
 
-- **Shapes use LVGL style properties only** - radius, border width, background
-  opacity. No canvas, no images, no triangle needing a bitmap. The whole set is
-  four style variants on one object type.
-- **No token is red.** Vermillion `#C8432B` is reserved for the error flash, so
-  "something red happened" is never ambiguous. For the same reason the tokens
-  avoid `demand` blue and `actual` bone: in `docs/ui.md` that pair always means
-  setpoint and measurement and is never decorative. The unlock dialog shows no
-  vehicle data, so nothing could actually be misread - but the palette rule is a
-  rule, and borrowing those two for a game would be the first crack in it.
+One more thing this buys. The palette in [`docs/ui.md`](ui.md) reserves `demand`
+blue for the setpoint and `actual` bone for the measurement, and says that pair
+is never used decoratively. A four-colour game would have had to borrow from it
+or invent hues beside it; a four-icon game borrows nothing. The unlock dialog
+ends up using exactly three of the project's own colours - ground, surface and
+text - plus vermillion when something is wrong.
 
 ### Where the randomness comes from
 
@@ -445,6 +455,95 @@ since neither may include ESP-IDF headers. In `sim/` the hook is NULL, and **a
 NULL `random32` means the dialog refuses to open.** A fixed sequence for the
 screenshot build would be worse than no dialog: a working unlock with a known
 answer is precisely what must never ship by accident.
+
+---
+
+## The debug panel - the third way to switch it off
+
+The roadmap already has a **debug tile** in the pull-up grid, bottom row, second
+from the right. Two entries belong in it.
+
+### "Skip the write confirmation"
+
+A switch that turns the captcha off while the device runs: with it on,
+`safety_request_unlock()` grants immediately instead of showing the dialog. It
+is the run-time equivalent of `CANOGRAF_WRITE_UNLOCKED=1`, for the case where
+rebuilding is not practical - somebody else's device on a bench, a long session
+of repeated lock and unlock cycles, or automated testing.
+
+What it does **not** do: it never relaxes `SAFETY_CLASS_FORBIDDEN`, never skips
+the preconditions (engine, speed, voltage, saved backup), and never skips the
+ordinary per-write confirmation that shows the bytes. It switches off gate 3 and
+nothing else. While it is on, the top strip carries `STR_SAFETY_BYPASS_BADGE`,
+and every unlock it grants goes into the audit log marked as such.
+
+In a read-only build the switch is visible but inactive, with
+`STR_SAFETY_NO_WRITE_BUILD` beside it - there is nothing to unlock.
+
+**It is not remembered across a restart.** Three reasons, and the third is the
+one that matters:
+
+1. Consistency. Nothing that removes a gate survives a power cycle - not the
+   unlock, not this. One rule, no exceptions to remember.
+2. A persisted bypass is a device whose protection is off forever, and you
+   cannot tell by looking at it. The compile-time route at least leaves evidence:
+   a different artifact, a different build line, a permanent badge.
+3. **It must be excluded from the settings profiles.** The roadmap stores three
+   profiles in NVS and says a profile covers "units, blanking, language, debug
+   flags". If this flag rides along in a profile it becomes persistent through
+   the back door, and worse, exportable - one profile copied between devices
+   would carry a disabled safety gate with it. The profile code needs an
+   explicit exception, and it is written here so that it is not discovered the
+   hard way.
+
+Somebody who wants it permanently off should build it off. That is not a
+brush-off - it is a better outcome, and the text on screen says why.
+
+The description sits next to the switch, not behind a help button
+(`STR_DBG_BYPASS_INFO`):
+
+> Writing to a control unit normally asks you to repeat a four step pattern,
+> once per start. This switch skips it, and is forgotten when the device
+> restarts.
+>
+> Building with write support left out is the better protection: the write code
+> is then not in the firmware at all, while this switch only skips the question
+> in front of it. See docs/safety.md.
+
+### "Try captcha"
+
+A rehearsal. It shows the same dialog, with the same sequence engine and the
+same timing, reports whether the person got it right, and **unlocks nothing and
+sends nothing**. It exists so the mechanism can be tried, demonstrated and
+regression-checked without a vehicle attached and without wanting to write
+anything.
+
+It runs in **every** build, including the read-only one where writing was never
+compiled in - there is nothing dangerous about a dialog that cannot grant
+anything, and being able to show people what the protection looks like without
+handing them a write-capable firmware is worth having. Failed rehearsals do not
+count towards the real cooldown either: practice must not be able to lock
+somebody out of work.
+
+**A separate entry point rather than a flag on the real one.**
+
+```c
+void safety_request_unlock(void);   /* the real thing - can grant */
+void safety_demo_sequence(void);    /* rehearsal - cannot grant   */
+```
+
+`safety_request_unlock(bool rehearsal)` would have been less code and is the
+wrong shape. The property worth protecting is that **exactly one path in the
+program can open the gate**, and that it can be confirmed by grepping for
+`safety_unlock_grant()`. A boolean threaded through the unlocking function means
+one inverted condition, one default argument or one copied call site stands
+between a rehearsal and a real unlock - and that mistake would be silent. Two
+functions cannot be confused by accident, and the sequence logic is shared
+underneath, so nothing is duplicated except the few lines that decide what
+happens on success.
+
+That is the same reasoning as the token in the transport: make the dangerous
+thing structurally unreachable rather than conditionally avoided.
 
 ---
 
@@ -560,7 +659,7 @@ in front of a socket**, so the rule is short:
 > A remote client is subject to exactly the same gate as the panel, and it can
 > never open it. While the device is locked, a write arriving over HTTP or from
 > the ELM327 emulation is refused in the transport, before the frame is built.
-> The only way to unlock is five taps on the touchscreen of the device itself.
+> The only way to unlock is four taps on the touchscreen of the device itself.
 
 Consequences that follow from that and are worth writing down:
 
@@ -759,10 +858,11 @@ board headers.
   state lives in RAM, nothing is written to NVS, and a restart locks it again.
   **No timer** - it lasts until the device restarts, because a per-write ceremony
   would be tapped through and a timer expires mid-job.
-- It costs reading one honest screen and repeating a **five step sequence**,
-  regenerated on every attempt, three attempts, then a minute of cooldown. Tokens
-  are told apart by **shape and digit**; colour is redundancy, because the
-  measurements above show that no four colours survive all three dichromacies.
+- It costs reading one honest screen and repeating a **four step sequence**,
+  regenerated on every attempt, three attempts, then a minute of cooldown.
+  Tokens are told apart by **pictures** - house, bolt, gear, key - with digits
+  as a second channel; colour carries no information at all, so no colour
+  vision deficiency and no amount of sunlight can make the dialog unusable.
 - **The same gate applies to the web server and the ELM327 emulation.** They are
   refused in the transport while locked and they can never unlock themselves -
   only a person at the panel can.
