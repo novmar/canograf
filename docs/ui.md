@@ -114,6 +114,33 @@ in peripheral vision. When the time is up the ring turns sage and shows a tick
 for 700 ms before the action runs - otherwise the dialog would vanish before
 anyone noticed they had held long enough.
 
+A confirmation also has to say **what exactly it will destroy**, with the real
+numbers rather than a category. "Reset settings" is a blind promise; "deletes
+all 2 saved networks together with their passwords: domov, UPC1234567" is a
+decision. The counts and names are read when the dialog opens, so they cannot
+be stale, and they are already on the button that opens it.
+
+## Profiles
+
+Three stored profiles, **BENCH / DAY / NIGHT**. They hold the two settings that
+really differ between a workbench, daylight and a dark cab: **backlight
+brightness** and **blank after**. Units and language are **shared** - they
+belong to the person reading the screen, not to the situation, and switching a
+profile must never make the interface unreadable.
+
+Names, not 1 / 2 / 3. A number has to be remembered; the name is read at a
+glance, which is exactly what is hard at night. The name only labels *when* a
+profile is meant to be used - what is in it is the owner's business.
+
+The switch sits in the **top strip**, next to the profile name, so it is one
+tap from every page; the settings page has the same control. Three marks beside
+the name show how many profiles there are and which one is live, so a glance
+confirms the switch without reading.
+
+Profiles replaced an earlier day/night brightness pair. Keeping both would have
+meant two mechanisms for one thing - six stored levels and two switches that
+could disagree.
+
 ## Gauges have to flow
 
 Sampling and drawing are deliberately separated:

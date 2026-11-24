@@ -128,18 +128,39 @@ static bool bl_pwm_init(void)
 #endif
 }
 
-/* ---------------- nastaveni v NVS ---------------- */
+/* ---------------------------------------------------------------------
+ * Nastaveni v NVS
+ *
+ * Spolecna cast ma klice "mph", "fahr", "lang" a "prof" (cislo prave
+ * platneho profilu). Kazdy profil ma dva: "p<i>bl" jas a "p<i>bk"
+ * zhasnuti. Tri profily tedy stoji sest polozek po 32 B = 192 B, cela
+ * sekce nastaveni 320 B z 20 kB oddilu.
+ *
+ * Klice "blank", "blday", "blnight", "blnight_on" a "tbdn" patrily
+ * dvojici jasu den/noc, kterou profily nahradily. Cte je uz jen
+ * migrace v setup() a po prvnim ulozeni z NVS zmizi.
+ * ------------------------------------------------------------------- */
+static void prof_key(char *b, size_t n, int i, const char *what)
+{
+    snprintf(b, n, "p%d%s", i, what);
+}
+
 static void host_save_cfg(const ui_cfg_t *c)
 {
     prefs.begin("talento", false);
     prefs.putBool("mph", c->mph);
     prefs.putBool("fahr", c->fahrenheit);
-    prefs.putUInt("blank", c->blank_s);
     prefs.putInt("lang", c->lang);
-    prefs.putInt("blday", c->bright_day);
-    prefs.putInt("blnight", c->bright_night);
-    prefs.putBool("blnight_on", c->night);
-    prefs.putBool("tbdn", c->topbar_dn);
+    prefs.putInt("prof", c->profile);
+    for (int i = 0; i < UI_PROFILES; i++) {
+        char k[8];
+        prof_key(k, sizeof(k), i, "bl"); prefs.putInt(k, c->prof[i].bright);
+        prof_key(k, sizeof(k), i, "bk"); prefs.putUInt(k, c->prof[i].blank_s);
+    }
+    /* Pozustatky po dvojici den/noc. Mazou se az tady, aby mela migrace
+     * v setup() co cist i po restartu, ktery nic neulozil. */
+    for (const char *old : {"blank", "blday", "blnight", "blnight_on", "tbdn"})
+        prefs.remove(old);
     prefs.end();
 }
 
@@ -345,6 +366,38 @@ static void host_wifi_forget(const char *ssid)
     saved_store();
 }
 
+static int host_wifi_saved_count(void) { return saved_n; }
+
+static const char *host_wifi_saved_ssid(int i)
+{
+    return (i >= 0 && i < saved_n) ? saved_ssid[i] : nullptr;
+}
+
+/* Jeden zapis do NVS misto sesti po sobe jdoucich - UI tim navic nemusi
+ * resit, ze se mu seznam pod rukama prehazuje. */
+static void host_wifi_forget_all(void)
+{
+    for (int i = 0; i < WIFI_SLOTS; i++) {
+        saved_ssid[i][0] = 0;
+        saved_pass[i][0] = 0;
+    }
+    saved_n = 0;
+    saved_store();
+    /* Hesla uz nemame, takze se nema k cemu vracet: zastavime pokus o
+     * pripojeni, at radic nezkousi donekonecna sit, kterou si UI uz
+     * nepamatuje. */
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect();
+}
+
+/* ---------------- CAN a restart ---------------- */
+/* Ukazatel na citace plati porad, i pred can_start(); tam jsou same
+ * nuly. UI si ho proto smi drzet. */
+static const can_stats_t *host_can_stats(void) { return can_stats(); }
+static void host_can_stats_reset(void) { can_stats_reset(); }
+
+static void host_reboot(void) { ESP.restart(); }
+
 static bool host_wifi_connected(void) { return WiFi.status() == WL_CONNECTED; }
 
 static const char *host_wifi_ssid(void)
@@ -389,6 +442,12 @@ static ui_host_t UI_HOST = {
     .wifi_known         = host_wifi_known,
     .wifi_connect_known = host_wifi_connect_known,
     .wifi_forget        = host_wifi_forget,
+    .wifi_saved_count   = host_wifi_saved_count,
+    .wifi_saved_ssid    = host_wifi_saved_ssid,
+    .wifi_forget_all    = host_wifi_forget_all,
+    .can_stats          = host_can_stats,
+    .can_stats_reset    = host_can_stats_reset,
+    .reboot             = host_reboot,
     .heap_kb            = host_heap_kb,
     .psram_kb           = host_psram_kb,
 };
@@ -407,16 +466,33 @@ void setup()
     ui_cfg_t cfg;
     cfg.mph = prefs.getBool("mph", false);
     cfg.fahrenheit = prefs.getBool("fahr", false);
-    cfg.blank_s = prefs.getUInt("blank", 0);
     int def_lang = i18n_find(CANOGRAF_DEFAULT_LANG);
     if (def_lang < 0) def_lang = 0;
     cfg.lang = prefs.getInt("lang", def_lang);
-    /* Po prvnim startu: ve dne naplno, v noci na tretinu. Nocni rezim
-     * zacina vypnuty - zapnout ho musi clovek, hodiny nikdo nenastavil. */
-    cfg.bright_day = prefs.getInt("blday", 100);
-    cfg.bright_night = prefs.getInt("blnight", 35);
-    cfg.night = prefs.getBool("blnight_on", false);
-    cfg.topbar_dn = prefs.getBool("tbdn", false);
+
+    for (int i = 0; i < UI_PROFILES; i++) cfg.prof[i] = ui_profile_default(i);
+    cfg.profile = prefs.getInt("prof", -1);
+    if (cfg.profile < 0) {
+        /* Prechod z verze s dvojici jasu den/noc. Stara denni uroven
+         * patri profilu DEN, nocni profilu NOC a dilna zacina na
+         * vychozich hodnotach - takovy profil driv nebyl. Zhasinani
+         * bylo jen jedno spolecne, takze ho dostanou vsechny tri.
+         * Stare klice smaze prvni ulozeni, viz host_save_cfg(). */
+        cfg.profile = prefs.getBool("blnight_on", false) ? UI_PROF_NIGHT
+                                                         : UI_PROF_DAY;
+        cfg.prof[UI_PROF_DAY].bright   = prefs.getInt("blday", 100);
+        cfg.prof[UI_PROF_NIGHT].bright = prefs.getInt("blnight", 35);
+        uint32_t blank = prefs.getUInt("blank", 0);
+        for (int i = 0; i < UI_PROFILES; i++) cfg.prof[i].blank_s = blank;
+    } else {
+        for (int i = 0; i < UI_PROFILES; i++) {
+            char k[8];
+            prof_key(k, sizeof(k), i, "bl");
+            cfg.prof[i].bright = prefs.getInt(k, cfg.prof[i].bright);
+            prof_key(k, sizeof(k), i, "bk");
+            cfg.prof[i].blank_s = prefs.getUInt(k, cfg.prof[i].blank_s);
+        }
+    }
     prefs.end();
 
     g_board = new Board();

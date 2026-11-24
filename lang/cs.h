@@ -65,14 +65,21 @@ static const char *const LANG_CS[] = {
     "TEPLOTA",
     "ZHASNOUT PO",
     "JAS",
-    "DEN / NOC",
+    "PROFIL",
     "JAZYK",
+    "ÚDRŽBA",
     "nikdy",
+
+    /* profily nastaveni */
+    "DÍLNA",
+    "DEN",
+    "NOC",
+    "profil drží jas a zhasínání; jednotky a jazyk platí pro všechny",
 
     /* WiFi */
     "nepřipojeno",
     "VYBRAT SÍŤ",
-    "ZHASNOUT DISPLEJ",
+    "DISPLEJ VYP",
     "WiFi sítě",
     "hledám...",
     "HESLO PRO  %s",
@@ -97,13 +104,29 @@ static const char *const LANG_CS[] = {
 
     /* jas podsviceni */
     "Jas",
-    "Na této desce ne. Stmívání potřebuje drátek z GPIO6 na plošku BL; "
-    "bez něj je podsvícení jen vypínač.",
-    "DEN",
-    "NOC",
+    "Tato deska stmívat neumí - chybí drátek z GPIO6 na plošku BL.",
     "PODLE VOZU",
     "vyžaduje připojení k vozidlu",
-    "PŘEPÍNAČ V LIŠTĚ",
+
+    /* reset a udrzba */
+    "Reset a údržba",
+    "VÝCHOZÍ NASTAVENÍ",
+    "%d profily a jednotky",
+    "Vrátí %d profily a jednotky do výchozího stavu. Jazyk zůstane - "
+    "po resetu musí jít přečíst, co na displeji stojí.\n\n"
+    "Teď je v nich:\n\n%s",
+    "ZAPOMENOUT VŠECHNY SÍTĚ",
+    "uloženo %d",
+    "Smaže všech %d uložených sítí i s hesly:\n\n%s\n\n"
+    "Při dalším připojení se UI na heslo zeptá znovu.",
+    "VYNULOVAT ČÍTAČE CAN",
+    "rx %u, tx %u",
+    "Vynuluje čítače sběrnice CAN. Teď ukazují:\n\n%s",
+    "RESTART DESKY",
+    "běží %s",
+    "Deska se restartuje. Nic se nemaže - profily i uložené sítě "
+    "zůstanou.\n\nBěží %s.",
+    "na této desce to nejde",
 
     /* navigace */
     "MÍSTO PRO DALŠÍ FUNKCE",

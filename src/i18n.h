@@ -73,9 +73,16 @@ enum {
     STR_SET_TEMP,
     STR_SET_BLANK,
     STR_SET_BRIGHT,
-    STR_SET_DAYNIGHT,       /* popisek prepinace denni/nocni uroven */
+    STR_SET_PROFILE,        /* popisek tlacitka volby profilu */
     STR_SET_LANG,
+    STR_SET_MAINT,          /* popisek tlacitka, ktere otevira resety */
     STR_BLANK_NEVER,
+
+    /* profily nastaveni - jmena jsou pevna, viz komentar v ui.h */
+    STR_PROF_SHOP,
+    STR_PROF_DAY,
+    STR_PROF_NIGHT,
+    STR_PROF_HINT,          /* co profil nese a co plati pro vsechny */
 
     /* WiFi */
     STR_WIFI_NOT_CONN,
@@ -105,11 +112,28 @@ enum {
     /* jas podsviceni */
     STR_BRIGHT_TITLE,
     STR_BRIGHT_NA,          /* deska stmivat neumi - misto tlacitek */
-    STR_BRIGHT_DAY,
-    STR_BRIGHT_NIGHT,
-    STR_BRIGHT_VEHICLE,     /* treti rezim: podle osvetleni vozidla */
+    STR_BRIGHT_VEHICLE,     /* ctvrta moznost: podle osvetleni vozidla */
     STR_BRIGHT_VEHICLE_NA,  /* a duvod, proc zatim nejde zvolit */
-    STR_BRIGHT_TOPBAR,      /* rychly prepinac den/noc v horni liste */
+
+    /* reset a udrzba
+     *
+     * Kazda z techto akci neco nevratne smaze, takze v textu musi byt
+     * videt CO PRESNE - od toho jsou formatovaci znacky. Preklad je
+     * musi mit ve stejnem poctu i poradi. */
+    STR_RESET_TITLE,
+    STR_RESET_CFG,
+    STR_RESET_CFG_SUB,      /* jedno %d = pocet profilu */
+    STR_RESET_CFG_BODY,     /* %d pocet profilu, %s jejich dnesni obsah */
+    STR_RESET_WIFI,
+    STR_RESET_WIFI_SUB,     /* jedno %d = kolik siti je ulozeno */
+    STR_RESET_WIFI_BODY,    /* %d pocet siti, %s jejich seznam */
+    STR_RESET_CAN,
+    STR_RESET_CAN_SUB,      /* %u prijatych, %u odeslanych ramcu */
+    STR_RESET_CAN_BODY,     /* jedno %s = vsechny citace i s hodnotami */
+    STR_RESET_REBOOT,
+    STR_RESET_REBOOT_SUB,   /* jedno %s = doba behu */
+    STR_RESET_REBOOT_BODY,  /* jedno %s = doba behu */
+    STR_RESET_NA,           /* deska tuhle akci neumi */
 
     /* navigace */
     STR_NAV_PLACEHOLDER,

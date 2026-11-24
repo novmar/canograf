@@ -96,8 +96,8 @@ static const char *const FAKE_SSID[] = {
 };
 #define FAKE_N ((int)(sizeof(FAKE_SSID) / sizeof(FAKE_SSID[0])))
 
-static char fake_saved[4][33] = { "dilna", "domov" };
-static int  fake_saved_n = 2;
+static char fake_saved[6][33] = { "dilna", "domov", "UPC1234567" };
+static int  fake_saved_n = 3;
 static uint32_t fake_scan_done_at = 0;
 static bool fake_scan_running = false;
 static char fake_conn[33] = "";
@@ -130,7 +130,7 @@ static const char *fake_scan_ssid(int i)
 static void fake_connect(const char *ssid, const char *pass)
 {
     (void)pass;
-    if (fake_find(ssid) < 0 && fake_saved_n < 4)
+    if (fake_find(ssid) < 0 && fake_saved_n < (int)(sizeof(fake_saved) / 33))
         snprintf(fake_saved[fake_saved_n++], 33, "%s", ssid);
     snprintf(fake_conn, sizeof(fake_conn), "%s", ssid);
 }
@@ -152,6 +152,29 @@ static void fake_forget(const char *ssid)
         memcpy(fake_saved[k], fake_saved[k + 1], 33);
     fake_saved_n--;
 }
+
+static int fake_saved_count(void) { return fake_saved_n; }
+
+static const char *fake_saved_ssid(int i)
+{
+    return (i >= 0 && i < fake_saved_n) ? fake_saved[i] : NULL;
+}
+
+static void fake_forget_all(void) { fake_saved_n = 0; }
+
+/* Citace sbernice. Zadny CAN na hostiteli neni, takze jsou to vymyslena
+ * cisla - jde o to, ze dialog ukazuje jejich SKUTECNY obsah a ze ho
+ * potvrzeny reset opravdu vynuluje. */
+static can_stats_t fake_can = {
+    .rx = 1842, .tx = 57, .tx_fail = 2, .rx_lost = 0,
+    .ring_lost = 0, .bus_err = 3, .arb_lost = 1, .bus_off = 0,
+};
+static const can_stats_t *fake_can_stats(void) { return &fake_can; }
+static void fake_can_reset(void) { memset(&fake_can, 0, sizeof(fake_can)); }
+
+/* Restart desky se na hostiteli jen spocita. */
+static int fake_reboots = 0;
+static void fake_reboot(void) { fake_reboots++; }
 
 static bool fake_connected(void) { return fake_conn[0] != '\0'; }
 static const char *fake_ssid(void) { return fake_conn; }
@@ -184,6 +207,12 @@ static const ui_host_t FAKE_HOST = {
     .wifi_known         = fake_known,
     .wifi_connect_known = fake_connect_known,
     .wifi_forget        = fake_forget,
+    .wifi_saved_count   = fake_saved_count,
+    .wifi_saved_ssid    = fake_saved_ssid,
+    .wifi_forget_all    = fake_forget_all,
+    .can_stats          = fake_can_stats,
+    .can_stats_reset    = fake_can_reset,
+    .reboot             = fake_reboot,
     .heap_kb            = fake_heap_kb,
     .psram_kb           = fake_psram_kb,
 };
@@ -202,6 +231,12 @@ static const ui_host_t FAKE_HOST_NODIM = {
     .wifi_known         = fake_known,
     .wifi_connect_known = fake_connect_known,
     .wifi_forget        = fake_forget,
+    .wifi_saved_count   = fake_saved_count,
+    .wifi_saved_ssid    = fake_saved_ssid,
+    .wifi_forget_all    = fake_forget_all,
+    .can_stats          = fake_can_stats,
+    .can_stats_reset    = fake_can_reset,
+    .reboot             = fake_reboot,
     .heap_kb            = fake_heap_kb,
     .psram_kb           = fake_psram_kb,
 };
@@ -463,21 +498,23 @@ static void shot(const char *name)
 #define SET_BLANK_Y    PAGE_Y(28 + 34)
 #define SET_WIFI_X     (20 + 160)
 #define SET_WIFI_Y     PAGE_Y(120 + 34)
-#define SET_BRIGHT_X   (360 + 80)
+#define SET_PROFILE_X  (360 + 80)
+#define SET_PROFILE_Y  PAGE_Y(120 + 34)
+#define SET_BRIGHT_X   (540 + 85)
 #define SET_BRIGHT_Y   PAGE_Y(120 + 34)
-#define SET_DAYNIGHT_X (540 + 85)
-#define SET_DAYNIGHT_Y PAGE_Y(120 + 34)
+#define SET_RESET_X    (546 + 85)
+#define SET_RESET_Y    PAGE_Y(194 + 34)
 /* dialog jasu lezi na cele obrazovce, takze PAGE_Y se na nej nevztahuje:
- * radek dne, radek noci, urovne a prepinac do horni listy */
-#define BL_DAY_Y       (104 + 64)
-#define BL_NIGHT_Y     (104 + 136 + 64)
+ * radek na profil (vyska 120, mezera 6) a pet urovni v nem */
+#define BL_ROW_Y(m)    (96 + (m) * 126 + 60)
 #define BL_LVL_X(i)    (212 + (i) * 112 + 52)
-#define BL_MODE_X      (20 + 90)
-#define BL_TOPBAR_X    (548 + 108)
-#define BL_TOPBAR_Y    (376 + 43)
-/* ikonka den/noc v horni liste */
-#define DN_ICON_X      (800 - 120 - 8 + 26)
-#define DN_ICON_Y      32
+#define BL_PROF_X      (20 + 90)
+/* nabidka resetu: ctyri tlacitka 360 x 120 ve dvou sloupcich */
+#define RST_X(c)       (30 + (c) * 380 + 180)
+#define RST_Y(r)       (96 + (r) * 136 + 60)
+/* prepinac profilu v horni liste */
+#define PROF_BAR_X     (800 - 164 - 8 + 80)
+#define PROF_BAR_Y     32
 
 static void phase_navigace(void)
 {
@@ -809,55 +846,37 @@ static void phase_jas(void)
 
     /* Tlacitko urovne musi novou hodnotu opravdu poslat na desku.
      * Mutacni zkouska: vyhodit bl_apply() z bl_level_cb() v ui.c. */
-    tap(BL_LVL_X(1), BL_DAY_Y, false);          /* denni uroven 75 % */
+    tap(BL_LVL_X(1), BL_ROW_Y(1), false);       /* profil DEN na 75 % */
     check("tlacitko urovne posle jas na desku", fake_bl_percent == 75);
 
     /* -----------------------------------------------------------------
-     * Dialog ma radek na kazdy rezim, takze NOCNI uroven jde nastavit,
-     * aniz by se do noci prepinalo. Jas, ktery prave sviti, se tim
-     * nesmi hnout - a po prepnuti na noc musi prijit prave ta hodnota.
+     * Dialog ma radek na kazdy profil, takze uroven CIZIHO profilu jde
+     * nastavit, aniz by se do nej prepinalo. Jas, ktery prave sviti, se
+     * tim nesmi hnout - a po prepnuti do nej musi prijit prave ta
+     * hodnota.
      *
      * Mutacni zkouska: v bl_level_cb() v ui.c ukladat vzdy do prave
-     * zapnuteho rezimu (if (cfg.night) cfg.bright_night = p; else
-     * cfg.bright_day = p;). Nocni uroven pak zustane na 35 a posledni
-     * dve kontroly selzou.
+     * platneho profilu (cfg.prof[cfg.profile].bright = p). Nocni uroven
+     * pak zustane na 35 a posledni dve kontroly selzou.
      * ----------------------------------------------------------------- */
-    tap(BL_LVL_X(4), BL_NIGHT_Y, false);        /* nocni uroven na 25 % */
-    check("nastaveni nocni urovne nehne dennim jasem", fake_bl_percent == 75);
-    shot("jas-dva-rezimy");
+    tap(BL_LVL_X(4), BL_ROW_Y(2), false);       /* profil NOC na 25 % */
+    check("nastaveni urovne ciziho profilu nehne jasem", fake_bl_percent == 75);
+    shot("jas-tri-profily");
 
-    /* Prepnuti rezimu musi poslat jeho vlastni ulozenou uroven.
-     * Mutacni zkouska: v bl_level() vracet vzdy cfg.bright_day. */
-    tap(BL_MODE_X, BL_NIGHT_Y, false);          /* rezim NOC */
-    check("prepnuti na noc posle nocni uroven", fake_bl_percent == 25);
+    /* Prepnuti profilu musi poslat jeho vlastni ulozenou uroven.
+     * Mutacni zkouska: v bl_level() vracet cfg.prof[UI_PROF_DAY].bright. */
+    tap(BL_PROF_X, BL_ROW_Y(2), false);         /* profil NOC */
+    check("prepnuti na NOC posle nocni uroven", fake_bl_percent == 25);
     shot("jas-noc");
 
-    /* Navrat na den musi vratit denni uroven nedotcenou tim, co se
-     * stalo v noci - to je cely smysl dvou ulozenych urovni. */
-    tap(BL_MODE_X, BL_DAY_Y, false);            /* rezim DEN */
-    check("navrat na den vrati denni uroven", fake_bl_percent == 75);
-
-    /* Rychly prepinac v horni liste se zapina tady. */
-    tap(BL_TOPBAR_X, BL_TOPBAR_Y, false);
-    shot("jas-prepinac-v-liste");
+    /* Navrat na DEN musi vratit denni uroven nedotcenou tim, co se
+     * stalo v noci - to je cely smysl ulozenych profilu. */
+    tap(BL_PROF_X, BL_ROW_Y(1), false);         /* profil DEN */
+    check("navrat na DEN vrati denni uroven", fake_bl_percent == 75);
 
     swipe(120, 240, 700, 250, 8, false, false);     /* zavrit dialog */
     run_ms(200, false);
     shot("nastaveni-jas-75");
-
-    /* -----------------------------------------------------------------
-     * Ikonka v horni liste musi delat PRESNE totez co prepinac v
-     * nastaveni, vcetne poslani jasu na desku - obe cesty vedou do
-     * daynight_cb(). Mutacni zkouska: v dn_build() v ui.c vyradit
-     * lv_obj_add_event_cb(dn_btn, daynight_cb, LV_EVENT_CLICKED, NULL).
-     * ----------------------------------------------------------------- */
-    unsigned bar_day = region_hash(660, 0, 800, 64);
-    tap(DN_ICON_X, DN_ICON_Y, false);
-    check("ikonka v liste prepne na nocni jas", fake_bl_percent == 25);
-    check("ikonka ukazuje prepnuty rezim", bar_day != region_hash(660, 0, 800, 64));
-    shot("lista-noc");
-    tap(DN_ICON_X, DN_ICON_Y, false);
-    check("ikonka prepne zpatky na den", fake_bl_percent == 75);
 
     /* -----------------------------------------------------------------
      * Zhasnuti po necinnosti se musi nejdriv stahnout jasem a teprve pak
@@ -907,18 +926,189 @@ static void phase_jas(void)
     tap(SET_BLANK_X, SET_BLANK_Y, false);       /* -> nikdy */
 }
 
+/* ---------------------------------------------------------------------
+ * Profily
+ *
+ * Profil nese dve veci: jas a zhasinani po necinnosti. Prepnuti musi
+ * zmenit OBE a navrat do profilu musi vratit presne to, co v nem bylo -
+ * jinak profil nic neslibuje. Jas jde zmerit skrz predstiranou desku,
+ * zhasinani je videt jen na popisku tlacitka, takze se porovnava otisk
+ * jeho obdelniku.
+ *
+ * Prepina se ze dvou mist a obe musi delat totez: prepinac v horni
+ * liste a tlacitko PROFIL v nastaveni.
+ * ------------------------------------------------------------------- */
+#define BLANK_BOX  372, PAGE_Y(28), 532, PAGE_Y(96)
+#define PROFBTN_BOX 360, PAGE_Y(120), 520, PAGE_Y(188)
+
+static void phase_profily(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+
+    /* V profilu DEN: jas 75 (zbyl po phase_jas), zhasinani na 30 s. */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* nikdy -> 30 s */
+    unsigned blank_den = region_hash(BLANK_BOX);
+    unsigned btn_den   = region_hash(PROFBTN_BOX);
+    unsigned bar_den   = region_hash(620, 0, 800, 64);
+    shot("profil-den");
+
+    /* -----------------------------------------------------------------
+     * Prepinac v horni liste. Musi poslat jas noveho profilu a zaroven
+     * prepsat zhasinani - obe hodnoty patri profilu.
+     *
+     * Mutacni zkouska: v profile_apply() v ui.c vyhodit blank_btn_paint()
+     * (popisek zhasinani pak za profilem nejde a prvni kontrola selze)
+     * nebo bl_apply() (druha kontrola selze).
+     * ----------------------------------------------------------------- */
+    tap(PROF_BAR_X, PROF_BAR_Y, false);         /* DEN -> NOC */
+    check("prepnuti profilu zmeni zhasinani", blank_den != region_hash(BLANK_BOX));
+    check("prepnuti profilu zmeni jas", fake_bl_percent == 25);
+    check("prepnuti je videt v horni liste",
+          bar_den != region_hash(620, 0, 800, 64));
+    check("prepnuti je videt na tlacitku PROFIL",
+          btn_den != region_hash(PROFBTN_BOX));
+    shot("profil-noc");
+
+    /* Dokola az zpatky na DEN: NOC -> DILNA -> DEN. Po ceste se overi,
+     * ze DILNA ma svuj vlastni jas a ze to neni jen prepinac dvou
+     * poloh. */
+    tap(PROF_BAR_X, PROF_BAR_Y, false);         /* NOC -> DILNA */
+    check("treti profil ma vlastni jas", fake_bl_percent == 100);
+    shot("profil-dilna");
+
+    /* Zpatky uz pres tlacitko v nastaveni - obe cesty vedou do
+     * profile_cycle_cb(). Mutacni zkouska: v build_nastav() predat
+     * tlacitku PROFIL misto profile_cycle_cb hodnotu NULL. */
+    tap(SET_PROFILE_X, SET_PROFILE_Y, false);   /* DILNA -> DEN */
+    check("tlacitko PROFIL v nastaveni strida stejne jako lista",
+          fake_bl_percent == 75);
+    check("navrat do profilu vrati jeho zhasinani",
+          blank_den == region_hash(BLANK_BOX));
+
+    /* uklid: zpatky na "nikdy", at zbytek zkousky nezhasina */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* 30 s -> 2 min */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* -> 10 min */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* -> nikdy */
+}
+
+/* ---------------------------------------------------------------------
+ * Reset a udrzba
+ *
+ * Kazda z techto akci neco nevratne smaze, takze se nesmi dat spustit
+ * jednim tuknutim. U kazde se proto zkousi oboji: tuknuti na potvrzovaci
+ * tlacitko (nesmi se stat nic) a teprve pak drzeni pres tri vteriny.
+ * ------------------------------------------------------------------- */
+static void hold_confirm(void)
+{
+    touch_at(210, 390);                 /* tlacitko DRZ 3 s */
+    touch_down = true;
+    run_ms(4200, false);                /* 3 s odpocet a potvrzeni */
+    touch_release(false);
+    run_ms(600, false);                 /* akce a vymena dialogu */
+}
+
+static void phase_reset(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+    shot("nastaveni-reset");
+
+    tap(SET_RESET_X, SET_RESET_Y, false);       /* tlacitko UDRZBA */
+    shot("reset-nabidka");
+
+    /* -----------------------------------------------------------------
+     * Zapomenuti vsech siti. Pred resetem jich par ulozenych je, takze
+     * je co smazat a cislo v nabidce neni vymyslene.
+     *
+     * Mutacni zkouska: v reset_wifi_ok_cb() v ui.c volat misto
+     * wifi_forget_all() jen wifi_forget() prvni site. Posledni kontrola
+     * pak selze, protoze seznam nezustane prazdny.
+     * ----------------------------------------------------------------- */
+    int saved_before = fake_saved_n;
+    check("pred resetem je co zapomenout", saved_before > 0);
+    tap(RST_X(1), RST_Y(0), false);             /* ZAPOMENOUT VSECHNY SITE */
+    shot("reset-site");
+
+    tap(210, 390, false);                       /* jen tuknuti na potvrzeni */
+    check("tuknuti ulozene site nesmaze", fake_saved_n == saved_before);
+
+    hold_confirm();
+    check("podrzeni vyprazdni seznam ulozenych siti", fake_saved_n == 0);
+    shot("reset-site-hotovo");                  /* nabidka uz s nulou */
+
+    /* -----------------------------------------------------------------
+     * Citace sbernice. Mutacni zkouska: v reset_can_ok_cb() v ui.c
+     * vynechat volani can_stats_reset().
+     * ----------------------------------------------------------------- */
+    check("citace sbernice pred resetem neco ukazuji", fake_can.rx > 0);
+    tap(RST_X(0), RST_Y(1), false);             /* VYNULOVAT CITACE CAN */
+    shot("reset-citace");
+    tap(210, 390, false);
+    check("tuknuti citace nevynuluje", fake_can.rx > 0);
+    hold_confirm();
+    check("podrzeni vynuluje citace sbernice",
+          fake_can.rx == 0 && fake_can.tx == 0 && fake_can.bus_err == 0);
+
+    /* -----------------------------------------------------------------
+     * Restart desky. Na hostiteli se jen spocita.
+     * Mutacni zkouska: v reset_reboot_ok_cb() v ui.c vynechat volani
+     * host->reboot().
+     * ----------------------------------------------------------------- */
+    tap(RST_X(1), RST_Y(1), false);             /* RESTART DESKY */
+    shot("reset-restart");
+    tap(210, 390, false);
+    check("tuknuti desku nerestartuje", fake_reboots == 0);
+    hold_confirm();
+    check("podrzeni desku restartuje", fake_reboots == 1);
+
+    /* -----------------------------------------------------------------
+     * Vychozi nastaveni. Pred resetem je v profilu DEN jas 75 % (z
+     * phase_jas) a jednotky prepnute na mph, takze je na cem poznat, ze
+     * se opravdu neco vratilo.
+     *
+     * Mutacni zkouska: v reset_cfg_ok_cb() v ui.c prepsat jen profil
+     * UI_PROF_DAY. Kontrola na jas po resetu pak projde, ale jednotky
+     * zustanou na mph a kontrola otisku selze.
+     * ----------------------------------------------------------------- */
+    ui_show_page(5);
+    run_ms(200, false);
+    unsigned units_kmh = region_hash(20, PAGE_Y(28), 180, PAGE_Y(96));
+    tap(20 + 80, PAGE_Y(28 + 34), false);       /* km/h -> mph */
+    check("jednotky se daly prepnout", units_kmh != region_hash(20, PAGE_Y(28),
+                                                               180, PAGE_Y(96)));
+    check("pred resetem neni jas vychozi", fake_bl_percent == 75);
+
+    tap(SET_RESET_X, SET_RESET_Y, false);
+    tap(RST_X(0), RST_Y(0), false);             /* VYCHOZI NASTAVENI */
+    shot("reset-nastaveni");
+
+    tap(210, 390, false);
+    check("tuknuti nastaveni neresetuje", fake_bl_percent == 75);
+
+    hold_confirm();
+    run_ms(400, false);                         /* prestavba UI */
+    check("podrzeni vrati profily do vychoziho stavu", fake_bl_percent == 100);
+    check("podrzeni vrati i jednotky",
+          units_kmh == region_hash(20, PAGE_Y(28), 180, PAGE_Y(96)));
+    shot("reset-nastaveni-hotovo");
+}
+
 /* Deska bez dratku z GPIO6 na plosku BL stmivat neumi a nesmi se tvarit,
  * ze ano. Postavi se cela UI znovu nad hostitelem, ktery bl_set_percent
- * nema, a stranka nastaveni musi vypadat jinak - misto tlacitek jasu je
- * na ni vysvetleni, proc to nejde.
+ * nema, a misto tlacitka jasu musi byt v nastaveni vysvetleni, proc to
+ * nejde. Porovnava se primo obdelnik, kde tlacitko jasu stoji - zbytek
+ * stranky vypada stejne a otisk cele stranky by se tim rozmelnil.
  *
  * Mutacni zkouska: vyhodit podminku if (bl_can_dim()) z build_nastav()
  * v ui.c. Obe stranky pak vypadaji stejne a kontrola selze. */
+#define BRIGHT_BOX 540, PAGE_Y(120), 790, PAGE_Y(188)
+
 static void phase_bez_dratku(void)
 {
     ui_show_page(5);
     run_ms(200, false);
-    unsigned with_dim = page_hash();
+    unsigned with_dim = region_hash(BRIGHT_BOX);
 
     lv_obj_t *fresh = lv_obj_create(NULL);
     lv_scr_load(fresh);
@@ -927,8 +1117,8 @@ static void phase_bez_dratku(void)
     ui_show_page(5);
     run_ms(200, false);
 
-    check("bez stmivani nejsou na strance tlacitka jasu",
-          with_dim != page_hash());
+    check("bez stmivani neni na strance tlacitko jasu",
+          with_dim != region_hash(BRIGHT_BOX));
     shot("jas-nelze");
 }
 
@@ -980,16 +1170,18 @@ int main(int argc, char **argv)
     idrv.read_cb = read_cb;
     lv_indev_drv_register(&idrv);
 
-    /* Vychozi nastaveni jako po prvnim startu desky: denni jas naplno,
-     * nocni na tretinu, zhasinani vypnute (aby snimky nezhasinaly). */
+    /* Vychozi nastaveni jako po prvnim startu desky, jen se zhasinanim
+     * vypnutym ve vsech profilech - snimky nemaji proc zhasinat. */
     ui_cfg_t cfg = {
         .mph = false,
         .fahrenheit = false,
-        .blank_s = 0,
         .lang = lang,
-        .bright_day = 100,
-        .bright_night = 35,
-        .night = false,
+        .profile = UI_PROF_DAY,
+        .prof = {
+            [UI_PROF_SHOP]  = { .bright = 100, .blank_s = 0 },
+            [UI_PROF_DAY]   = { .bright = 100, .blank_s = 0 },
+            [UI_PROF_NIGHT] = { .bright = 35,  .blank_s = 0 },
+        },
     };
     ui_set_host(&FAKE_HOST);
     ui_set_cfg(&cfg);
@@ -1029,6 +1221,8 @@ int main(int argc, char **argv)
     phase_dialogy();
     phase_wifi();
     phase_jas();
+    phase_profily();
+    phase_reset();
     phase_bez_dratku();     /* posledni - stavi UI nad jinym hostitelem */
 
     free(rgb);

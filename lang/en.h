@@ -67,9 +67,16 @@ static const char *const LANG_EN[] = {
     "TEMPERATURE",
     "BLANK AFTER",
     "BRIGHTNESS",
-    "DAY / NIGHT",
+    "PROFILE",
     "LANGUAGE",
+    "SERVICE",
     "never",
+
+    /* setting profiles */
+    "BENCH",
+    "DAY",
+    "NIGHT",
+    "a profile holds brightness and blanking; units and language are shared",
 
     /* WiFi */
     "not connected",
@@ -99,13 +106,29 @@ static const char *const LANG_EN[] = {
 
     /* backlight brightness */
     "Brightness",
-    "Not on this board. Dimming needs a wire from GPIO6 to the BL pad; "
-    "without it the backlight is only an on/off switch.",
-    "DAY",
-    "NIGHT",
+    "Not on this board - the wire from GPIO6 to the BL pad is missing.",
     "BY VEHICLE",
     "requires a vehicle connection",
-    "TOGGLE IN TOP BAR",
+
+    /* reset and maintenance */
+    "Reset and maintenance",
+    "FACTORY SETTINGS",
+    "%d profiles and units",
+    "Returns %d profiles and the units to their defaults. The language "
+    "stays - a reset must never make the screen unreadable.\n\n"
+    "Right now they hold:\n\n%s",
+    "FORGET ALL NETWORKS",
+    "%d saved",
+    "Deletes all %d saved networks together with their passwords:\n\n%s\n\n"
+    "Connecting to any of them again will ask for the password.",
+    "ZERO BUS COUNTERS",
+    "rx %u, tx %u",
+    "Zeroes the CAN bus counters. Right now they read:\n\n%s",
+    "RESTART BOARD",
+    "up %s",
+    "The board restarts. Nothing is erased - profiles and saved networks "
+    "stay.\n\nIt has been up %s.",
+    "not available on this board",
 
     /* navigation */
     "ROOM FOR MORE FUNCTIONS",

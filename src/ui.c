@@ -93,11 +93,11 @@ static lv_obj_t *chart, *lbl_gap;
 static lv_chart_series_t *ser_sp, *ser_act;
 /* nastaveni */
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
-static lv_obj_t *btn_bright, *btn_daynight;
+static lv_obj_t *btn_bright, *btn_profile;
 /* DPF */
 static lv_obj_t *btn_regen_state;
-/* horni lista: volitelny rychly prepinac den/noc */
-static lv_obj_t *dn_btn, *dn_sun, *dn_moon, *dn_lbl;
+/* horni lista: prepinac profilu - jmeno a tri rysky vedle sebe */
+static lv_obj_t *prof_btn, *prof_name, *prof_mark[UI_PROFILES];
 /* diagnostika: prekryv s FPS a pameti zije porad, jen byva schovany */
 static lv_obj_t *perf_lbl;
 static bool perf_on = false;
@@ -156,13 +156,29 @@ static unsigned host_psram_kb(void)
  * Nejnizsi uroven je 25 %, ne 0 %. Pod ni klesa proud LEDkami pod 3 mA,
  * kde AP3032 nikdo nepromeril a boost menic muze zacit preskakovat
  * pulzy. Uplne zhasnout stejne umi jen EXIO2, a to je jine tlacitko.
+ *
+ * KOLIK TO ZABERE V NVS. Profil jsou dve cisla: jas (int32) a zhasnuti
+ * (uint32). NVS uklada kazdou takovou polozku do jedne polozky stranky
+ * o 32 B vcetne klice, takze tri profily = 6 polozek = 192 B. Spolecna
+ * cast jsou dalsi ctyri polozky (jednotky, jazyk, cislo profilu) = 128 B,
+ * dohromady 320 B. Vedle toho stoji sest ulozenych WiFi siti, kde kazda
+ * zabere SSID (32 B hlavicka + 64 B dat) a heslo (32 + 96 B), tedy asi
+ * 1,4 kB. Cely oddil NVS ma 20 kB, takze jsme zhruba na desetine a
+ * dalsi profil by stal 64 B.
  * ------------------------------------------------------------------- */
 #define BL_LEVELS 5
-#define BL_MODES  2             /* 0 = den, 1 = noc */
 static const int BL_LEVEL[BL_LEVELS] = {100, 75, 50, 35, 25};
 #define BL_MIN  (BL_LEVEL[BL_LEVELS - 1])
 
 static ui_cfg_t cfg;
+
+/* Profil, ktery prave plati. Pise se na tolika mistech, ze zkratka je
+ * citelnejsi nez cfg.prof[cfg.profile] vsude. */
+#define PROF (cfg.prof[cfg.profile])
+
+static const int PROF_STR[UI_PROFILES] = {
+    STR_PROF_SHOP, STR_PROF_DAY, STR_PROF_NIGHT
+};
 
 static int bl_clamp(int p)
 {
@@ -171,12 +187,31 @@ static int bl_clamp(int p)
     return p;
 }
 
+ui_profile_t ui_profile_default(int i)
+{
+    /* DILNA zhasina po deseti minutach: deska na stole bezi cele
+     * hodiny a vetsinu z nich u ni nikdo nestoji. DEN a NOC zhasinani
+     * vypnute maji schvalne - zhasinani se pocita od posledniho DOTEKU
+     * a za jizdy se displeje nikdo nedotyka, takze by zhaslo prave
+     * uprostred jizdy. */
+    static const ui_profile_t def[UI_PROFILES] = {
+        [UI_PROF_SHOP]  = { .bright = 100, .blank_s = 600 },
+        [UI_PROF_DAY]   = { .bright = 100, .blank_s = 0 },
+        [UI_PROF_NIGHT] = { .bright = 35,  .blank_s = 0 },
+    };
+    if (i < 0 || i >= UI_PROFILES) i = UI_PROF_DAY;
+    return def[i];
+}
+
 void ui_set_cfg(const ui_cfg_t *c)
 {
     if (!c) return;
     cfg = *c;
-    cfg.bright_day   = bl_clamp(cfg.bright_day);
-    cfg.bright_night = bl_clamp(cfg.bright_night);
+    for (int i = 0; i < UI_PROFILES; i++)
+        cfg.prof[i].bright = bl_clamp(cfg.prof[i].bright);
+    /* Profil mimo rozsah by indexoval mimo pole, takze se musi orezat
+     * drive, nez se podle nej cokoliv nastavi. */
+    if (cfg.profile < 0 || cfg.profile >= UI_PROFILES) cfg.profile = UI_PROF_DAY;
     /* i18n_set() necha neplatny index byt, takze cfg.lang musi projit
      * stejnou kontrolou - jinak by ui_rebuild() cyklovalo od nesmyslu. */
     i18n_set(cfg.lang);
@@ -189,6 +224,23 @@ static val_t v_speed, v_rpm, v_temp, v_boost, v_boost_sp, v_vnt, v_rail, v_soot;
 static float sim_t = 0;
 static uint32_t last_sample = 0;
 static inline void approach(val_t *v, float k) { v->shown += (v->target - v->shown) * k; }
+
+/* Pripojeni na konec bufferu, ktere nemuze prerust jeho velikost.
+ * snprintf vraci delku, kterou by ZAPSAL, ne kolik zapsal - prosty soucet
+ * by pri delsim textu ukazal za konec pole a dalsi volani by dostalo
+ * zapornou velikost. Pouziva to kazde misto, ktere sklada text po
+ * kouscich: diagnostika, seznam profilu i citace sbernice v resetu. */
+static int str_add(char *b, int at, int n, const char *fmt, ...)
+{
+    if (at >= n - 1) return n - 1;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(b + at, (size_t)(n - at), fmt, ap);
+    va_end(ap);
+    if (w < 0) return at;
+    at += w;
+    return at > n - 1 ? n - 1 : at;
+}
 
 /* ---------------------------------------------------------------------
  * Dotek: tuknuti versus tah
@@ -367,15 +419,15 @@ static uint32_t bl_wake_start = 0;
 static int bl_wake_from = 0;        /* jas, ze ktereho nabeh zacal */
 static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
 
-/* dialog jasu a diagnostiky - zije jen po dobu otevreneho dialogu,
- * uklizi modal_forget() */
-static lv_obj_t *btn_bl_level[BL_MODES][BL_LEVELS];
-static lv_obj_t *btn_bl_mode[BL_MODES], *btn_bl_topbar;
+/* dialog jasu, resetu a diagnostiky - zije jen po dobu otevreneho
+ * dialogu, uklizi modal_forget() */
+static lv_obj_t *btn_bl_level[UI_PROFILES][BL_LEVELS];
+static lv_obj_t *btn_bl_prof[UI_PROFILES];
 static lv_obj_t *dbg_raw, *dbg_mem, *dbg_perf_btn;
 
 static bool bl_can_dim(void) { return host && host->bl_set_percent; }
 
-static int bl_level(void) { return cfg.night ? cfg.bright_night : cfg.bright_day; }
+static int bl_level(void) { return PROF.bright; }
 
 static void bl_set(int percent)
 {
@@ -859,12 +911,11 @@ static void modal_forget(void)
     hold_num   = NULL;
     hold_action = NULL;
     hold_done   = false;
-    btn_bl_topbar = NULL;
     dbg_raw     = NULL;
     dbg_mem     = NULL;
     dbg_perf_btn = NULL;
-    for (int m = 0; m < BL_MODES; m++) {
-        btn_bl_mode[m] = NULL;
+    for (int m = 0; m < UI_PROFILES; m++) {
+        btn_bl_prof[m] = NULL;
         for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[m][i] = NULL;
     }
     /* Timer odpoctu kresli do popisku v dialogu, takze musi skoncit tady.
@@ -1455,14 +1506,24 @@ static void units_t_cb(lv_event_t *e)
     lv_label_set_text(lv_obj_get_child(btn_units_t, 0), cfg.fahrenheit ? "F" : "C");
 }
 
-/* Popisek tlacitka "ZHASNOUT PO". Potrebuje ho i build_nastav(), aby
- * tlacitko uz pri stavbe ukazovalo hodnotu nactenou z NVS a ne natvrdo
- * zadane "nikdy". */
-static void blank_label(char *buf, size_t n, uint32_t s)
+/* Doba necinnosti slovem. Je zvlast, protoze ji krome tlacitka
+ * "ZHASNOUT PO" ukazuje i radek profilu v dialogu jasu. */
+static void blank_text(char *b, size_t n, uint32_t s)
 {
-    if (s == 0)      snprintf(buf, n, "%s", T(STR_BLANK_NEVER));
-    else if (s < 60) snprintf(buf, n, "%u s", (unsigned)s);
-    else             snprintf(buf, n, "%u min", (unsigned)(s / 60));
+    if (s == 0)      snprintf(b, n, "%s", T(STR_BLANK_NEVER));
+    else if (s < 60) snprintf(b, n, "%u s", (unsigned)s);
+    else             snprintf(b, n, "%u min", (unsigned)(s / 60));
+}
+
+/* Popisek tlacitka "ZHASNOUT PO". Vola ho i build_nastav() a prepnuti
+ * profilu, aby tlacitko ukazovalo hodnotu toho profilu, ktery prave
+ * plati, a ne tu, co pri stavbe nahodou byla. */
+static void blank_btn_paint(void)
+{
+    if (!btn_blank) return;
+    char b[24];
+    blank_text(b, sizeof(b), PROF.blank_s);
+    lv_label_set_text(lv_obj_get_child(btn_blank, 0), b);
 }
 
 /* Zhasne podsviceni okamzite, bez cekani na timeout. Hlavni duvod existence:
@@ -1483,56 +1544,52 @@ static void blank_cb(lv_event_t *e)
     (void)e;
     static const uint32_t steps[] = {0, 30, 120, 600};
     int i = 0;
-    for (int k = 0; k < 4; k++) if (cfg.blank_s == steps[k]) i = k;
-    cfg.blank_s = steps[(i + 1) % 4];
+    for (int k = 0; k < 4; k++) if (PROF.blank_s == steps[k]) i = k;
+    PROF.blank_s = steps[(i + 1) % 4];
     save_cfg();
-    char b[24];
-    blank_label(b, sizeof(b), cfg.blank_s);
-    lv_label_set_text(lv_obj_get_child(btn_blank, 0), b);
+    blank_btn_paint();
 }
 
 /* ---------------------------------------------------------------------
- * Jas podsviceni
+ * Jas podsviceni a profily
  *
  * Tlacitka, ne posuvnik. Posuvnik vyzaduje trefit se a pak jeste
  * udrzet prst na jednom miste; za jizdy se obe veci nepovedou. Tlacitko
  * ma pevnou polohu, takze se da zmacknout naslepo.
  *
- * Dialog ma RADEK NA KAZDY REZIM: vlevo rezim i s jeho ulozenou
- * hodnotou, vpravo jeho urovne. Driv platily urovne pro prave zapnuty
- * rezim a prepinalo se jednim tlacitkem DEN/NOC: nebylo videt, co je
- * ulozene v tom druhem, a nocni uroven slo nastavit jen pres prepnuti
- * rezimu. Ted je na jeden pohled videt, ktery rezim bezi (silna svetla
- * obruba), co ma ulozeno ten druhy (tlumena obruba u jeho urovne), a
- * nocni uroven je jedno tuknuti misto tri.
+ * Dialog ma RADEK NA KAZDY PROFIL: vlevo jmeno profilu i s tim, co v
+ * nem je (jas a zhasnuti), vpravo pet urovni jasu. Driv tu byly dva
+ * radky DEN a NOC a prepinalo se mezi nimi; profily to zobecnily na
+ * tri a pribralo k nim zhasinani. Zustalo to podstatne: na jeden
+ * pohled je videt, ktery profil bezi (silna svetla obruba), co maji
+ * ulozene ty ostatni, a uroven kterehokoliv z nich jde zmenit, aniz by
+ * se do nej muselo prepnout.
  *
- * Pod radky je treti rezim PODLE VOZU. Vozidlo stav osvetleni po
- * sbernici hlasi, ale CAN jeste na UI napojeny neni, takze tlacitko
- * neni klikaci a stoji vedle nej duvod. Predstirat funkci, ktera neni,
- * je horsi nez ji nenabidnout.
+ * PODLE VOZU je ctvrta moznost, ktera zatim nejde: vozidlo stav
+ * osvetleni po sbernici hlasi, ale CAN jeste na UI napojeny neni.
+ * Stoji proto u nadpisu jako poznamka, ne jako tlacitko - predstirat
+ * funkci, ktera neni, je horsi nez ji nenabidnout.
  *
- * Mrizka je 5 urovni x 2 rezimy. Na 800 px vyjde uroven 104 px siroka =
- * 12,2 mm, tedy pod 14 mm z docs/ui.md - pet urovni vedle popisku
- * rezimu se sirsich nevejde. Vyska 128 px = 15,0 mm je nad doporucenim,
- * mezery 8 px odstup jeste zvetsuji a jas se meni jednim tuknutim, ne
- * v serii, takze to je prijatelna cena za to, ze jsou oba rezimy videt
- * najednou.
+ * Mrizka je 5 urovni x 3 profily. Na 800 px vyjde uroven 104 px siroka
+ * = 12,2 mm, tedy pod 14 mm z docs/ui.md - pet urovni vedle jmena
+ * profilu se sirsich nevejde. Vyska radku 120 px = 14,1 mm uz
+ * doporuceni splnuje a tri radky i s mezerami se do 480 px vejdou.
  * ------------------------------------------------------------------- */
-#define BL_ROW_H    128
-#define BL_ROW_Y(m) (104 + (m) * (BL_ROW_H + 8))
-#define BL_MODE_W   180
-#define BL_MODE_X   20
+#define BL_ROW_H    120
+#define BL_ROW_GAP  6
+#define BL_ROW_Y(m) (96 + (m) * (BL_ROW_H + BL_ROW_GAP))
+#define BL_PROF_W   180
+#define BL_PROF_X   20
 #define BL_LVL_W    104
 #define BL_LVL_X(i) (212 + (i) * (BL_LVL_W + 8))
-#define BL_VEH_Y    (BL_ROW_Y(BL_MODES - 1) + BL_ROW_H + 8)
-#define BL_VEH_H    86
-#define BL_TOP_X    548
-#define BL_TOP_W    216
+#define BL_NOTE_X   330
+#define BL_NOTE_W   320
 
-/* obsluha tlacitka urovne dostane rezim i procenta v jednom cisle */
+_Static_assert(BL_ROW_Y(UI_PROFILES - 1) + BL_ROW_H <= 480,
+               "radky profilu by prelezly spodni hranu obrazovky");
+
+/* obsluha tlacitka urovne dostane profil i procenta v jednom cisle */
 #define BL_UD(m, p) ((void *)(intptr_t)((m) * 1000 + (p)))
-
-static int bl_mode_level(int m) { return m ? cfg.bright_night : cfg.bright_day; }
 
 /* Popisek tlacitka JAS v nastaveni. Je i v build_nastav(), aby tlacitko
  * uz pri stavbe ukazovalo uroven z NVS a ne natvrdo zadanou. */
@@ -1544,104 +1601,95 @@ static void bright_btn_paint(void)
     lv_label_set_text(lv_obj_get_child(btn_bright, 0), b);
 }
 
-/* Prepinac den/noc v nastaveni ukazuje, ktery rezim prave bezi. */
-static void daynight_btn_paint(void)
+/* Tlacitko PROFIL v nastaveni rika, ktery profil prave plati. */
+static void profile_btn_paint(void)
 {
-    if (!btn_daynight) return;
-    lv_label_set_text(lv_obj_get_child(btn_daynight, 0),
-                      T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY));
+    if (!btn_profile) return;
+    lv_label_set_text(lv_obj_get_child(btn_profile, 0), T(PROF_STR[cfg.profile]));
 }
 
-/* Oba radky dialogu najednou: nazev rezimu s jeho hodnotou a vybrana
- * uroven v kazdem z nich. Vypln tlacitek se nemeni - modra a kostena
- * maji v teto aplikaci pevny vyznam (zadano / skutecnost) a vyber mezi
- * ne nepatri, takze vyber nese obruba. */
+/* Vsechny radky dialogu najednou: jmeno profilu s tim, co v nem je, a
+ * vybrana uroven v kazdem z nich. Vypln tlacitek se nemeni - modra a
+ * kostena maji v teto aplikaci pevny vyznam (zadano / skutecnost) a
+ * vyber mezi ne nepatri, takze vyber nese obruba. */
 static void bl_rows_paint(void)
 {
-    int live = cfg.night ? 1 : 0;
-    for (int m = 0; m < BL_MODES; m++) {
-        if (btn_bl_mode[m]) {
-            char cap[40];
-            snprintf(cap, sizeof(cap), "%s\n%d %%",
-                     T(m ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY), bl_mode_level(m));
-            lv_label_set_text(lv_obj_get_child(btn_bl_mode[m], 0), cap);
-            lv_obj_set_style_bg_color(btn_bl_mode[m],
-                lv_color_hex(m == live ? C_RULE : C_PANEL), 0);
-            lv_obj_set_style_border_color(btn_bl_mode[m],
-                lv_color_hex(m == live ? C_BRIGHT : C_RULE), 0);
-            lv_obj_set_style_border_width(btn_bl_mode[m], m == live ? 3 : 1, 0);
+    for (int m = 0; m < UI_PROFILES; m++) {
+        bool live = (m == cfg.profile);
+        if (btn_bl_prof[m]) {
+            char blank[24], cap[64];
+            blank_text(blank, sizeof(blank), cfg.prof[m].blank_s);
+            snprintf(cap, sizeof(cap), "%s\n%d %%\n%s",
+                     T(PROF_STR[m]), cfg.prof[m].bright, blank);
+            lv_label_set_text(lv_obj_get_child(btn_bl_prof[m], 0), cap);
+            lv_obj_set_style_bg_color(btn_bl_prof[m],
+                lv_color_hex(live ? C_RULE : C_PANEL), 0);
+            lv_obj_set_style_border_color(btn_bl_prof[m],
+                lv_color_hex(live ? C_BRIGHT : C_RULE), 0);
+            lv_obj_set_style_border_width(btn_bl_prof[m], live ? 3 : 1, 0);
         }
         for (int i = 0; i < BL_LEVELS; i++) {
             if (!btn_bl_level[m][i]) continue;
-            bool sel = BL_LEVEL[i] == bl_mode_level(m);
+            bool sel = BL_LEVEL[i] == cfg.prof[m].bright;
             lv_obj_set_style_border_color(btn_bl_level[m][i],
-                lv_color_hex(sel ? (m == live ? C_BRIGHT : C_LABEL) : C_RULE), 0);
+                lv_color_hex(sel ? (live ? C_BRIGHT : C_LABEL) : C_RULE), 0);
             lv_obj_set_style_border_width(btn_bl_level[m][i], sel ? 3 : 1, 0);
         }
     }
 }
 
-/* Ikonka v horni liste se prekresluje spolu s dialogem; definice je az
- * u jeji kresby, tady staci ohlaska. */
-static void dn_icon_paint(void);
+/* Prepinac v horni liste se prekresluje spolu se zbytkem; definice je
+ * az u jeho kresby, tady staci ohlaska. */
+static void prof_bar_paint(void);
+
+/* Jedine misto, kde se profil meni - at uz na nej tukne radek v
+ * dialogu, tlacitko v nastaveni nebo prepinac v horni liste. Vsechny
+ * tri cesty tim delaji totez vcetne ulozeni do NVS a vsechna mista v
+ * UI se prekresli, takze se nemuzou rozejit. */
+static void profile_apply(void)
+{
+    bl_apply();                 /* jas noveho profilu plati hned */
+    save_cfg();
+    profile_btn_paint();
+    prof_bar_paint();
+    blank_btn_paint();
+    bl_rows_paint();
+    bright_btn_paint();
+}
+
+static void profile_set(int p)
+{
+    if (p < 0 || p >= UI_PROFILES || p == cfg.profile) return;
+    cfg.profile = p;
+    profile_apply();
+}
+
+/* V dialogu se profil VOLI - radek rika, ktery to bude... */
+static void bl_prof_cb(lv_event_t *e)
+{
+    profile_set((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+/* ...kdezto tlacitko v nastaveni a prepinac v liste profily STRIDAJI.
+ * Tri profily znamenaji nanejvys dve tuknuti na kterykoliv z nich,
+ * takze samostatna nabidka by stala vic doteku, nez kolik usetri. */
+static void profile_cycle_cb(lv_event_t *e)
+{
+    (void)e;
+    profile_set((cfg.profile + 1) % UI_PROFILES);
+}
+
 static void bl_level_cb(lv_event_t *e)
 {
     int ud = (int)(intptr_t)lv_event_get_user_data(e);
     int m = ud / 1000, p = ud % 1000;
-    if (m) cfg.bright_night = p;
-    else   cfg.bright_day = p;
-    /* Uroven toho druheho rezimu se jen ulozi: menit kvuli ni jas,
-     * ktery prave sviti, by bylo prekvapeni. */
-    if (m == (cfg.night ? 1 : 0)) bl_apply();
+    cfg.prof[m].bright = p;
+    /* Uroven ciziho profilu se jen ulozi: menit kvuli ni jas, ktery
+     * prave sviti, by bylo prekvapeni. */
+    if (m == cfg.profile) bl_apply();
     save_cfg();
     bl_rows_paint();
     bright_btn_paint();
-}
-
-/* Jedine misto, kde se rezim meni - at uz na nej tukne dialog, tlacitko
- * v nastaveni nebo ikonka v horni liste. Vsechny tri tim delaji totez
- * vcetne ulozeni do NVS a vsechna tri mista se prekresli. */
-static void bl_mode_apply(void)
-{
-    bl_apply();
-    save_cfg();
-    daynight_btn_paint();
-    dn_icon_paint();
-    bl_rows_paint();
-    bright_btn_paint();
-}
-
-/* V dialogu se rezim VOLI (tlacitko rika, ktery to bude)... */
-static void bl_mode_cb(lv_event_t *e)
-{
-    cfg.night = (int)(intptr_t)lv_event_get_user_data(e) != 0;
-    bl_mode_apply();
-}
-
-/* ...kdezto tlacitko v nastaveni a ikonka v liste mezi rezimy PREPINAJI. */
-static void daynight_cb(lv_event_t *e)
-{
-    (void)e;
-    cfg.night = !cfg.night;
-    bl_mode_apply();
-}
-
-static void bl_topbar_paint(void)
-{
-    if (!btn_bl_topbar) return;
-    char cap[48];
-    snprintf(cap, sizeof(cap), "%s\n%s", T(STR_BRIGHT_TOPBAR),
-             T(cfg.topbar_dn ? STR_ON : STR_OFF));
-    lv_label_set_text(lv_obj_get_child(btn_bl_topbar, 0), cap);
-}
-
-static void bl_topbar_cb(lv_event_t *e)
-{
-    (void)e;
-    cfg.topbar_dn = !cfg.topbar_dn;
-    save_cfg();
-    bl_topbar_paint();
-    dn_icon_paint();
 }
 
 static void bright_cb(lv_event_t *e)
@@ -1649,10 +1697,21 @@ static void bright_cb(lv_event_t *e)
     (void)e;
     lv_obj_t *m = modal_open(T(STR_BRIGHT_TITLE), C_ACTUAL);
 
-    for (int md = 0; md < BL_MODES; md++) {
-        btn_bl_mode[md] = mk_button(m, BL_MODE_X, BL_ROW_Y(md), BL_MODE_W,
-                                    BL_ROW_H, "", UI_FONT_28, C_DEMAND,
-                                    bl_mode_cb, (void *)(intptr_t)md);
+    /* Vedle nadpisu dve vety: co profil nese a co plati pro vsechny
+     * (aby nikdo nehledal, proc prepnuti profilu nezmeni jazyk), a
+     * ctvrta moznost i s duvodem, proc zatim neni. Jeden odstavec, ne
+     * dva popisky - at se pri delsim prekladu nemuzou prekryt. */
+    char note[256];
+    snprintf(note, sizeof(note), "%s\n%s - %s", T(STR_PROF_HINT),
+             T(STR_BRIGHT_VEHICLE), T(STR_BRIGHT_VEHICLE_NA));
+    lv_obj_t *nl = mk_lbl(m, note, UI_FONT_14, C_LABEL, BL_NOTE_X, 12);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(nl, BL_NOTE_W);
+
+    for (int md = 0; md < UI_PROFILES; md++) {
+        btn_bl_prof[md] = mk_button(m, BL_PROF_X, BL_ROW_Y(md), BL_PROF_W,
+                                    BL_ROW_H, "", UI_FONT_24, C_DEMAND,
+                                    bl_prof_cb, (void *)(intptr_t)md);
         for (int i = 0; i < BL_LEVELS; i++) {
             char cap[8];
             snprintf(cap, sizeof(cap), "%d %%", BL_LEVEL[i]);
@@ -1663,22 +1722,224 @@ static void bright_cb(lv_event_t *e)
         }
     }
     bl_rows_paint();
-
-    /* Rezim podle vozu: zadna obsluha, tlumene barvy a duvod vedle. */
-    lv_obj_t *veh = mk_panel(m, BL_MODE_X, BL_VEH_Y, BL_MODE_W, BL_VEH_H);
-    lv_obj_set_style_radius(veh, 6, 0);
-    lv_obj_t *vl = mk_lbl(veh, T(STR_BRIGHT_VEHICLE), UI_FONT_20, C_LABEL, 0, 0);
-    lv_obj_center(vl);
-    mk_lbl(m, T(STR_BRIGHT_VEHICLE_NA), UI_FONT_16, C_LABEL,
-           BL_LVL_X(0), BL_VEH_Y + 32);
-
-    /* Rychly prepinac v horni liste je volitelny: lista je uzka a ne
-     * kazdy ho tam chce. Zapina se tady, aby bylo nastaveni jasu na
-     * jednom miste, a drzi se v NVS. */
-    btn_bl_topbar = mk_button(m, BL_TOP_X, BL_VEH_Y, BL_TOP_W, BL_VEH_H, "",
-                              UI_FONT_16, C_DEMAND, bl_topbar_cb, NULL);
-    bl_topbar_paint();
 }
+
+/* ---------------------------------------------------------------------
+ * Reset a udrzba
+ *
+ * Ctyri akce, ktere bud neco nevratne smazou, nebo desku restartuji.
+ * Kazda je za potvrzenim drzenim (show_confirm) a u kazde je PRED
+ * potvrzenim videt, co presne zmizi, a to skutecnymi cisly: kolik siti
+ * je ulozeno a jak se jmenuji, co maji profily v sobe, kolik ramcu
+ * citace napocitaly. "Reset nastaveni" bez dalsiho je slib naslepo a
+ * clovek ho odklikne, aniz by vedel, o co prijde.
+ *
+ * Cisla se ctou az pri otevreni dialogu, takze nemuzou zestarnout, a
+ * jsou uz na tlacitku - ne az v potvrzeni. Akce, kterou deska neumi
+ * (host na ni nema ukazatel), tlacitko vubec nedostane; na jeho miste
+ * je tlumeny panel s duvodem.
+ *
+ * Jazyk reset nemeni. Je to jedina polozka, ktera umi zpusobit, ze
+ * clovek po resetu neprecte, co na desce stoji - vcetne cesty, kudy to
+ * vzit zpatky. Je to napsane i v potvrzeni, aby to nebylo prekvapeni.
+ * ------------------------------------------------------------------- */
+#define RST_W    360
+#define RST_H    120
+#define RST_X(c) (30 + (c) * (RST_W + 20))
+#define RST_Y(r) (96 + (r) * (RST_H + 16))
+
+static int host_wifi_saved_count(void)
+{
+    return (host && host->wifi_saved_count) ? host->wifi_saved_count() : 0;
+}
+
+static const char *host_wifi_saved_ssid(int i)
+{
+    const char *s = (host && host->wifi_saved_ssid) ? host->wifi_saved_ssid(i) : NULL;
+    return s ? s : "";
+}
+
+static bool host_can_stats(void)
+{
+    return host && host->can_stats && host->can_stats_reset;
+}
+
+/* Doba behu jako h:mm:ss. Ukazuje ji potvrzeni restartu i diagnostika. */
+static void uptime_text(char *b, size_t n)
+{
+    unsigned up = (unsigned)(lv_tick_get() / 1000);
+    snprintf(b, n, "%u:%02u:%02u", up / 3600, (up / 60) % 60, up % 60);
+}
+
+/* Co je v profilech prave ted, radek na profil, a pod nimi spolecna
+ * cast. Presne tohle reset prepise. */
+static void profiles_text(char *b, int n)
+{
+    int at = 0;
+    for (int i = 0; i < UI_PROFILES; i++) {
+        char blank[24];
+        blank_text(blank, sizeof(blank), cfg.prof[i].blank_s);
+        at = str_add(b, at, n, "%s   %d %%   %s\n",
+                     T(PROF_STR[i]), cfg.prof[i].bright, blank);
+    }
+    /* Jednotky nepatri zadnemu profilu, takze stoji oddelene a
+     * s popiskem - samotne "mph  C" by se cetlo jako dalsi profil. */
+    str_add(b, at, n, "\n%s %s   %s %s",
+            T(STR_SET_SPEED), cfg.mph ? "mph" : "km/h",
+            T(STR_SET_TEMP), cfg.fahrenheit ? "F" : "C");
+}
+
+/* Vsechny citace sbernice, jak je drzi CAN. Jmena jsou shodna s
+ * diagnostikou, at se to da porovnat. */
+static void can_stats_text(char *b, int n)
+{
+    const can_stats_t *s = host->can_stats();
+    str_add(b, 0, n,
+            "rx %u   tx %u\n"
+            "tx_fail %u   rx_lost %u   ring_lost %u\n"
+            "bus_err %u   arb_lost %u   bus_off %u",
+            (unsigned)s->rx, (unsigned)s->tx, (unsigned)s->tx_fail,
+            (unsigned)s->rx_lost, (unsigned)s->ring_lost,
+            (unsigned)s->bus_err, (unsigned)s->arb_lost,
+            (unsigned)s->bus_off);
+}
+
+static void reset_cb(lv_event_t *e);
+
+/* ---- vychozi nastaveni ---- */
+static void reset_cfg_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int i = 0; i < UI_PROFILES; i++) cfg.prof[i] = ui_profile_default(i);
+    cfg.profile    = UI_PROF_DAY;
+    cfg.mph        = false;
+    cfg.fahrenheit = false;
+    save_cfg();
+    /* Zmenilo se vsechno naraz vcetne jednotek na ukazatelich, takze se
+     * UI postavi znovu - stejne jako po zmene jazyka. Hotovou stranku
+     * nastaveni s vychozimi hodnotami zaroven clovek uvidi jako doklad,
+     * ze se reset opravdu stal. */
+    ui_rebuild();
+}
+
+static void reset_cfg_cb(lv_event_t *e)
+{
+    (void)e;
+    char list[192], body[448];
+    profiles_text(list, (int)sizeof(list));
+    snprintf(body, sizeof(body), T(STR_RESET_CFG_BODY), UI_PROFILES, list);
+    show_confirm(T(STR_RESET_CFG), body, C_DEFICIT, reset_cfg_ok_cb);
+}
+
+/* ---- vsechny ulozene site ---- */
+static void reset_wifi_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    if (host && host->wifi_forget_all) host->wifi_forget_all();
+    reset_cb(NULL);             /* zpatky do nabidky, uz s novymi cisly */
+}
+
+static void reset_wifi_cb(lv_event_t *e)
+{
+    (void)e;
+    int wn = host_wifi_saved_count();
+    if (wn <= 0) return;        /* neni co mazat; tlacitko je nekliklatelne */
+    char list[256], body[512];
+    int at = 0;
+    for (int i = 0; i < wn; i++)
+        at = str_add(list, at, (int)sizeof(list), "%s%s",
+                     i ? "\n" : "", host_wifi_saved_ssid(i));
+    snprintf(body, sizeof(body), T(STR_RESET_WIFI_BODY), wn, list);
+    show_confirm(T(STR_RESET_WIFI), body, C_DEFICIT, reset_wifi_ok_cb);
+}
+
+/* ---- citace sbernice ---- */
+static void reset_can_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    if (host_can_stats()) host->can_stats_reset();
+    reset_cb(NULL);
+}
+
+static void reset_can_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!host_can_stats()) return;
+    char rows[192], body[448];
+    can_stats_text(rows, (int)sizeof(rows));
+    snprintf(body, sizeof(body), T(STR_RESET_CAN_BODY), rows);
+    show_confirm(T(STR_RESET_CAN), body, C_DEFICIT, reset_can_ok_cb);
+}
+
+/* ---- restart desky ---- */
+static void reset_reboot_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    /* Na desce se odtud uz nevraci. V simulatoru ano, takze se dialog
+     * musi zavrit, jinak by zustal viset nad strankou. */
+    if (host && host->reboot) host->reboot();
+    modal_close_cb(NULL);
+}
+
+static void reset_reboot_cb(lv_event_t *e)
+{
+    (void)e;
+    char up[24], body[320];
+    uptime_text(up, sizeof(up));
+    snprintf(body, sizeof(body), T(STR_RESET_REBOOT_BODY), up);
+    show_confirm(T(STR_RESET_REBOOT), body, C_ACTUAL, reset_reboot_ok_cb);
+}
+
+/* Tlacitko nabidky: nahore co to udela, dole cislo, ktereho se to
+ * tyka. Bez obsluhy (cb == NULL) vznikne tlumene, protoze neni co delat
+ * - mazat nulu siti neni akce, jen zklamani. */
+static void reset_btn(lv_obj_t *m, int col, int row, int title,
+                      const char *sub, lv_event_cb_t cb)
+{
+    char cap[128];
+    snprintf(cap, sizeof(cap), "%s\n%s", T(title), sub);
+    lv_obj_t *b = mk_button(m, RST_X(col), RST_Y(row), RST_W, RST_H, cap,
+                            UI_FONT_20, C_DEFICIT, cb, NULL);
+    lv_obj_set_style_text_align(lv_obj_get_child(b, 0), LV_TEXT_ALIGN_CENTER, 0);
+    if (!cb) {
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0),
+                                    lv_color_hex(C_LABEL), 0);
+    }
+}
+
+static void reset_open(void)
+{
+    lv_obj_t *m = modal_open(T(STR_RESET_TITLE), C_DEFICIT);
+    char sub[96];
+
+    snprintf(sub, sizeof(sub), T(STR_RESET_CFG_SUB), UI_PROFILES);
+    reset_btn(m, 0, 0, STR_RESET_CFG, sub, reset_cfg_cb);
+
+    int wn = host_wifi_saved_count();
+    snprintf(sub, sizeof(sub), T(STR_RESET_WIFI_SUB), wn);
+    reset_btn(m, 1, 0, STR_RESET_WIFI, sub, wn > 0 ? reset_wifi_cb : NULL);
+
+    if (host_can_stats()) {
+        const can_stats_t *s = host->can_stats();
+        snprintf(sub, sizeof(sub), T(STR_RESET_CAN_SUB),
+                 (unsigned)s->rx, (unsigned)s->tx);
+        reset_btn(m, 0, 1, STR_RESET_CAN, sub, reset_can_cb);
+    } else {
+        reset_btn(m, 0, 1, STR_RESET_CAN, T(STR_RESET_NA), NULL);
+    }
+
+    if (host && host->reboot) {
+        char up[24];
+        uptime_text(up, sizeof(up));
+        snprintf(sub, sizeof(sub), T(STR_RESET_REBOOT_SUB), up);
+        reset_btn(m, 1, 1, STR_RESET_REBOOT, sub, reset_reboot_cb);
+    } else {
+        reset_btn(m, 1, 1, STR_RESET_REBOOT, T(STR_RESET_NA), NULL);
+    }
+}
+
+static void reset_cb(lv_event_t *e) { (void)e; reset_open(); }
 
 /* ---------------- stranky ---------------- */
 static lv_obj_t *mk_page(lv_obj_t *scr)
@@ -1820,8 +2081,14 @@ static void build_dpf(lv_obj_t *scr)
 }
 
 /* Nastaveni ma tri rady. Prvni ctyri tlacitka prepinaji jednu hodnotu
- * tuknutim, druha rada otevira dialogy a prepina den/noc, treti nese
- * vypinac displeje a diagnostiku.
+ * tuknutim, druha rada otevira dialogy a strida profily, treti nese
+ * vypinac displeje, reset a stav pripojeni.
+ *
+ * Poradi v druhe rade je PROFIL a teprve pak JAS: jas uz je vlastnost
+ * profilu, takze se nejdriv rekne ktereho a pak kolik. Na desce, ktera
+ * stmivat neumi, zustane profil na svem miste a misto tlacitka jasu je
+ * vysvetleni proc - predstirat ovladani, ktere nic nedela, by bylo
+ * horsi nez ho nemit.
  *
  * Nic se nesmi dostat pod SET_BOTTOM: od tam dolu stranku prekryva
  * vysunuta lista stranek. Lista vyrostla kvuli vetsim tlacitkum
@@ -1845,7 +2112,6 @@ static void build_nastav(lv_obj_t *scr)
 {
     lv_obj_t *p = page[PG_NASTAV] = mk_page(scr);
     const lv_coord_t BW = SET_BW, BH = SET_BH;
-    char b[24];
 
     mk_lbl(p, T(STR_SET_SPEED), UI_FONT_14, C_LABEL, SET_X(0), 8);
     btn_units_v = mk_button(p, SET_X(0), SET_ROW1, BW, BH,
@@ -1855,10 +2121,12 @@ static void build_nastav(lv_obj_t *scr)
     btn_units_t = mk_button(p, SET_X(1), SET_ROW1, BW, BH,
                             cfg.fahrenheit ? "F" : "C",
                             UI_FONT_24, C_DEMAND, units_t_cb, NULL);
+    /* ZHASNOUT PO patri profilu, takze popisek tlacitka dosadi az
+     * blank_btn_paint() podle toho, ktery profil prave plati. */
     mk_lbl(p, T(STR_SET_BLANK), UI_FONT_14, C_LABEL, SET_X(2), 8);
-    blank_label(b, sizeof(b), cfg.blank_s);
-    btn_blank = mk_button(p, SET_X(2), SET_ROW1, BW, BH, b,
+    btn_blank = mk_button(p, SET_X(2), SET_ROW1, BW, BH, "",
                           UI_FONT_24, C_DEMAND, blank_cb, NULL);
+    blank_btn_paint();
     mk_lbl(p, T(STR_SET_LANG), UI_FONT_14, C_LABEL, SET_X(3), 8);
     mk_button(p, SET_X(3), SET_ROW1, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
               C_SAGE, lang_cb, NULL);
@@ -1867,25 +2135,22 @@ static void build_nastav(lv_obj_t *scr)
     mk_button(p, 20, SET_ROW2, 320, BH, T(STR_WIFI_PICK), UI_FONT_24,
               C_DEMAND, wifi_scan_cb, NULL);
 
-    /* Jas. Kdyz deska stmivat neumi, nevznikne ani jedno tlacitko a na
-     * jejich miste je vysvetleni proc - predstirat ovladani, ktere nic
-     * nedela, by bylo horsi nez ho nemit. */
-    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, 360, SET_ROW2 - 20);
+    mk_lbl(p, T(STR_SET_PROFILE), UI_FONT_14, C_LABEL, 360, SET_ROW2 - 20);
+    btn_profile = mk_button(p, 360, SET_ROW2, BW, BH, "", UI_FONT_24,
+                            C_SAGE, profile_cycle_cb, NULL);
+    profile_btn_paint();
+
+    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, 540, SET_ROW2 - 20);
     btn_bright = NULL;
-    btn_daynight = NULL;
     if (bl_can_dim()) {
-        btn_bright = mk_button(p, 360, SET_ROW2, BW, BH, "", UI_FONT_24,
+        btn_bright = mk_button(p, 540, SET_ROW2, 170, BH, "", UI_FONT_24,
                                C_ACTUAL, bright_cb, NULL);
         bright_btn_paint();
-        mk_lbl(p, T(STR_SET_DAYNIGHT), UI_FONT_14, C_LABEL, 540, SET_ROW2 - 20);
-        btn_daynight = mk_button(p, 540, SET_ROW2, 170, BH, "", UI_FONT_24,
-                                 C_DEMAND, daynight_cb, NULL);
-        daynight_btn_paint();
     } else {
         lv_obj_t *na = mk_lbl(p, T(STR_BRIGHT_NA), UI_FONT_14, C_LABEL,
-                              360, SET_ROW2);
+                              540, SET_ROW2);
         lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(na, 350);
+        lv_obj_set_width(na, 176);
     }
 
     lbl_wifi = mk_lbl(p, T(STR_WIFI_NOT_CONN), UI_FONT_20, C_LABEL,
@@ -1896,8 +2161,15 @@ static void build_nastav(lv_obj_t *scr)
      * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
      * Zhasina natvrdo, bez stmivani: hlavni duvod existence je merit na
      * ploskach BL/GND a tam je potreba znamy stav, ne prejezd. */
-    mk_button(p, 360, SET_ROW3, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
+    mk_button(p, 360, SET_ROW3, 170, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
               C_ACTUAL, display_off_cb, NULL);
+
+    /* Reset stoji az za vsim, co se da nastavit, a jeste jednou za
+     * dialogem - nemuze se na nej sahnout omylem pri hrani s jednotkami.
+     * Vic nez po 716 px nesmi nic sahnout: od 736 px je pravy sloupec
+     * DPF a stranka je od tam orezana. */
+    mk_button(p, 546, SET_ROW3, 170, BH, T(STR_SET_MAINT), UI_FONT_24,
+              C_DEFICIT, reset_cb, NULL);
 }
 
 /* Sloupec je vysoky jako stranka, ale jeho obsah musi zustat nad uchytem
@@ -1933,37 +2205,41 @@ static void layout_rail(void)
 }
 
 /* ---------------------------------------------------------------------
- * Rychly prepinac den/noc v horni liste
+ * Prepinac profilu v horni liste
  *
- * Volitelny, zapina se v dialogu jasu a drzi se v NVS: lista je uzka a
- * ne kazdy chce mit v ni dalsi vec. Dela PRESNE totez co prepinac v
- * nastaveni - obe cesty vedou do daynight_cb(), takze se nemuzou
- * rozejit ani v tom, ze se stav uklada.
+ * Profil se meni casteji nez cokoliv jineho - pri kazdem vjezdu do
+ * tmy, pri kazdem navratu k verstaku - takze musi byt na dosah z
+ * KAZDE stranky, ne tri obrazovky hluboko. Horni lista je jedine
+ * misto, ktere je videt porad. Driv tu byl prepinac den/noc a byl
+ * volitelny; profilu se to uz netyka, protoze je to jedina rychla
+ * cesta a schovany vypinac by z ni udelal hledacku.
  *
- * KRESBA je slozena z obycejnych objektu LVGL, ne ze znaku fontu:
- * Montserrat nema slunicko ani mesicek (a diakritiku taky nemel, coz
- * nas uz jednou stalo cas), LV_SYMBOL_* je nema take a lv_canvas by si
- * kvuli dvema obrazkum rekl o vlastni obrazovou pamet. Slunce je tedy
- * kolecko se ctyrmi paprsky a ctyrmi teckami v uhloprickach, mesic je
- * kolecko, kteremu druhe kolecko v barve listy ukousne srp. Obe kresby
- * vzniknou jednou a pak se jen jedna z nich schova.
+ * Tuknuti strida profily dokola a vede do profile_cycle_cb() stejne
+ * jako tlacitko v nastaveni, takze se obe cesty nemuzou rozejit.
  *
- * VEDLE IKONKY JE SLOVO (DEN / NOC). Samotny obrazek rika, ktery rezim
- * bezi, jen tomu, kdo uz vi, ze se tim da prepinat; se slovem to pozna
- * i ten, kdo to vidi poprve.
+ * CO JE VIDET: jmeno profilu a vedle nej tri rysky, z nichz sviti ta
+ * prave platna. Samotne jmeno by stacilo tomu, kdo profily zna; rysky
+ * navic rikaji, KOLIK jich je a kolikaty je ten dnesni, takze se da
+ * prepnuti zkontrolovat kratkym pohledem i periferne. Kresba je z
+ * obycejnych objektu LVGL, ne ze znaku fontu - Montserrat zadnou
+ * takovou znacku nema a lv_canvas by si rekl o vlastni obrazovou
+ * pamet.
  *
- * DOTYKOVY CIL je 120 x 64 px = 14,1 x 7,5 mm. Na sirku doporuceni 14 mm
- * z docs/ui.md plati, na vysku NE a splnit se neda: horni lista je
- * vysoka 64 px. Aby mel cil 14 mm i na vysku, musela by lista narust na
- * 120 px a kazda stranka prijit o 56 px - za jedno tlacitko, ktere je
- * navic volitelne a ma nahradu v nastaveni, to nestoji. Minuti stoji
- * jedno tuknuti navic, ne chybnou akci.
+ * DOTYKOVY CIL je 164 x 64 px = 19,2 x 7,5 mm. Na sirku doporuceni
+ * 14 mm z docs/ui.md plati, na vysku NE a splnit se neda: horni lista
+ * je vysoka 64 px a kvuli jednomu tlacitku by musela narust na 120 px,
+ * tedy kazda stranka prijit o 56 px. Minuti stoji jedno tuknuti navic,
+ * ne chybnou akci, a nahrada je v nastaveni.
  * ------------------------------------------------------------------- */
-#define DN_W   120
+#define DN_W   164
 #define DN_X   (800 - DN_W - 8)
-#define DN_D   40                       /* strana ctverce s kresbou */
-#define DN_IX  6                        /* kresba vlevo, slovo vpravo */
-#define DN_IY  ((TOP_H - DN_D) / 2)
+#define DN_MW  8                        /* ryska profilu: sirka */
+#define DN_MG  5                        /* mezera mezi ryskami */
+#define DN_MH  28                       /* vyska platne rysky */
+#define DN_MHD 12                       /* a te ostatni */
+#define DN_MX  8                        /* rysky vlevo, jmeno vpravo */
+#define DN_MB  ((TOP_H + DN_MH) / 2)    /* spolecna spodni hrana rysek */
+#define DN_LX  (DN_MX + UI_PROFILES * (DN_MW + DN_MG) + 4)
 
 static lv_obj_t *mk_shape(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
                           lv_coord_t w, lv_coord_t h, lv_coord_t r, uint32_t c)
@@ -1980,58 +2256,35 @@ static lv_obj_t *mk_shape(lv_obj_t *p, lv_coord_t x, lv_coord_t y,
     return o;
 }
 
-/* prusvitny ctverec, do ktereho se kresli jedna ikonka */
-static lv_obj_t *dn_canvas(lv_obj_t *p)
+static void prof_bar_paint(void)
 {
-    lv_obj_t *o = mk_shape(p, DN_IX, DN_IY, DN_D, DN_D, 0, C_PANEL);
-    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
-    return o;
-}
-
-static void dn_icon_paint(void)
-{
-    if (!dn_btn) return;
-    if (cfg.topbar_dn) lv_obj_clear_flag(dn_btn, LV_OBJ_FLAG_HIDDEN);
-    else               lv_obj_add_flag(dn_btn, LV_OBJ_FLAG_HIDDEN);
-    if (cfg.night) {
-        lv_obj_add_flag(dn_sun, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(dn_moon, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_clear_flag(dn_sun, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(dn_moon, LV_OBJ_FLAG_HIDDEN);
+    if (!prof_btn) return;
+    for (int i = 0; i < UI_PROFILES; i++) {
+        bool live = (i == cfg.profile);
+        lv_obj_set_pos(prof_mark[i], DN_MX + i * (DN_MW + DN_MG),
+                       DN_MB - (live ? DN_MH : DN_MHD));
+        lv_obj_set_size(prof_mark[i], DN_MW, live ? DN_MH : DN_MHD);
+        lv_obj_set_style_bg_color(prof_mark[i],
+                                  lv_color_hex(live ? C_BRIGHT : C_RULE), 0);
     }
-    lv_label_set_text(dn_lbl, T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY));
+    lv_label_set_text(prof_name, T(PROF_STR[cfg.profile]));
 }
 
-static void dn_build(lv_obj_t *bar)
+static void prof_build(lv_obj_t *bar)
 {
-    /* Dotykova oblast je cela lista nad kresbou; obrazek zabira jen jeji
-     * levou tretinu, takze cil je vyrazne vetsi nez to, co je videt. */
-    dn_btn = mk_shape(bar, DN_X, 0, DN_W, TOP_H, 0, C_PANEL);
-    lv_obj_add_flag(dn_btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(dn_btn, press_cb, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(dn_btn, drag_guard_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(dn_btn, daynight_cb, LV_EVENT_CLICKED, NULL);
+    /* Dotykova oblast je cely obdelnik v liste; kresba i jmeno zabiraji
+     * jen jeho cast, takze je cil vetsi nez to, co je videt. */
+    prof_btn = mk_shape(bar, DN_X, 0, DN_W, TOP_H, 0, C_PANEL);
+    lv_obj_add_flag(prof_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(prof_btn, press_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(prof_btn, drag_guard_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(prof_btn, profile_cycle_cb, LV_EVENT_CLICKED, NULL);
 
-    /* slunce: kotouc, ctyri paprsky a ctyri tecky v uhloprickach */
-    dn_sun = dn_canvas(dn_btn);
-    mk_shape(dn_sun, 11, 11, 18, 18, LV_RADIUS_CIRCLE, C_BRIGHT);
-    mk_shape(dn_sun, 18, 0, 4, 7, 1, C_BRIGHT);
-    mk_shape(dn_sun, 18, 33, 4, 7, 1, C_BRIGHT);
-    mk_shape(dn_sun, 0, 18, 7, 4, 1, C_BRIGHT);
-    mk_shape(dn_sun, 33, 18, 7, 4, 1, C_BRIGHT);
-    mk_shape(dn_sun, 5, 5, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
-    mk_shape(dn_sun, 30, 5, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
-    mk_shape(dn_sun, 5, 30, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
-    mk_shape(dn_sun, 30, 30, 5, 5, LV_RADIUS_CIRCLE, C_BRIGHT);
+    for (int i = 0; i < UI_PROFILES; i++)
+        prof_mark[i] = mk_shape(prof_btn, 0, 0, DN_MW, DN_MH, 1, C_RULE);
 
-    /* mesic: kotouc, kteremu druhy kotouc v barve listy ukousne srp */
-    dn_moon = dn_canvas(dn_btn);
-    mk_shape(dn_moon, 8, 6, 28, 28, LV_RADIUS_CIRCLE, C_BRIGHT);
-    mk_shape(dn_moon, 0, 2, 26, 26, LV_RADIUS_CIRCLE, C_PANEL);
-
-    dn_lbl = mk_lbl(dn_btn, "", UI_FONT_16, C_LABEL, DN_IX + DN_D + 6, 22);
-    dn_icon_paint();
+    prof_name = mk_lbl(prof_btn, "", UI_FONT_16, C_BRIGHT, DN_LX, 22);
+    prof_bar_paint();
 }
 
 /* ---------------------------------------------------------------------
@@ -2127,28 +2380,11 @@ static void dbg_perf_cb(lv_event_t *e)
     dbg_perf_paint();
 }
 
-/* Pripojeni na konec bufferu, ktere nemuze prerust jeho velikost.
- * snprintf vraci delku, kterou by ZAPSAL, ne kolik zapsal - prosty soucet
- * by pri delsim textu ukazal za konec pole a dalsi volani by dostalo
- * zapornou velikost. Dnes se sem simulovana data vejdou, ale cely smysl
- * teto stranky je ukazovat jednou SKUTECNE hodnoty z CAN. */
-static int dbg_add(char *b, int at, int n, const char *fmt, ...)
-{
-    if (at >= n - 1) return n - 1;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(b + at, (size_t)(n - at), fmt, ap);
-    va_end(ap);
-    if (w < 0) return at;
-    at += w;
-    return at > n - 1 ? n - 1 : at;
-}
-
 /* Hodnoty jsou syrove: zadne jednotky, zadne zaokrouhleni na ukazatele,
  * jen cilova a zobrazena hodnota v setinach, jak je UI drzi. */
 static int dbg_val(char *b, int at, int n, const char *name, const val_t *v)
 {
-    return dbg_add(b, at, n, "%s %d %d\n", name,
+    return str_add(b, at, n, "%s %d %d\n", name,
                    (int)(v->target * 100.0f), (int)(v->shown * 100.0f));
 }
 
@@ -2158,7 +2394,7 @@ static void dbg_paint(void)
 
     char b[384];
     int n = (int)sizeof(b);
-    int at = dbg_add(b, 0, n, "page %d  nav %d  regen %d %d\n",
+    int at = str_add(b, 0, n, "page %d  nav %d  regen %d %d\n",
                      cur_page, nav_state, (int)regen_state, regen_pct);
     at = dbg_val(b, at, n, "speed", &v_speed);
     at = dbg_val(b, at, n, "rpm", &v_rpm);
@@ -2173,13 +2409,13 @@ static void dbg_paint(void)
     if (!dbg_mem) return;
     char m[192];
     int mn = (int)sizeof(m);
-    unsigned up = (unsigned)(lv_tick_get() / 1000);
-    at = dbg_add(m, 0, mn, "heap %u kB\npsram %u kB\n",
+    char up[24];
+    uptime_text(up, sizeof(up));
+    at = str_add(m, 0, mn, "heap %u kB\npsram %u kB\n",
                  host_heap_kb(), host_psram_kb());
     at += lvgl_mem_line(m + at, (size_t)(mn - at));
     if (at > mn - 1) at = mn - 1;
-    dbg_add(m, at, mn, "\nbeh %u:%02u:%02u\nfps %d.%d\nkresleni %d.%d ms",
-            up / 3600, (up / 60) % 60, up % 60,
+    str_add(m, at, mn, "\nbeh %s\nfps %d.%d\nkresleni %d.%d ms", up,
             perf_fps10 / 10, perf_fps10 % 10,
             perf_draw10 / 10, perf_draw10 % 10);
     lv_label_set_text(dbg_mem, m);
@@ -2219,7 +2455,7 @@ static void build_chrome(lv_obj_t *scr)
     mk_lbl(bar, T(STR_TOP_TEMP), UI_FONT_14, C_LABEL, 320, 8);
     lbl_temp = mk_lbl(bar, "--", UI_FONT_32, C_BRIGHT, 320, 24);
     lbl_state = mk_lbl(bar, "DEMO", UI_FONT_16, C_DEFICIT, 560, 22);
-    dn_build(bar);
+    prof_build(bar);
 
     /* Zadny panel: stejne pozadi jako obsah, zadny ramecek. Oddeluje
      * jen vlasova linka po leve hrane. */
@@ -2471,7 +2707,7 @@ void ui_tick(void)
         /* ochranna lhuta po rucnim zhasnuti - jinak by displej probudil
          * tentyz dotek, kterym se zhasinalo */
         if (now - blank_guard_ms > 1500) backlight(true);
-    } else if (cfg.blank_s && backlight_on && idle > cfg.blank_s * 1000UL) {
+    } else if (PROF.blank_s && backlight_on && idle > PROF.blank_s * 1000UL) {
         blank_begin();
     }
     bl_step();

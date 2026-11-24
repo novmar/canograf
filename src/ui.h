@@ -6,6 +6,11 @@
  * Vse, co umi jen deska, se predava pres ui_host_t. Simulator necha
  * ukazatele NULL a ui.c to musi snest.
  *
+ * Vyjimka je can/twai.h: je to cisty C bez ESP-IDF (to je az v
+ * twai.c), takze se prelozi i na hostiteli. Bere se z nej jen typ
+ * can_stats_t - vlastni citace chodi pres ukazatel v ui_host_t, aby UI
+ * nemusela znat zadnou funkci z CAN.
+ *
  * Pozn.: fonty UI maji ceskou i nemeckou diakritiku, viz src/font_ui.h.
  */
 #ifndef UI_H
@@ -13,6 +18,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "can/twai.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,22 +30,44 @@ extern "C" {
  * pred ui_build(); kdykoliv ho uzivatel zmeni, posle ho UI zpatky pres
  * ui_host_t.save_cfg.
  *
- * Jas je ulozeny dvakrat, zvlast pro den a zvlast pro noc, protoze mezi
- * nimi se prepina za jizdy a hledat pokazde spravnou uroven by bylo
- * horsi nez oslneni samotne. Automaticke prepinani podle casu tu zamerne
- * neni - RTC sice na desce je, ale cas v nem nikdo nenastavil.
+ * PROFILY. Nastaveni se deli na dve casti:
+ *
+ *   - co patri CLOVEKU, plati porad a zustava stejne: jednotky a jazyk.
+ *     Kdo cte v km/h, cte v km/h na stole v dilne i v noci za volantem,
+ *     a prepnuti profilu nesmi nikdy zpusobit, ze UI prestane byt
+ *     citelna.
+ *   - co patri SITUACI, ve ktere deska zrovna je: jas a zhasinani.
+ *     Presne tyhle dve veci chce clovek jinak na stole, jinak za jizdy
+ *     ve dne a jinak v noci, a presne kvuli nim profily existuji.
+ *
+ * Profily jsou tri a maji PEVNA JMENA (DILNA / DEN / NOC, prelozena
+ * pres i18n). Cislovani 1/2/3 by nesvazovalo, ale za jizdy v noci se
+ * cislo nepozna - clovek by musel vedet, co si pod ktery ulozil.
+ * Jmeno je jen popisek toho, KDY se profil hodi; co v nem je, urcuje
+ * uzivatel, takze svazuje jen slovem, ne obsahem.
+ *
+ * Profily zaroven nahradily drivejsi dvojici jasu den/noc i prepinac
+ * den/noc. Mit obe veci vedle sebe by znamenalo dve cesty k temuz -
+ * sest ulozenych urovni jasu a dva prepinace, ktere se umi rozejit.
  * ------------------------------------------------------------------- */
+#define UI_PROFILES 3
+
+enum { UI_PROF_SHOP = 0, UI_PROF_DAY, UI_PROF_NIGHT };
+
 typedef struct {
-    bool     mph;           /* false = km/h */
-    bool     fahrenheit;    /* false = C */
+    int      bright;        /* jas 0..100 % */
     uint32_t blank_s;       /* zhasnout po tolika vterinach; 0 = nikdy */
-    int      lang;          /* index jazyka z i18n.c, 0 = English */
-    int      bright_day;    /* jas 0..100 % ve dne */
-    int      bright_night;  /* jas 0..100 % v noci */
-    bool     night;         /* prave plati nocni uroven */
-    /* Rychly prepinac den/noc v horni liste. Volitelny, protoze lista je
-     * uzka; zapina se v dialogu jasu. Vychozi je vypnuty. */
-    bool     topbar_dn;
+} ui_profile_t;
+
+typedef struct {
+    /* spolecne pro vsechny profily */
+    bool mph;               /* false = km/h */
+    bool fahrenheit;        /* false = C */
+    int  lang;              /* index jazyka z i18n.c, 0 = English */
+
+    /* prave zvoleny profil a obsah vsech tri */
+    int          profile;   /* 0..UI_PROFILES-1 */
+    ui_profile_t prof[UI_PROFILES];
 } ui_cfg_t;
 
 typedef struct {
@@ -70,6 +99,22 @@ typedef struct {
     bool (*wifi_connect_known)(const char *ssid);  /* pripojit ulozenym heslem */
     void (*wifi_forget)(const char *ssid);         /* smazat ze seznamu */
 
+    /* Cely seznam ulozenych siti. UI ho potrebuje proto, aby pred
+     * hromadnym zapomenutim ukazalo, KTERE site to smaze a kolik jich
+     * je - "smaze ulozene site" bez cisla a jmen je slib naslepo. */
+    int         (*wifi_saved_count)(void);
+    const char *(*wifi_saved_ssid)(int i);         /* NULL mimo rozsah */
+    void        (*wifi_forget_all)(void);
+
+    /* Citace sbernice. Ukazatel plati porad a struktura se sama
+     * obnovuje, takze si ho UI nemusi obnovovat; NULL znamena, ze deska
+     * CAN nema a UI nulovani citacu vubec nenabidne. */
+    const can_stats_t *(*can_stats)(void);
+    void               (*can_stats_reset)(void);
+
+    /* Restart desky. NULL = deska restartovat neumi, tlacitko nevznikne. */
+    void (*reboot)(void);
+
     /* diagnostika */
     unsigned (*heap_kb)(void);
     unsigned (*psram_kb)(void);
@@ -79,8 +124,15 @@ typedef struct {
 void ui_set_host(const ui_host_t *h);
 
 /* Nastaveni nactene z NVS; volat pred ui_build(). Neplatny lang spadne
- * na vychozi jazyk (0 = English), jas mimo rozsah se oreze. */
+ * na vychozi jazyk (0 = English), jas mimo rozsah se oreze a profil
+ * mimo rozsah spadne na DEN - z NVS muze prijit cokoliv a UI se podle
+ * toho nesmi rozsypat. */
 void ui_set_cfg(const ui_cfg_t *c);
+
+/* Vychozi obsah profilu. Deska ho potrebuje pri prvnim startu a UI pri
+ * resetu nastaveni, takze je jen na jednom miste. Index mimo rozsah
+ * vraci DEN. */
+ui_profile_t ui_profile_default(int i);
 
 /* ---------------------------------------------------------------------
  * Prevod jasu v procentech na stridu PWM pro plosku BL.

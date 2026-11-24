@@ -19,11 +19,17 @@ Ordered roughly by dependency. Nothing here is a promise.
       the settings page and remembered in NVS. Adding a language is one file
       in `lang/`, see `lang/README.md`
 - [ ] Font larger than 48 px for true driver-glance sizing
-- [ ] **Reset buttons** in settings. Each behind a confirmation:
-  - [ ] Restart the device
-  - [ ] Settings back to defaults
-  - [ ] Forget stored WiFi networks
-  - [ ] Clear the display blanking and unit preferences only
+- [x] **Reset buttons** in settings, behind a SERVICE button and then a
+      hold-to-confirm. Each one names what it erases with real numbers -
+      how many networks and their names, what the profiles hold now, what
+      the bus counters read - because "reset settings" alone is a blind
+      promise:
+  - [x] Restart the device
+  - [x] Settings back to defaults: all three profiles and the units. The
+        language stays, because it is the one setting whose reset can make
+        the screen unreadable for the person who pressed the button
+  - [x] Forget every stored WiFi network at once, passwords included
+  - [x] Zero the bus counters
 
 ## Debug panel and profiles
 
@@ -39,13 +45,25 @@ Ordered roughly by dependency. Nothing here is a promise.
         [`docs/safety.md`](docs/safety.md)
   - [ ] **Try captcha** - runs the unlock sequence as a rehearsal, unlocking
         nothing and sending nothing, so it can be tested without a vehicle
-- [ ] **Three settings profiles** plus "reset to default"
-  - [ ] Stored in NVS. The partition here is 20 kB and a profile is a few
-        hundred bytes, so **no SD card is needed** - keep the card for trip logs
-  - [ ] Name each profile, so they are not just 1 / 2 / 3
-  - [ ] Profile covers units, blanking, language, debug flags - **except the
-        write confirmation switch**, which must never be stored or exported,
-        or a profile would carry a disabled safety gate between devices
+- [x] **Three settings profiles** plus "reset to default"
+  - [x] Stored in NVS. Six entries of 32 B for the profiles, four for the
+        shared part, so 320 B of the 20 kB partition - **no SD card is
+        needed**, keep the card for trip logs
+  - [x] Named BENCH / DAY / NIGHT, not 1 / 2 / 3: a number has to be
+        remembered, a name is read at a glance in the dark
+  - [x] A profile covers **brightness and display blanking** - the two
+        things that are genuinely different on the bench, in daylight and
+        at night. Units and language are **shared**, because they belong to
+        the person and not to the situation, and switching a profile must
+        never make the interface unreadable. Debug flags stay out as well,
+        together with the write confirmation switch, which must never be
+        stored or exported - a profile would otherwise carry a disabled
+        safety gate between devices
+  - [x] Profiles replaced the separate day/night brightness pair. Two
+        mechanisms for one thing meant six stored levels and two switches
+        that could disagree
+  - [x] Switched from the top strip, where it is one tap from every page,
+        and from the settings page
 
 ## Known bugs
 
@@ -155,9 +173,11 @@ precondition check and a backup of whatever it overwrites.
 - [ ] **Ambient light sensor** for adaptive backlight. Now worth doing, since
       the backlight is a real dimmer. Needs a free pin or an I2C part, and
       `GPIO6` is already spent
-- [ ] **Day/night from the vehicle** instead of a sensor. The car already
-      knows - lighting state and instrument dimming are on the bus. Per
-      vehicle, so it belongs in the vehicle profile, not in the firmware
+- [ ] **Switch the profile from the vehicle** instead of from a sensor. The
+      car already knows - lighting state and instrument dimming are on the
+      bus. Per vehicle, so the mapping belongs in the vehicle profile, not
+      in the firmware. The brightness dialog already says why it is not
+      offered yet
 - [ ] Support a second board with a different pinout, to prove the abstraction
 - [ ] Enclosure and a dashboard mount
 

@@ -66,9 +66,17 @@ static const char *const LANG_DE[] = {
     "TEMPERATUR",
     "DUNKEL NACH",
     "HELLIGKEIT",
-    "TAG / NACHT",
+    "PROFIL",
     "SPRACHE",
+    "WARTUNG",
     "nie",
+
+    /* Profile der Einstellungen */
+    "WERKSTATT",
+    "TAG",
+    "NACHT",
+    "Profil hält Helligkeit und Abschaltung; Einheiten und Sprache "
+    "gelten für alle",
 
     /* WLAN */
     "nicht verbunden",
@@ -98,13 +106,29 @@ static const char *const LANG_DE[] = {
 
     /* Helligkeit der Hintergrundbeleuchtung */
     "Helligkeit",
-    "Auf dieser Platine nicht. Dimmen braucht einen Draht von GPIO6 zum "
-    "BL-Pad; ohne ihn ist die Beleuchtung nur ein Schalter.",
-    "TAG",
-    "NACHT",
+    "Dimmen geht hier nicht - der Draht von GPIO6 zum BL-Pad fehlt.",
     "NACH FAHRZEUG",
     "erfordert eine Fahrzeugverbindung",
-    "SCHALTER IN KOPFZEILE",
+
+    /* Reset und Wartung */
+    "Reset und Wartung",
+    "WERKSEINSTELLUNGEN",
+    "%d Profile und Einheiten",
+    "Setzt %d Profile und die Einheiten zurück. Die Sprache bleibt - "
+    "nach einem Reset muss lesbar bleiben, was auf dem Schirm steht.\n\n"
+    "Zurzeit enthalten sie:\n\n%s",
+    "ALLE NETZE VERGESSEN",
+    "%d gespeichert",
+    "Löscht alle %d gespeicherten Netze samt Passwörtern:\n\n%s\n\n"
+    "Beim nächsten Verbinden fragt die Oberfläche erneut nach dem Passwort.",
+    "CAN-ZÄHLER NULLEN",
+    "rx %u, tx %u",
+    "Nullt die Zähler des CAN-Busses. Zurzeit zeigen sie:\n\n%s",
+    "PLATINE NEU STARTEN",
+    "läuft %s",
+    "Die Platine startet neu. Nichts wird gelöscht - Profile und "
+    "gespeicherte Netze bleiben.\n\nSie läuft %s.",
+    "auf dieser Platine nicht möglich",
 
     /* Navigation */
     "PLATZ FÜR WEITERE FUNKTIONEN",
