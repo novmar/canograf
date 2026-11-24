@@ -618,9 +618,34 @@ uds_state_t uds_poll(uds_client_t *c, uint32_t now_ms)
 
     if (c->op != OP_NONE) {
         if (s == ISOTP_DONE) {
-            c->rsp_len = isotp_take(c->link, c->rsp, (uint16_t)sizeof(c->rsp));
-            c->n_rsp++;
-            handle_rsp(c, now_ms);
+            if (c->internal) {
+                /* Udrzovaci 3E 00 NESMI prepsat odpoved, kterou si drzi
+                 * volajici. Stranka chyb cte c->rsp jeste dlouho po tom,
+                 * co 19 02 dobehlo, a 7E 00 o delce dvou bajtu by z nej
+                 * udelalo "zadna chyba" - tedy tiche tvrzeni, ze je vuz
+                 * v poradku. Odpoved proto odebereme stranou a zahodime.
+                 *
+                 * Zaporna odpoved tady znamena jedine: session uz neplati.
+                 * Nehlasi se jako chyba pozadavku, protoze o zadny
+                 * pozadavek uzivatele neslo - jen se priste zahaji znovu. */
+                uint8_t ignored[8];
+                uint16_t n;
+
+                n = isotp_take(c->link, ignored, (uint16_t)sizeof(ignored));
+                c->n_rsp++;
+                if (n >= 1u && ignored[0] == UDS_SID_NEGATIVE) {
+                    c->session_ok = false;
+                    c->n_session_lost++;
+                }
+                c->op = OP_NONE;
+                c->step = STEP_NONE;
+                c->internal = false;
+            } else {
+                c->rsp_len =
+                    isotp_take(c->link, c->rsp, (uint16_t)sizeof(c->rsp));
+                c->n_rsp++;
+                handle_rsp(c, now_ms);
+            }
         } else if (s == ISOTP_FAILED) {
             isotp_err_t e = isotp_error(c->link);
 

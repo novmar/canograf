@@ -587,6 +587,56 @@ static void test_dtc_list(void)
     CHECK(uds_dtc_count(&g_uds) == 0u);
 }
 
+/* Seznam chyb musi prezit udrzovaci 3E 00.
+ *
+ * Tohle byla skutecna chyba, ne teorie: odpoved se odebirala do c->rsp
+ * bezpodminecne, takze interni tester present do nej vlozil 7E 00 o delce
+ * dvou bajtu. uds_dtc_count() pak nenaslo hlavicku 59 02 a vratilo nulu -
+ * stranka chyb tise prohlasila vuz za bezchybny. Zadny z osmnacti
+ * tehdejsich testu to nechytil, protoze zadny nenechal ubehnout
+ * UDS_TESTER_MS mezi prectenim a ctenim vysledku.
+ *
+ * MUTACE, kterou ma tenhle test chytit: v src/diag/uds.c v uds_poll()
+ * zrusit vetev `if (c->internal)` a odebirat vzdy do c->rsp.
+ */
+static void test_dtc_survives_tester_present(void)
+{
+    static const uint8_t rsp_sess[] = { 0x50, 0x03 };
+    static const uint8_t req_tp[] = { 0x3E, 0x00 };
+    static const uint8_t rsp_tp[] = { 0x7E, 0x00 };
+    static const uint8_t rsp[] = {
+        0x59, 0x02, 0xFF,
+        0xC0, 0x12, 0x34, 0x2F
+    };
+    uds_dtc_t d;
+
+    setup();
+    CHECK(uds_session(&g_uds, UDS_SESSION_EXTENDED, 0u));
+    answer(5u, rsp_sess, sizeof(rsp_sess));
+    CHECK(uds_read_dtcs(&g_uds, 0xFFu, 10u));
+    answer(20u, rsp, sizeof(rsp));
+    CHECK(uds_dtc_count(&g_uds) == 1u);
+
+    /* Nikdo se uz nepta, takze po UDS_TESTER_MS odejde udrzovaci dotaz
+     * sam od sebe - presne to se deje, kdyz clovek jen kouka na seznam. */
+    uds_poll(&g_uds, 2010u);
+    CHECK(req_count() == 3);
+    CHECK(req_is(2, req_tp, 2u));
+    answer(2015u, rsp_tp, sizeof(rsp_tp));
+
+    /* A ted to podstatne: seznam musi byt porad tam. */
+    CHECK(uds_dtc_count(&g_uds) == 1u);
+    CHECK(uds_dtc_at(&g_uds, 0u, &d));
+    CHECK(d.dtc == 0xC01234u);
+    CHECK(d.status == 0x2Fu);
+    CHECK(uds_rsp_len(&g_uds) == sizeof(rsp));
+    CHECK(uds_rsp(&g_uds)[0] == 0x59u);
+
+    /* Session se udrzovacim dotazem nerozbila a dalsi cteni jde poslat. */
+    CHECK(uds_session_ok(&g_uds));
+    CHECK(!uds_busy(&g_uds));
+}
+
 /* ------------------------------------------------------------------
  * 7. Freeze frame a rozsirene zaznamy
  * ------------------------------------------------------------------ */
@@ -1147,6 +1197,7 @@ static const test_t g_tests[] = {
     { "odmitnuty DID v davce",      test_refused_did_in_batch },
     { "zaporne odpovedi",           test_negative_codes },
     { "19 02 se stavovymi bajty",   test_dtc_list },
+    { "seznam chyb prezije 3E 00",  test_dtc_survives_tester_present },
     { "19 04 a 19 06",              test_dtc_records },
     { "session vyprsi pri cteni",   test_session_lost_mid_read },
     { "chyby prenosu",              test_transport_errors },
