@@ -66,9 +66,9 @@ static const char *const LANG_DE[] = {
     "TEMPERATUR",
     "DUNKEL NACH",
     "HELLIGKEIT",
+    "TAG / NACHT",
     "SPRACHE",
     "nie",
-    "PWM-Test",
 
     /* WLAN */
     "nicht verbunden",
@@ -94,13 +94,16 @@ static const char *const LANG_DE[] = {
     "%d s HALTEN",
     "FERTIG",
 
-    /* Versuch mit PWM-Hintergrundbeleuchtung */
-    "Helligkeit - Versuch mit Software-PWM",
-    "Ein Umschalten über I2C dauert %u us. Bei %d ms Periode ist der "
-    "kürzeste Puls %d ms - wenn das Display bei wenig Helligkeit ganz "
-    "ausgeht, kommt der AP3032 Aufwärtswandler nicht hoch.",
-    "FREQUENZ",
-    "VOLLE HELLIGKEIT",
+    /* Helligkeit der Hintergrundbeleuchtung */
+    "Helligkeit",
+    "Die Stufen unten gelten für den gerade eingeschalteten Modus. "
+    "Nachts wird von Hand umgeschaltet: die Platine hat zwar eine Uhr, "
+    "aber niemand hat sie gestellt, und nach der Tageszeit zu raten "
+    "wäre schlechter als ein Knopf.",
+    "Auf dieser Platine nicht. Dimmen braucht einen Draht von GPIO6 zum "
+    "BL-Pad; ohne ihn ist die Beleuchtung nur ein Schalter.",
+    "TAG",
+    "NACHT",
 
     /* Navigation */
     "PLATZ FÜR WEITERE FUNKTIONEN",

@@ -67,9 +67,9 @@ static const char *const LANG_EN[] = {
     "TEMPERATURE",
     "BLANK AFTER",
     "BRIGHTNESS",
+    "DAY / NIGHT",
     "LANGUAGE",
     "never",
-    "PWM test",
 
     /* WiFi */
     "not connected",
@@ -95,13 +95,15 @@ static const char *const LANG_EN[] = {
     "HOLD %d s",
     "OK",
 
-    /* backlight PWM experiment */
-    "Brightness - software PWM experiment",
-    "One toggle over I2C takes %u us. At a %d ms period the shortest "
-    "pulse is %d ms - if the panel goes dark at low brightness, the "
-    "AP3032 boost converter cannot start up in time.",
-    "FREQUENCY",
-    "FULL BRIGHTNESS",
+    /* backlight brightness */
+    "Brightness",
+    "The levels below set the mode that is switched on. Night mode is "
+    "switched by hand: the board has a clock, but nobody has set it, so "
+    "guessing from the time of day would be worse than one button.",
+    "Not on this board. Dimming needs a wire from GPIO6 to the BL pad; "
+    "without it the backlight is only an on/off switch.",
+    "DAY",
+    "NIGHT",
 
     /* navigation */
     "ROOM FOR MORE FUNCTIONS",

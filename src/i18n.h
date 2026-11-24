@@ -73,9 +73,9 @@ enum {
     STR_SET_TEMP,
     STR_SET_BLANK,
     STR_SET_BRIGHT,
+    STR_SET_DAYNIGHT,       /* popisek prepinace denni/nocni uroven */
     STR_SET_LANG,
     STR_BLANK_NEVER,
-    STR_PWM_TEST,
 
     /* WiFi */
     STR_WIFI_NOT_CONN,
@@ -100,11 +100,12 @@ enum {
     STR_HOLD_FMT,       /* "HOLD %d s" - potvrzeni drzenim */
     STR_HOLD_DONE,      /* potvrzeno - ukaze se na chvili misto odpoctu */
 
-    /* pokus s PWM podsvicenim */
+    /* jas podsviceni */
     STR_BRIGHT_TITLE,
-    STR_BRIGHT_INFO,        /* %u us, %d ms perioda, %d ms nejkratsi pulz */
-    STR_FREQUENCY,
-    STR_FULL_BRIGHT,
+    STR_BRIGHT_INFO,
+    STR_BRIGHT_NA,          /* deska stmivat neumi - misto tlacitek */
+    STR_BRIGHT_DAY,
+    STR_BRIGHT_NIGHT,
 
     /* navigace */
     STR_NAV_PLACEHOLDER,

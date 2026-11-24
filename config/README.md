@@ -117,7 +117,9 @@ runtime.
 |---|---|---|---|
 | `CANOGRAF_CAN_TX_PIN` | `-1` | `15` | CAN transceiver TX |
 | `CANOGRAF_CAN_RX_PIN` | `-1` | `16` | CAN transceiver RX |
-| `CANOGRAF_SPARE_PIN` | `-1` | `6` | the only free pin on this board; `-1` when a board has none |
+| `CANOGRAF_SPARE_PIN` | `-1` | `-1` | a pin left over for anything else; this board's only free pin went to the backlight |
+| `CANOGRAF_BL_PWM_PIN` | `-1` | `6` | PWM out for backlight dimming; `-1` = the board cannot dim and the interface does not offer it |
+| `CANOGRAF_BL_PWM_HZ` | `5000` | `5000` | dimming PWM frequency, well above the `R11`+`C11` filter |
 
 ### Vehicle profile
 

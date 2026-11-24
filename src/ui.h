@@ -18,12 +18,38 @@
 extern "C" {
 #endif
 
+/* ---------------------------------------------------------------------
+ * Nastaveni, ktere prezije restart. Deska ho nacte z NVS a preda sem
+ * pred ui_build(); kdykoliv ho uzivatel zmeni, posle ho UI zpatky pres
+ * ui_host_t.save_cfg.
+ *
+ * Jas je ulozeny dvakrat, zvlast pro den a zvlast pro noc, protoze mezi
+ * nimi se prepina za jizdy a hledat pokazde spravnou uroven by bylo
+ * horsi nez oslneni samotne. Automaticke prepinani podle casu tu zamerne
+ * neni - RTC sice na desce je, ale cas v nem nikdo nenastavil.
+ * ------------------------------------------------------------------- */
 typedef struct {
-    /* podsviceni: tvrde zap/vyp */
+    bool     mph;           /* false = km/h */
+    bool     fahrenheit;    /* false = C */
+    uint32_t blank_s;       /* zhasnout po tolika vterinach; 0 = nikdy */
+    int      lang;          /* index jazyka z i18n.c, 0 = English */
+    int      bright_day;    /* jas 0..100 % ve dne */
+    int      bright_night;  /* jas 0..100 % v noci */
+    bool     night;         /* prave plati nocni uroven */
+} ui_cfg_t;
+
+typedef struct {
+    /* Podsviceni: tvrde zap/vyp pres EXIO2. Vypina i samotny panel,
+     * takze je to hlavni vypinac a jedina cesta k uplne tme. */
     void (*backlight)(bool on);
 
-    /* trvale ulozeni nastaveni (NVS); lang je index jazyka z i18n.c */
-    void (*save_cfg)(bool mph, bool fahrenheit, uint32_t blank_s, int lang);
+    /* Plynule stmivani, 0..100 % jasu. NULL znamena, ze deska stmivat
+     * neumi - UI pak stmivani vubec nenabidne a netvari se, ze jde.
+     * Panel tim nezhasina, od toho je backlight(). */
+    void (*bl_set_percent)(int percent);
+
+    /* trvale ulozeni nastaveni (NVS) */
+    void (*save_cfg)(const ui_cfg_t *c);
 
     /* WiFi */
     void        (*wifi_scan_start)(void);
@@ -44,20 +70,28 @@ typedef struct {
     /* diagnostika */
     unsigned (*heap_kb)(void);
     unsigned (*psram_kb)(void);
-
-    /* pokus se softwarovym PWM podsviceni */
-    uint32_t (*bl_measure_toggle_us)(void);
-    void     (*bl_pwm_set)(int duty, int period_ms);  /* duty 0..10 */
-    void     (*bl_pwm_stop)(void);
-    bool     (*bl_pwm_running)(void);
 } ui_host_t;
 
 /* Ukazatel si UI jen pamatuje, struktura musi prezit cely beh. */
 void ui_set_host(const ui_host_t *h);
 
 /* Nastaveni nactene z NVS; volat pred ui_build(). Neplatny lang spadne
- * na vychozi jazyk (0 = English). */
-void ui_set_cfg(bool mph, bool fahrenheit, uint32_t blank_s, int lang);
+ * na vychozi jazyk (0 = English), jas mimo rozsah se oreze. */
+void ui_set_cfg(const ui_cfg_t *c);
+
+/* ---------------------------------------------------------------------
+ * Prevod jasu v procentech na stridu PWM pro plosku BL.
+ *
+ * Dve veci, ktere se tu daji tise rozbit, a proto maji vlastni funkci
+ * a kontrolu v sim/lv_shot.c:
+ *
+ *   1. POLARITA JE OBRACENA. Napeti na plosce BL ubira proud LEDkam:
+ *      0 V = plny jas, 3,3 V = tma. Vetsi jas tedy znamena MENSI stridu.
+ *   2. Prepocet neni linearni, viz komentar u implementace v ui.c.
+ *
+ * percent se oreze na 0..100, vraci 0..duty_max.
+ * ------------------------------------------------------------------- */
+uint32_t ui_bl_duty(int percent, uint32_t duty_max);
 
 void        ui_build(void);       /* postavi celou UI do lv_scr_act() */
 void        ui_tick(void);        /* jeden krok obnovy, volat ~50 Hz */

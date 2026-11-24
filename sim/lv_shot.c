@@ -157,8 +157,15 @@ static bool fake_connected(void) { return fake_conn[0] != '\0'; }
 static const char *fake_ssid(void) { return fake_conn; }
 static const char *fake_ip(void) { return fake_conn[0] ? "192.168.1.42" : ""; }
 
+/* Stmivani: predstirana deska si jen zapamatuje, co UI poslalo. Na
+ * obrazovce neni jas videt, takze je to jedina cesta, jak zkontrolovat,
+ * ze tlacitka jasu opravdu neco delaji. */
+static int fake_bl_percent = -1;
+static void fake_bl_set(int percent) { fake_bl_percent = percent; }
+
 static const ui_host_t FAKE_HOST = {
     NULL,                   /* backlight */
+    fake_bl_set,
     NULL,                   /* save_cfg */
     fake_scan_start,
     fake_scan_result,
@@ -171,7 +178,25 @@ static const ui_host_t FAKE_HOST = {
     fake_connect_known,
     fake_forget,
     NULL, NULL,             /* heap_kb, psram_kb */
-    NULL, NULL, NULL, NULL, /* pokus s PWM podsvicenim */
+};
+
+/* Tataz deska, ale bez dratku z GPIO6 na plosku BL: stmivat neumi.
+ * Nastaveni na ni nesmi nabidnout ani jedno tlacitko jasu. */
+static const ui_host_t FAKE_HOST_NODIM = {
+    NULL,                   /* backlight */
+    NULL,                   /* bl_set_percent - deska stmivat neumi */
+    NULL,                   /* save_cfg */
+    fake_scan_start,
+    fake_scan_result,
+    fake_scan_ssid,
+    fake_connect,
+    fake_connected,
+    fake_ssid,
+    fake_ip,
+    fake_known,
+    fake_connect_known,
+    fake_forget,
+    NULL, NULL,             /* heap_kb, psram_kb */
 };
 
 /* ---------------------------------------------------------------------
@@ -197,6 +222,19 @@ static void run_ms(int ms, bool anim_only)
     for (int t = 0; t < ms; t += STEP_MS) {
         lv_tick_inc(STEP_MS);
         if (!anim_only) ui_tick();
+        lv_timer_handler();
+    }
+}
+
+/* Dlouhe cekani na necinnost. Krok je hruby schvalne: desitky vterin po
+ * 20 ms by znamenaly tisice prekresleni cele obrazovky a zkouska by
+ * kvuli tomu bezela minuty. Jemny krok je potreba az tam, kde se neco
+ * deje, a na to je run_ms(). */
+static void idle_ms(int ms)
+{
+    for (int t = 0; t < ms; t += 200) {
+        lv_tick_inc(200);
+        ui_tick();
         lv_timer_handler();
     }
 }
@@ -235,18 +273,34 @@ static void touch_release(bool anim_only)
     run_ms(300, anim_only);
 }
 
-/* Otisk obsahove casti obrazovky (pod horni listou, nad prekryvem
- * navigace). Kdyz se nezmeni, nezmenila se ani stranka. */
-static unsigned content_hash(void)
+/* Otisk obdelniku na obrazovce.
+ *
+ * Obraz se pred ctenim vzdy obnovi, aby otisk patril tomu, co je na
+ * obrazovce TED. Bez toho by se cetl frame, ktery naposled nakreslil
+ * shot() nebo bezici animace, a kontrola by porovnavala dva ruzne
+ * okamziky. */
+static unsigned region_hash(int x0, int y0, int x1, int y1)
 {
+    lv_obj_invalidate(lv_scr_act());
+    lv_refr_now(NULL);
+
     unsigned h = 2166136261u;
-    for (int y = 64; y < 64 + 228; y++)
-        for (int x = 0; x < 736; x++) {
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
             h ^= (unsigned)lv_color_to32(frame[y * SCR_W + x]);
             h *= 16777619u;
         }
     return h;
 }
+
+/* Obsah stranky pod horni listou a nad prekryvem navigace. Kdyz se
+ * nezmeni, nezmenila se ani stranka. */
+static unsigned content_hash(void) { return region_hash(0, 64, 736, 64 + 228); }
+
+/* Jen horni pruh stranky. Mrizka navigace zacina az na 180 px, takze
+ * tenhle otisk rika, KTERA stranka je videt, bez ohledu na to, kolik
+ * navigace prave zabira - a da se vzit i uprostred tazeni. */
+static unsigned page_hash(void) { return region_hash(0, 64, 736, 180); }
 
 static int checks_failed = 0;
 
@@ -287,6 +341,22 @@ static void shot(const char *name)
 #define NAVBTN_Y       (480 - 124 + 58) /* stred tlacitka stranky v liste */
 #define PAGE_Y(y)      (64 + (y))       /* stranka zacina pod horni listou */
 
+/* Stranka nastaveni: stredy tlacitek druhe rady (SET_ROW2 = 132, vyska
+ * 76) a tlacitek v dialogu jasu (BL_BTN_* v ui.c). */
+#define SET_BLANK_X    (20 + 2 * 176 + 80)
+#define SET_BLANK_Y    PAGE_Y(28 + 38)
+#define SET_WIFI_X     (20 + 160)
+#define SET_WIFI_Y     PAGE_Y(132 + 38)
+#define SET_BRIGHT_X   (360 + 80)
+#define SET_BRIGHT_Y   PAGE_Y(132 + 38)
+#define SET_DAYNIGHT_X (540 + 85)
+#define SET_DAYNIGHT_Y PAGE_Y(132 + 38)
+/* dialog jasu lezi na cele obrazovce, takze PAGE_Y se na nej nevztahuje */
+#define BL_LVL_X(i)    (30 + (i) * 148 + 70)
+#define BL_LVL_Y       (200 + 60)
+#define BL_MODE_X      (30 + 150)
+#define BL_MODE_Y      (358 + 55)
+
 static void phase_navigace(void)
 {
     ui_show_page(0);
@@ -295,26 +365,47 @@ static void phase_navigace(void)
     tap(TAP_HANDLE_X, TAP_HANDLE_Y, true);
     shot("nav-lista");
 
-    /* tah nahoru zacaty NA tlacitku stranky - nesmi prepnout stranku */
-    unsigned before = content_hash();
+    /* -----------------------------------------------------------------
+     * Tah zacaty NA tlacitku stranky nesmi stranku prepnout. To hlida
+     * drag_guard_cb v ui.c; na zeleze se bez nej vysouvani listy
+     * prepinalo stranky.
+     *
+     * Tah je dlouhy 40 px zamerne:
+     *   - vic nez DRAG_PX (30 px), takze uz to neni tuknuti,
+     *   - min nez LV_INDEV_DEF_GESTURE_LIMIT (50 px), aby se do toho
+     *     nepletlo prepnuti stranky gestem,
+     *   - a prst zustane na tomtez tlacitku (vysoke 110 px), takze LVGL
+     *     na konci opravdu posle klik. Delsi tah prst z tlacitka svede
+     *     a klik by nikam nedosel, cimz by kontrola prestala merit to,
+     *     na co je.
+     *
+     * Otisk se bere HNED po tomhle jednom tahu. Driv se bral az po
+     * dalsich ctyrech vstupech, ktere stav mezitim vracely zpatky.
+     *
+     * Mutacni zkouska - takhle se kdykoli overi, ze kontrola neni plana:
+     *     sed -i 's/#define DRAG_PX  30/#define DRAG_PX  9000/' src/ui.c
+     * s prahem 9000 pojistka neuhlida nic, klik projde a tohle MUSI
+     * selhat. Prah se pak vrati na 30.
+     * ----------------------------------------------------------------- */
+    unsigned before = page_hash();
+    swipe(NAVBTN_X(2), NAVBTN_Y, NAVBTN_X(2), NAVBTN_Y - 40, 4, false, true);
+    check("tah z tlacitka navigace neprepne stranku", before == page_hash());
+
+    /* snimky mrizky a tazeni na pulce cesty */
     swipe(NAVBTN_X(2), NAVBTN_Y, NAVBTN_X(2), 180, 6, false, true);
     shot("nav-mrizka");
-
-    /* tazeni na pulce cesty, prst jeste dole */
     swipe(400, 200, 400, 340, 5, true, true);
     shot("nav-tazeni");
     touch_release(true);
+    swipe(400, 200, 400, 470, 6, false, true);     /* tahem dolu na uchyt */
 
-    /* tahem dolu zpatky na uchyt */
-    swipe(400, 200, 400, 470, 6, false, true);
-    unsigned after = content_hash();
-    check("tah z tlacitka navigace neprepne stranku", before == after);
-
-    /* obycejne tuknuti na tlacitko stranku prepnout musi */
+    /* Druha pulka tehoz pravidla: obycejne tuknuti stranku prepnout
+     * MUSI. Kdyby byla pojistka prisna az moc (was_drag() vzdy true),
+     * propadlo by i tuknuti a kontrola vyse by porad hlasila PASS. */
     tap(TAP_HANDLE_X, TAP_HANDLE_Y, true);
-    before = content_hash();
+    before = page_hash();
     tap(NAVBTN_X(2), NAVBTN_Y, true);
-    check("tuknuti na tlacitko navigace stranku prepne", before != content_hash());
+    check("tuknuti na tlacitko navigace stranku prepne", before != page_hash());
 
     swipe(400, 200, 400, 470, 6, false, true);     /* uklid: zpatky na uchyt */
     ui_show_page(0);
@@ -366,16 +457,30 @@ static void phase_wifi(void)
     run_ms(200, false);
     unsigned page_before = content_hash();
 
-    /* ---- zavreni dialogu driv, nez dobehne sken ---- */
-    tap(520, PAGE_Y(168), false);           /* VYBRAT SIT */
+    /* -----------------------------------------------------------------
+     * Dialog se zavre driv, nez dobehne sken - presne ta cesta, po ktere
+     * to padalo: dobihajici sken psal do seznamu, ktery uz byl smazany.
+     *
+     * Tvrzeni je tu jen jedno a je to to, co otisk opravdu umi zmerit:
+     * gesto zprava dialog zavre a stranku pod nim necha byt. Pri mutaci
+     *     lv_obj_clear_flag(modal, LV_OBJ_FLAG_GESTURE_BUBBLE)  -> pryc
+     * kontrola selze.
+     *
+     * Vlastni zapis do uvolnene pameti (uklid na LV_EVENT_DELETE, viz
+     * modal_forget v ui.c) otisk obrazovky videt NEMUZE - uvolnena pamet
+     * se na obrazovce neprojevi. Tenhle usek ji proto jen projde; kdyz
+     * uklid chybi, chytne to az sanitizer nebo pad. Tvrdit tady vic by
+     * byla plana jistota.
+     * ----------------------------------------------------------------- */
+    tap(SET_WIFI_X, SET_WIFI_Y, false);     /* VYBRAT SIT */
     shot("wifi-hledam");
-    /* zavrit driv, nez sken dobehne - presne ta cesta, po ktere to padalo */
     swipe(120, 240, 700, 250, 4, false, false);
     run_ms(2000, false);                    /* sken dobehne do prazdna */
-    check("zavreni dialogu behem skenu nic nerozbije", page_before == content_hash());
+    check("gesto zprava zavre dialog i behem skenu",
+          page_before == content_hash());
 
     /* ---- seznam siti ---- */
-    tap(520, PAGE_Y(168), false);
+    tap(SET_WIFI_X, SET_WIFI_Y, false);
     run_ms(1600, false);                    /* sken dobehne */
     shot("wifi-seznam");
 
@@ -390,7 +495,7 @@ static void phase_wifi(void)
     check("gesto zprava zavre dialog s heslem", page_before == content_hash());
 
     /* znama sit: dlouhy stisk nabidne zapomenuti */
-    tap(520, PAGE_Y(168), false);
+    tap(SET_WIFI_X, SET_WIFI_Y, false);
     run_ms(1600, false);
     touch_at(300, 126);
     touch_down = true;
@@ -412,6 +517,130 @@ static void phase_wifi(void)
 
     swipe(120, 240, 700, 250, 8, false, false);
     run_ms(200, false);
+}
+
+/* ---------------------------------------------------------------------
+ * Jas podsviceni
+ *
+ * Dve veci, ktere na obrazovce nejsou videt a daji se proto tise
+ * rozbit: polarita prevodu procent na stridu a to, jestli tlacitka
+ * vubec neco posilaji na desku.
+ * ------------------------------------------------------------------- */
+static void phase_jas(void)
+{
+    /* Prevod je ciste pocetni, takze jde zkontrolovat primo.
+     *
+     * POLARITA: napeti na plosce BL proud LEDkam UBIRA, takze vetsi jas
+     * musi dat MENSI stridu. Kdyby to nekdo obratil, displej by na
+     * nejnizsi urovni svitil naplno a na nejvyssi zhasl - a nikdo by
+     * nepoznal proc.
+     *
+     * Mutacni zkouska: v ui_bl_duty() vratit
+     *     (uint32_t)((uint64_t)duty_max * permille / 1000)
+     * misto rozdilu. Prvni dve kontroly pak musi selhat. */
+    const uint32_t DMAX = 4095;
+    check("100 % jasu dava mensi stridu nez 10 %",
+          ui_bl_duty(100, DMAX) < ui_bl_duty(10, DMAX));
+    check("0 % jasu je plna strida a 100 % nulova",
+          ui_bl_duty(0, DMAX) == DMAX && ui_bl_duty(100, DMAX) == 0);
+
+    /* Prevod musi klesat po celem rozsahu. Jediny preklep v tabulce by
+     * jinak udelal dolik, ktereho by si na desce nikdo nevsiml.
+     * Mutacni zkouska: prohodit v CURVE dve sousedni cisla. */
+    bool mono = true;
+    for (int p = 1; p <= 100; p++)
+        if (ui_bl_duty(p, DMAX) > ui_bl_duty(p - 1, DMAX)) mono = false;
+    check("strida klesa po celem rozsahu jasu", mono);
+
+    /* ---- ovladani v nastaveni ---- */
+    ui_show_page(5);
+    run_ms(200, false);
+    shot("nastaveni-jas");
+
+    tap(SET_BRIGHT_X, SET_BRIGHT_Y, false);     /* tlacitko JAS */
+    shot("jas-dialog");
+
+    /* Tlacitko urovne musi novou hodnotu opravdu poslat na desku.
+     * Mutacni zkouska: vyhodit bl_apply() z bl_level_cb() v ui.c. */
+    tap(BL_LVL_X(1), BL_LVL_Y, false);          /* 75 % */
+    check("tlacitko urovne posle jas na desku", fake_bl_percent == 75);
+
+    /* Nocni rezim ma VLASTNI ulozenou uroven: prepnuti musi poslat ji,
+     * ne tu denni. Mutacni zkouska: v bl_level() vracet vzdy
+     * cfg.bright_day. */
+    tap(BL_MODE_X, BL_MODE_Y, false);           /* DEN -> NOC */
+    check("prepnuti na noc posle nocni uroven", fake_bl_percent == 35);
+    shot("jas-noc");
+
+    tap(BL_LVL_X(4), BL_LVL_Y, false);          /* nocni uroven na 25 % */
+    check("uroven se uklada do prave zvoleneho rezimu", fake_bl_percent == 25);
+
+    /* Navrat na den musi vratit denni uroven nedotcenou tim, co se
+     * stalo v noci - to je cely smysl dvou ulozenych urovni. */
+    tap(BL_MODE_X, BL_MODE_Y, false);           /* NOC -> DEN */
+    check("navrat na den vrati denni uroven", fake_bl_percent == 75);
+
+    swipe(120, 240, 700, 250, 8, false, false);     /* zavrit dialog */
+    run_ms(200, false);
+    shot("nastaveni-jas-75");
+
+    /* -----------------------------------------------------------------
+     * Zhasnuti po necinnosti se musi nejdriv stahnout jasem a teprve pak
+     * vypnout panel. Tvrdy skok z plneho jasu do tmy je v noci rana do
+     * oka. Probuzeni naopak zadny prejezd mit nesmi.
+     *
+     * Mutacni zkouska: v ui_tick() volat misto blank_begin() rovnou
+     * backlight(false). Jas pak pri zhasinani nikdy neni mezi nulou a
+     * nastavenou urovni a prvni kontrola selze.
+     * ----------------------------------------------------------------- */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* ZHASNOUT PO: nikdy -> 30 s */
+    idle_ms(29000);                             /* tesne pred limitem */
+
+    /* Dokrokovat po 20 ms, dokud se jas nezacne menit, a hned se podivat,
+     * kde skoncil. Tvrde zhasnuti by preskocilo rovnou na nulu, stmivani
+     * musi byt nekde mezi. */
+    int mid = 75;
+    for (int i = 0; i < 100 && mid == 75; i++) {
+        run_ms(20, false);
+        mid = fake_bl_percent;
+    }
+    check("pred zhasnutim se jas stahuje postupne", mid > 0 && mid < 75);
+
+    run_ms(600, false);                         /* pul vteriny stmivani dobehne */
+    check("na konci stmivani je jas na nule", fake_bl_percent == 0);
+
+    tap(200, 400, false);                       /* dotek kamkoliv po strance */
+    check("probuzeni vrati jas okamzite", fake_bl_percent == 75);
+
+    /* uklid: zpatky na "nikdy", at zbytek zkousky nezhasina */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* 30 s -> 2 min */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* -> 10 min */
+    tap(SET_BLANK_X, SET_BLANK_Y, false);       /* -> nikdy */
+}
+
+/* Deska bez dratku z GPIO6 na plosku BL stmivat neumi a nesmi se tvarit,
+ * ze ano. Postavi se cela UI znovu nad hostitelem, ktery bl_set_percent
+ * nema, a stranka nastaveni musi vypadat jinak - misto tlacitek jasu je
+ * na ni vysvetleni, proc to nejde.
+ *
+ * Mutacni zkouska: vyhodit podminku if (bl_can_dim()) z build_nastav()
+ * v ui.c. Obe stranky pak vypadaji stejne a kontrola selze. */
+static void phase_bez_dratku(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+    unsigned with_dim = page_hash();
+
+    lv_obj_t *fresh = lv_obj_create(NULL);
+    lv_scr_load(fresh);
+    ui_set_host(&FAKE_HOST_NODIM);
+    ui_build();
+    ui_show_page(5);
+    run_ms(200, false);
+
+    check("bez stmivani nejsou na strance tlacitka jasu",
+          with_dim != page_hash());
+    shot("jas-nelze");
 }
 
 int main(int argc, char **argv)
@@ -462,8 +691,19 @@ int main(int argc, char **argv)
     idrv.read_cb = read_cb;
     lv_indev_drv_register(&idrv);
 
+    /* Vychozi nastaveni jako po prvnim startu desky: denni jas naplno,
+     * nocni na tretinu, zhasinani vypnute (aby snimky nezhasinaly). */
+    ui_cfg_t cfg = {
+        .mph = false,
+        .fahrenheit = false,
+        .blank_s = 0,
+        .lang = lang,
+        .bright_day = 100,
+        .bright_night = 35,
+        .night = false,
+    };
     ui_set_host(&FAKE_HOST);
-    ui_set_cfg(false, false, 0, lang);
+    ui_set_cfg(&cfg);
     ui_build();
 
     rgb = malloc((size_t)SCR_W * SCR_H * 3);
@@ -482,6 +722,8 @@ int main(int argc, char **argv)
     phase_navigace();
     phase_dialogy();
     phase_wifi();
+    phase_jas();
+    phase_bez_dratku();     /* posledni - stavi UI nad jinym hostitelem */
 
     free(rgb);
     if (checks_failed) printf("%d kontrol selhalo\n", checks_failed);

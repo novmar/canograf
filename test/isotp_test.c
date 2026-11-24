@@ -301,6 +301,79 @@ static void test_flow_control_wait(void)
     CHECK(g_tx[1].data[0] == 0x21);
 }
 
+/* Jednotka posila WAIT porad dokola. Nekonecne cekani je presne ta ticha
+ * smrt, kvuli ktere tu je pojistka N_Cs - strop poctu WAITu musi
+ * existovat a musi byt v rozumnem radu, takze se tu zamerne nepouziva
+ * ISOTP_FC_WAIT_MAX, ale pevne cislo. Kdyby nekdo strop zvedl na stovky,
+ * tenhle test spadne, a o to jde. */
+#define WAIT_PATIENCE 16
+
+static void test_flow_control_wait_forever(void)
+{
+    static const uint8_t fc_wait[] = { 0x31, 0x00, 0x00 };
+    uint8_t msg[20];
+    int i;
+
+    memset(msg, 0x33, sizeof(msg));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+
+    for (i = 0; i < WAIT_PATIENCE; i++) {
+        feed((uint32_t)(10 + i * 10), fc_wait, sizeof(fc_wait));
+        if (isotp_state(&g_link) == ISOTP_FAILED) {
+            break;
+        }
+    }
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_FC_WAIT);
+    CHECK(g_ntx == 1);            /* krome first frame nic neodeslo */
+}
+
+/* Druha strana te same hranice: presne ISOTP_FC_WAIT_MAX cekani a pak
+ * povoleni musi JESTE projit. Bez tohohle testu by slo projit tim, ze se
+ * FS=WAIT nepodporuje vubec a kazdy WAIT prenos rovnou zabije. */
+static void test_flow_control_wait_limit(void)
+{
+    static const uint8_t fc_wait[] = { 0x31, 0x00, 0x00 };
+    static const uint8_t fc_go[]   = { 0x30, 0x01, 0x05 };
+    uint8_t msg[20];
+    uint32_t t = 10u;
+    unsigned i;
+
+    memset(msg, 0x66, sizeof(msg));
+    CHECK(isotp_send(&g_link, msg, sizeof(msg), 0u));
+
+    for (i = 0; i < (unsigned)ISOTP_FC_WAIT_MAX; i++) {
+        feed(t, fc_wait, sizeof(fc_wait));
+        t += 10u;
+    }
+    CHECK(isotp_state(&g_link) == ISOTP_SENDING);
+    CHECK(isotp_error(&g_link) == ISOTP_OK);
+
+    feed(t, fc_go, sizeof(fc_go));
+    isotp_poll(&g_link, t + 5u);
+    CHECK(g_ntx == 2);
+    CHECK(g_tx[1].data[0] == 0x21);
+}
+
+/* Viceramcovy prijem, ktery se zasekne uprostred: po first frame uz
+ * zadny consecutive frame nedojde. Cisla jsou pevna zamerne, N_Cr je
+ * podle ISO 15765-2 jedna sekunda. */
+static void test_receive_stalled(void)
+{
+    static const uint8_t req[] = { 0x22, 0x21, 0x46 };
+    uint8_t ff[8];
+
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+    ff[0] = 0x10; ff[1] = 20;
+    memset(&ff[2], 0x11, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 0u);
+    CHECK(isotp_state(&g_link) == ISOTP_RECEIVING);
+
+    CHECK(isotp_poll(&g_link, 999u) == ISOTP_RECEIVING);
+    CHECK(isotp_poll(&g_link, 1000u) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_NO_CF);
+}
+
 /* Jednotce se zprava nevejde (FS=2). */
 static void test_flow_control_overflow(void)
 {
@@ -312,6 +385,31 @@ static void test_flow_control_overflow(void)
     feed(5u, fc_ovf, sizeof(fc_ovf));
     CHECK(isotp_state(&g_link) == ISOTP_FAILED);
     CHECK(isotp_error(&g_link) == ISOTP_ERR_FC_OVERFLOW);
+}
+
+/* Opacny smer: jednotka ohlasi zpravu delsi, nez mame buffer. Musime to
+ * rict nahlas (nas FC s FS=2) a skoncit chybou, ne slepit pulku zpravy
+ * nebo prepsat pamet za bufferem. */
+static void test_receive_too_long(void)
+{
+    static const uint8_t req[] = { 0x19, 0x02, 0xAF };
+    uint16_t len = (uint16_t)(ISOTP_BUF_SIZE + 1);
+    uint8_t ff[8];
+
+    if (ISOTP_BUF_SIZE >= 4095) {
+        return;  /* delsi zpravu uz nejde ve first frame ani ohlasit */
+    }
+    CHECK(isotp_send(&g_link, req, sizeof(req), 0u));
+
+    ff[0] = (uint8_t)(0x10 | ((len >> 8) & 0x0F));
+    ff[1] = (uint8_t)(len & 0xFF);
+    memset(&ff[2], 0x77, 6);
+    isotp_on_frame(&g_link, ECU_RX, ff, 8u, 1u);
+
+    CHECK(g_ntx == 2);
+    CHECK(g_tx[1].data[0] == 0x32);        /* flow control: overflow */
+    CHECK(isotp_state(&g_link) == ISOTP_FAILED);
+    CHECK(isotp_error(&g_link) == ISOTP_ERR_OVERFLOW);
 }
 
 /* ------------------------------------------------------------------
@@ -451,7 +549,11 @@ static const struct {
     { "viceramcove odeslani, block size 1", test_multi_send_bs1 },
     { "chybejici flow control",             test_no_flow_control },
     { "flow control WAIT",                  test_flow_control_wait },
+    { "flow control WAIT donekonecna",      test_flow_control_wait_forever },
+    { "flow control WAIT na hranici",       test_flow_control_wait_limit },
+    { "zaseknuty viceramcovy prijem",       test_receive_stalled },
     { "flow control OVERFLOW",              test_flow_control_overflow },
+    { "prilis dlouha odpoved",              test_receive_too_long },
     { "responsePending 0x78",               test_response_pending },
     { "pojistka N_Cs 150 ms",               test_n_cs_guard },
     { "spatne poradove cislo",              test_bad_sequence },

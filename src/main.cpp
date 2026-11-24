@@ -41,7 +41,55 @@ using namespace esp_panel::board;
 static Preferences prefs;
 static Board *g_board = nullptr;
 
-/* ---------------- podsviceni ---------------- */
+/* ---------------------------------------------------------------------
+ * Podsviceni
+ *
+ * EXIO2 na expanderu CH422G je hlavni vypinac: povoluje budic podsviceni
+ * i samotny panel, takze je to jedina cesta k uplne tme. Zustava, jak
+ * byl, prepina ho Board::getBacklight().
+ *
+ * Jas se regulue PWM na plosce BL. Je to hardwarova uprava: jediny
+ * dratek z CANOGRAF_BL_PWM_PIN na plosku BL vedle konektoru LCD pasku.
+ * Ploska vede pres R11 10k na uzel s C11 1uF na zem - dolni propust s
+ * casovou konstantou 10 ms - a odtud pres R7 68k na vstup FB budice
+ * AP3032. PWM se tedy vyhladi na stejnosmerne napeti a to odecita proud
+ * LEDkam (zmereno, docs/hardware/backlight.md):
+ *
+ *      0,0 V -> 64,6 mA (plny jas)     2,5 V -> 15,0 mA
+ *      1,0 V -> 44,8 mA                3,3 V ->  0,0 mA (zhasnuto)
+ *
+ * POLARITA JE OBRACENA: vetsi strida znamena mensi jas. Prepocet procent
+ * na stridu i s korekci pro lidske oko dela ui_bl_duty() v src/ui.c.
+ * Je to jedine misto, kde ten prepocet je, a sim/lv_shot.c hlida, ze se
+ * polarita nemuze tise prohodit.
+ *
+ * Frekvence 5 kHz je dve dekady nad filtrem, takze zvlneni na uzlu je
+ * pod jednim promile a pritom je dost nizka, aby na nic nenarazela.
+ *
+ * POZOR: CANOGRAF_BL_PWM_PIN je na teto desce GPIO6 a to je zaroven
+ * vstup INT hodin PCF85063. Vystup hodin ma otevreny kolektor, takze do
+ * nej smime tlacit push-pull POTUD, DOKUD jsou alarmy a preruseni RTC
+ * vypnute - po resetu jsou. Kdo bude chtit preruseni z RTC zapnout,
+ * musi pro stmivani najit jinou cestu; moznosti jsou sepsane v
+ * docs/hardware/backlight.md. Nezapinat preruseni RTC za zady tohohle
+ * komentare.
+ *
+ * Deska bez dratku ma CANOGRAF_BL_PWM_PIN = -1. PWM se pak vubec
+ * nerozjede, UI_HOST.bl_set_percent zustane nullptr a rozhrani stmivani
+ * vubec nenabidne - zustane dnesni zap/vyp.
+ * ------------------------------------------------------------------- */
+#ifndef CANOGRAF_BL_PWM_PIN
+#define CANOGRAF_BL_PWM_PIN -1
+#endif
+#ifndef CANOGRAF_BL_PWM_HZ
+#define CANOGRAF_BL_PWM_HZ 5000
+#endif
+
+/* 12 bitu: nejmensi krok stridy je na dolnim konci stupnice hluboko pod
+ * tim, co oko rozezna, a LEDC to pri 5 kHz zvladne (80 MHz / 4096). */
+#define BL_PWM_BITS 12
+#define BL_DUTY_MAX ((1u << BL_PWM_BITS) - 1u)
+
 static void bl_raw(bool on)
 {
     if (!g_board) return;
@@ -51,77 +99,45 @@ static void bl_raw(bool on)
 
 static void host_backlight(bool on) { bl_raw(on); }
 
-/* ---------------------------------------------------------------------
- * POKUS: softwarove PWM podsviceni pres I2C expander
- *
- * Podsviceni je na teto desce jen spinac (EXIO2 na CH422G), takze jedina
- * cesta k plynulemu jasu bez pajeni je klepat tim spinacem dost rychle.
- * Pri 100 Hz to je 200 I2C zapisu za sekundu, cili ~3 % zatizeni sbernice
- * - to neni problem. Problem muze byt viditelne blikani a to, ze AP3032
- * je boost menic, takze jas nemusi vyjit linearne a budic muze pistet.
- *
- * Uloha bezi na jadre 0, aby nekradla cas LVGL. Jeden krok = 1 ms, tedy
- * 10 urovni jasu. Pri zavreni dialogu se vzdy vraci plny jas.
- * ------------------------------------------------------------------- */
-static volatile int pwm_duty = 10;        /* 0..10, 10 = trvale sviti */
-static volatile int pwm_period_ms = 10;   /* 10 = 100 Hz, 20 = 50, 40 = 25 */
-static TaskHandle_t pwm_task_h = NULL;
-static uint32_t bl_toggle_us = 0;         /* zmerena doba jednoho prepnuti */
-
-static void pwm_task(void *arg)
+#if CANOGRAF_BL_PWM_PIN >= 0
+static void host_bl_percent(int percent)
 {
-    (void)arg;
-    for (;;) {
-        int d = pwm_duty, per = pwm_period_ms;
-        int on_ms = per * d / 10;
-        int off_ms = per - on_ms;
-        if (on_ms <= 0)       { bl_raw(false); vTaskDelay(pdMS_TO_TICKS(per)); }
-        else if (off_ms <= 0) { bl_raw(true);  vTaskDelay(pdMS_TO_TICKS(per)); }
-        else {
-            bl_raw(true);  vTaskDelay(pdMS_TO_TICKS(on_ms));
-            bl_raw(false); vTaskDelay(pdMS_TO_TICKS(off_ms));
-        }
+    ledcWrite(CANOGRAF_BL_PWM_PIN, ui_bl_duty(percent, BL_DUTY_MAX));
+}
+#endif
+
+/* false = stmivat se nebude. Volajici pak musi UI tu funkci odebrat,
+ * aby se rozhrani netvarilo, ze stmiva. */
+static bool bl_pwm_init(void)
+{
+#if CANOGRAF_BL_PWM_PIN >= 0
+    if (!ledcAttach(CANOGRAF_BL_PWM_PIN, CANOGRAF_BL_PWM_HZ, BL_PWM_BITS)) {
+        Serial.printf("podsviceni: LEDC na GPIO%d se nerozjelo\n",
+                      CANOGRAF_BL_PWM_PIN);
+        return false;
     }
+    /* Nez UI posle ulozenou uroven, at deska sviti naplno. */
+    ledcWrite(CANOGRAF_BL_PWM_PIN, ui_bl_duty(100, BL_DUTY_MAX));
+    Serial.printf("podsviceni: PWM GPIO%d, %d Hz, %d bitu\n",
+                  CANOGRAF_BL_PWM_PIN, CANOGRAF_BL_PWM_HZ, BL_PWM_BITS);
+    return true;
+#else
+    Serial.println("podsviceni: jen zap/vyp, CANOGRAF_BL_PWM_PIN = -1");
+    return false;
+#endif
 }
-
-/* Zmeri, jak dlouho trva jedno prepnuti podsviceni pres I2C expander.
- * Pokud to vyjde v radu milisekund, kratke pulzy nemaji sanci a softwarove
- * PWM je slepa ulicka bez ohledu na zvolenou frekvenci. */
-static uint32_t host_measure_toggle(void)
-{
-    uint32_t t0 = micros();
-    for (int i = 0; i < 20; i++) { bl_raw(true); bl_raw(false); }
-    bl_toggle_us = (micros() - t0) / 40;
-    bl_raw(true);
-    Serial.printf("prepnuti podsviceni: %u us\n", (unsigned)bl_toggle_us);
-    return bl_toggle_us;
-}
-
-static void host_pwm_set(int duty, int period_ms)
-{
-    pwm_duty = duty;
-    pwm_period_ms = period_ms;
-    if (!pwm_task_h)
-        xTaskCreatePinnedToCore(pwm_task, "blpwm", 2048, NULL, 1, &pwm_task_h, 0);
-}
-
-static void host_pwm_stop(void)
-{
-    if (pwm_task_h) { vTaskDelete(pwm_task_h); pwm_task_h = NULL; }
-    pwm_duty = 10;
-    bl_raw(true);
-}
-
-static bool host_pwm_running(void) { return pwm_task_h != NULL; }
 
 /* ---------------- nastaveni v NVS ---------------- */
-static void host_save_cfg(bool mph, bool fahrenheit, uint32_t blank_s, int lang)
+static void host_save_cfg(const ui_cfg_t *c)
 {
     prefs.begin("talento", false);
-    prefs.putBool("mph", mph);
-    prefs.putBool("fahr", fahrenheit);
-    prefs.putUInt("blank", blank_s);
-    prefs.putInt("lang", lang);
+    prefs.putBool("mph", c->mph);
+    prefs.putBool("fahr", c->fahrenheit);
+    prefs.putUInt("blank", c->blank_s);
+    prefs.putInt("lang", c->lang);
+    prefs.putInt("blday", c->bright_day);
+    prefs.putInt("blnight", c->bright_night);
+    prefs.putBool("blnight_on", c->night);
     prefs.end();
 }
 
@@ -294,8 +310,15 @@ static const char *host_wifi_ip(void)
 static unsigned host_heap_kb(void)  { return (unsigned)(ESP.getFreeHeap() / 1024); }
 static unsigned host_psram_kb(void) { return (unsigned)(ESP.getFreePsram() / 1024); }
 
-static const ui_host_t UI_HOST = {
+/* Neni const: kdyz se PWM nerozjede, musi se bl_set_percent za behu
+ * vynulovat, at UI stmivani nenabizi. */
+static ui_host_t UI_HOST = {
     host_backlight,
+#if CANOGRAF_BL_PWM_PIN >= 0
+    host_bl_percent,
+#else
+    nullptr,                /* bez dratku na plosce BL se stmivat neda */
+#endif
     host_save_cfg,
     host_wifi_scan_start,
     host_wifi_scan_result,
@@ -309,10 +332,6 @@ static const ui_host_t UI_HOST = {
     host_wifi_forget,
     host_heap_kb,
     host_psram_kb,
-    host_measure_toggle,
-    host_pwm_set,
-    host_pwm_stop,
-    host_pwm_running,
 };
 
 /* ---------------- obnovovani ---------------- */
@@ -326,12 +345,18 @@ void setup()
     Serial.println("\nTalento HMI v5 - start");
 
     prefs.begin("talento", true);
-    bool mph = prefs.getBool("mph", false);
-    bool fahr = prefs.getBool("fahr", false);
-    uint32_t blank_s = prefs.getUInt("blank", 0);
+    ui_cfg_t cfg;
+    cfg.mph = prefs.getBool("mph", false);
+    cfg.fahrenheit = prefs.getBool("fahr", false);
+    cfg.blank_s = prefs.getUInt("blank", 0);
     int def_lang = i18n_find(CANOGRAF_DEFAULT_LANG);
     if (def_lang < 0) def_lang = 0;
-    int lang = prefs.getInt("lang", def_lang);
+    cfg.lang = prefs.getInt("lang", def_lang);
+    /* Po prvnim startu: ve dne naplno, v noci na tretinu. Nocni rezim
+     * zacina vypnuty - zapnout ho musi clovek, hodiny nikdo nenastavil. */
+    cfg.bright_day = prefs.getInt("blday", 100);
+    cfg.bright_night = prefs.getInt("blnight", 35);
+    cfg.night = prefs.getBool("blnight_on", false);
     prefs.end();
 
     g_board = new Board();
@@ -342,6 +367,9 @@ void setup()
         Serial.println("CHYBA: lvgl_port_init"); return;
     }
     Serial.println("LVGL OK");
+
+    /* Musi byt pred ui_build(): ta uz posila ulozenou uroven jasu. */
+    if (!bl_pwm_init()) UI_HOST.bl_set_percent = nullptr;
 
     /* CAN se rozjizdi v listen-only: radic nevysila ani potvrzovaci bit,
      * takze ani spatna rychlost nebo prohozene piny nemuzou rozhodit
@@ -367,7 +395,7 @@ void setup()
 
     lvgl_port_lock(-1);
     ui_set_host(&UI_HOST);
-    ui_set_cfg(mph, fahr, blank_s, lang);
+    ui_set_cfg(&cfg);
     ui_build();
     lv_timer_create(tick_cb, 20, NULL);
     lvgl_port_unlock();

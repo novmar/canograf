@@ -93,6 +93,7 @@ static lv_obj_t *chart, *lbl_gap;
 static lv_chart_series_t *ser_sp, *ser_act;
 /* nastaveni */
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
+static lv_obj_t *btn_bright, *btn_daynight;
 /* DPF */
 static lv_obj_t *btn_regen_state;
 
@@ -100,11 +101,6 @@ static lv_obj_t *btn_regen_state;
 static const ui_host_t *host = NULL;
 
 void ui_set_host(const ui_host_t *h) { host = h; }
-
-static bool host_pwm_running(void)
-{
-    return (host && host->bl_pwm_running) ? host->bl_pwm_running() : false;
-}
 
 static bool host_wifi_connected(void)
 {
@@ -130,26 +126,44 @@ static bool host_wifi_known(const char *ssid)
     return host->wifi_known(ssid);
 }
 
-/* ---------------- nastaveni ---------------- */
-static struct {
-    bool mph;                   /* false = km/h */
-    bool fahrenheit;            /* false = C    */
-    uint32_t blank_s;           /* 0 = nikdy zhasinat */
-    int lang;                   /* index do tabulky v i18n.c, 0 = English */
-} cfg;
+/* ---------------------------------------------------------------------
+ * Nastaveni
+ *
+ * Nabidnute urovne jasu. Pet je kompromis mezi "netrefim se" a "nenajdu
+ * tu spravnou": kazdy krok ubere zhruba polovinu proudu LEDkami
+ * (64,6 / 34,5 / 14,1 / 6,6 / 3,2 mA), takze rozdil je videt na prvni
+ * pohled a dva sousedni stupne se nepletou. Sest a vic tlacitek uz by
+ * muselo byt uzsich nez 120 px, coz je minimalni dotykovy cil
+ * (docs/ui.md), a za jizdy by se do nich nikdo netrefil.
+ *
+ * Nejnizsi uroven je 25 %, ne 0 %. Pod ni klesa proud LEDkami pod 3 mA,
+ * kde AP3032 nikdo nepromeril a boost menic muze zacit preskakovat
+ * pulzy. Uplne zhasnout stejne umi jen EXIO2, a to je jine tlacitko.
+ * ------------------------------------------------------------------- */
+#define BL_LEVELS 5
+static const int BL_LEVEL[BL_LEVELS] = {100, 75, 50, 35, 25};
+#define BL_MIN  (BL_LEVEL[BL_LEVELS - 1])
 
-void ui_set_cfg(bool mph, bool fahrenheit, uint32_t blank_s, int lang)
+static ui_cfg_t cfg;
+
+static int bl_clamp(int p)
 {
-    cfg.mph = mph;
-    cfg.fahrenheit = fahrenheit;
-    cfg.blank_s = blank_s;
-    /* i18n_set() necha neplatny index byt, takze cfg.lang musi projit
-     * stejnou kontrolou - jinak by ui_rebuild() cyklovalo od nesmyslu. */
-    i18n_set(lang);
-    cfg.lang = i18n_get();
+    if (p > 100)    return 100;
+    if (p < BL_MIN) return BL_MIN;      /* nesmysl z NVS nesmi zhasnout displej */
+    return p;
 }
 
-static bool backlight_on = true;
+void ui_set_cfg(const ui_cfg_t *c)
+{
+    if (!c) return;
+    cfg = *c;
+    cfg.bright_day   = bl_clamp(cfg.bright_day);
+    cfg.bright_night = bl_clamp(cfg.bright_night);
+    /* i18n_set() necha neplatny index byt, takze cfg.lang musi projit
+     * stejnou kontrolou - jinak by ui_rebuild() cyklovalo od nesmyslu. */
+    i18n_set(cfg.lang);
+    cfg.lang = i18n_get();
+}
 
 /* ---------------- hodnoty ---------------- */
 typedef struct { float target, shown; } val_t;
@@ -279,12 +293,120 @@ static lv_obj_t *mk_arc(lv_obj_t *p, lv_coord_t x, lv_coord_t y, lv_coord_t d,
     return a;
 }
 
-/* ---------------- podsviceni ---------------- */
+/* ---------------------------------------------------------------------
+ * Podsviceni
+ *
+ * Dve nezavisle veci:
+ *
+ *   backlight()  tvrdy vypinac pres EXIO2 na expanderu. Vypina i samotny
+ *                panel, takze je to jedina cesta k uplne tme a jedina
+ *                uspora, ktera stoji za rec.
+ *   bl_set()     strida PWM na plosce BL, tedy jas. Panelu se nedotkne.
+ *
+ * Kdyz deska stmivat neumi (host->bl_set_percent je NULL, protoze na
+ * plosce BL neni dratek), zustane jen vypinac. UI pak stmivani vubec
+ * nenabidne - viz build_nastav(). Predstirat ovladani, ktere nic
+ * nedela, je horsi nez ho nemit.
+ *
+ * Pred zhasnutim po necinnosti se jas za pul vteriny stahne dolu a
+ * teprve pak se vypne panel. Tvrdy skok z plneho jasu do tmy je v noci
+ * rana do oka a clovek nepozna, jestli deska jeste zije. Probuzeni
+ * zustava okamzite - dotek vraci obrazovku bez jakehokoli prejezdu.
+ * ------------------------------------------------------------------- */
+#define BL_FADE_MS 500
+
+static bool backlight_on = true;
+static bool bl_fading = false;
+static uint32_t bl_fade_start = 0;
+static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
+
+/* dialog jasu - zije jen po dobu otevreneho dialogu, uklizi modal_forget() */
+static lv_obj_t *btn_bl_level[BL_LEVELS], *btn_bl_mode;
+
+static bool bl_can_dim(void) { return host && host->bl_set_percent; }
+
+static int bl_level(void) { return cfg.night ? cfg.bright_night : cfg.bright_day; }
+
+static void bl_set(int percent)
+{
+    if (!bl_can_dim() || percent == bl_shown) return;
+    bl_shown = percent;
+    host->bl_set_percent(percent);
+}
+
+static void bl_apply(void) { bl_set(bl_level()); }
+
 static void backlight(bool on)
 {
-    if (!host || !host->backlight || on == backlight_on) return;
-    host->backlight(on);
+    bl_fading = false;
+    /* Jas se nastavuje jeste pred zapnutim panelu, aby se displej nikdy
+     * neukazal se stridou, ktera zbyla po stmivani. */
+    if (on) bl_apply();
+    if (on == backlight_on) return;
     backlight_on = on;
+    if (host && host->backlight) host->backlight(on);
+}
+
+static void blank_begin(void)
+{
+    if (bl_fading) return;
+    if (!bl_can_dim()) { backlight(false); return; }
+    bl_fading = true;
+    bl_fade_start = lv_tick_get();
+}
+
+static void blank_step(void)
+{
+    if (!bl_fading) return;
+    uint32_t el = lv_tick_get() - bl_fade_start;
+    if (el >= BL_FADE_MS) {
+        bl_set(0);              /* strida na doraz, LEDky uz nesviti */
+        backlight(false);       /* az ted vypnout panel */
+        return;
+    }
+    bl_set((int)((uint32_t)bl_level() * (BL_FADE_MS - el) / BL_FADE_MS));
+}
+
+/* ---------------------------------------------------------------------
+ * Prevod jasu na stridu PWM.
+ *
+ * Prevodni charakteristika desky je v PROUDU temer linearni (zmereno,
+ * docs/hardware/backlight.md): napeti na plosce BL ubira proud LEDkam
+ * linearne, 0 V = 64,6 mA, 3,3 V = 0 mA. PWM pres filtr R11+C11 je to
+ * napeti, takze strida se chova jako napeti - a POLARITA JE OBRACENA:
+ * vetsi jas znamena MENSI stridu.
+ *
+ * Lidske oko ale linearni neni. Vnimany jas odpovida zhruba druhe
+ * odmocnine az 2,2. mocnine svetelneho toku (CIE L*, stejna uvaha jako
+ * za gamou 2,2 v sRGB), takze linearni prevod procent na proud by dal
+ * horni polovinu stupnice skoro k nerozeznani a dolni po skocich.
+ *
+ * Tabulka je proto proud v promilich plneho proudu pro kazdych 10 %
+ * vnimaneho jasu, spocitany jako (p/100)^2,2 * 1000:
+ *
+ *     p %     0    10    20    30    40    50    60    70    80    90   100
+ *     promile 0     6    29    71   133   218   325   456   612   793  1000
+ *     mA    0,0   0,4   1,9   4,6   8,6  14,1  21,0  29,5  39,5  51,2  64,6
+ *
+ * Mezi body se interpoluje primkou; chyba proti mocnine je pod jedno
+ * procento, coz je hluboko pod rozlisovaci schopnosti oka i pod
+ * tolerancemi R6/R8. Celociselne, zadne powf() v obsluze doteku.
+ * ------------------------------------------------------------------- */
+uint32_t ui_bl_duty(int percent, uint32_t duty_max)
+{
+    static const uint16_t CURVE[11] = {
+        0, 6, 29, 71, 133, 218, 325, 456, 612, 793, 1000
+    };
+    if (percent < 0)   percent = 0;
+    if (percent > 100) percent = 100;
+
+    int i = percent / 10;
+    uint32_t permille = CURVE[i];
+    if (i < 10)
+        permille += (uint32_t)(CURVE[i + 1] - CURVE[i]) * (percent % 10) / 10;
+
+    /* Obracena polarita: plny jas = strida 0, tma = strida duty_max. */
+    return duty_max - (uint32_t)((uint64_t)duty_max * permille / 1000);
 }
 
 /* ---------------------------------------------------------------------
@@ -543,6 +665,8 @@ static void modal_forget(void)
     hold_num   = NULL;
     hold_action = NULL;
     hold_done   = false;
+    btn_bl_mode = NULL;
+    for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[i] = NULL;
     /* Timer odpoctu kresli do popisku v dialogu, takze musi skoncit tady.
      * Ukazatele uz jsou NULL, takze i kdyby se jeste jednou spustil,
      * nema do ceho psat. */
@@ -1074,8 +1198,7 @@ static void ui_rebuild(void)
 /* ---------------- nastaveni: obsluha ---------------- */
 static void save_cfg(void)
 {
-    if (host && host->save_cfg)
-        host->save_cfg(cfg.mph, cfg.fahrenheit, cfg.blank_s, cfg.lang);
+    if (host && host->save_cfg) host->save_cfg(&cfg);
 }
 
 /* Jazyky se cyklicky stridaji; samostatna obrazovka s vyberem by pro tri
@@ -1138,76 +1261,101 @@ static void blank_cb(lv_event_t *e)
 }
 
 /* ---------------------------------------------------------------------
- * POKUS: softwarove PWM podsviceni pres I2C expander
+ * Jas podsviceni
  *
- * Podsviceni je na teto desce jen spinac (EXIO2 na CH422G), takze jedina
- * cesta k plynulemu jasu bez pajeni je klepat tim spinacem dost rychle.
- * Pri 100 Hz to je 200 I2C zapisu za sekundu, cili ~3 % zatizeni sbernice
- * - to neni problem. Problem muze byt viditelne blikani a to, ze AP3032
- * je boost menic, takze jas nemusi vyjit linearne a budic muze pistet.
+ * Tlacitka, ne posuvnik. Posuvnik vyzaduje trefit se a pak jeste
+ * udrzet prst na jednom miste; za jizdy se obe veci nepovedou. Tlacitko
+ * ma pevnou polohu, takze se da zmacknout naslepo.
  *
- * Samotne klepani resi deska (ui_host_t), tady zustava jen dialog.
+ * Urovne plati pro prave zapnuty rezim. Nocni se tedy nastavi tak, ze
+ * se prepne na noc a vybere uroven - stejna tlacitka, zadna druha
+ * obrazovka a zadne "upravit nocni jas".
  * ------------------------------------------------------------------- */
-static int pwm_duty = 10;            /* 0..10, 10 = trvale sviti */
-static int pwm_period_ms = 10;       /* 10 = 100 Hz, 20 = 50, 40 = 25 */
-static uint32_t bl_toggle_us = 0;    /* zmerena doba jednoho prepnuti */
 
-static void pwm_set_cb(lv_event_t *e)
+/* Popisek tlacitka JAS v nastaveni. Je i v build_nastav(), aby tlacitko
+ * uz pri stavbe ukazovalo uroven z NVS a ne natvrdo zadanou. */
+static void bright_btn_paint(void)
 {
-    pwm_duty = (int)(intptr_t)lv_event_get_user_data(e);
-    if (host && host->bl_pwm_set) host->bl_pwm_set(pwm_duty, pwm_period_ms);
+    if (!btn_bright) return;
+    char b[16];
+    snprintf(b, sizeof(b), "%d %%", bl_level());
+    lv_label_set_text(lv_obj_get_child(btn_bright, 0), b);
 }
 
-static void pwm_stop_cb(lv_event_t *e)
+/* Prepinac den/noc je na dvou mistech najednou - v nastaveni a v
+ * dialogu - a oba musi ukazovat totez. */
+static void daynight_btn_paint(void)
 {
-    if (host && host->bl_pwm_stop) host->bl_pwm_stop();
-    pwm_duty = 10;
-    backlight_on = true;
-    modal_close_cb(e);
+    const char *t = T(cfg.night ? STR_BRIGHT_NIGHT : STR_BRIGHT_DAY);
+    if (btn_daynight) lv_label_set_text(lv_obj_get_child(btn_daynight, 0), t);
+    if (btn_bl_mode)  lv_label_set_text(lv_obj_get_child(btn_bl_mode, 0), t);
 }
 
-static lv_obj_t *lbl_pwm_info = NULL, *btn_pwm_freq = NULL;
+/* Vybrana uroven ma silnejsi obrubu. Barva se nemeni: modra a kostena
+ * maji v tehle aplikaci pevny vyznam (zadano / skutecnost) a vyber
+ * tlacitka mezi ne nepatri. */
+static void bl_level_paint(void)
+{
+    for (int i = 0; i < BL_LEVELS; i++) {
+        if (!btn_bl_level[i]) continue;
+        bool sel = BL_LEVEL[i] == bl_level();
+        lv_obj_set_style_border_color(btn_bl_level[i],
+            lv_color_hex(sel ? C_BRIGHT : C_RULE), 0);
+        lv_obj_set_style_border_width(btn_bl_level[i], sel ? 3 : 1, 0);
+    }
+}
 
-static void pwm_freq_cb(lv_event_t *e)
+static void bl_level_cb(lv_event_t *e)
+{
+    int p = (int)(intptr_t)lv_event_get_user_data(e);
+    if (cfg.night) cfg.bright_night = p;
+    else           cfg.bright_day = p;
+    bl_apply();
+    save_cfg();
+    bl_level_paint();
+    bright_btn_paint();
+}
+
+static void daynight_cb(lv_event_t *e)
 {
     (void)e;
-    pwm_period_ms = (pwm_period_ms == 10) ? 20 : (pwm_period_ms == 20 ? 40 : 10);
-    char b[24];
-    snprintf(b, sizeof(b), "%d Hz", 1000 / pwm_period_ms);
-    lv_label_set_text(lv_obj_get_child(btn_pwm_freq, 0), b);
-    /* bezici klepani ma zmenu frekvence prevzit hned */
-    if (host_pwm_running() && host->bl_pwm_set) host->bl_pwm_set(pwm_duty, pwm_period_ms);
+    cfg.night = !cfg.night;
+    bl_apply();
+    save_cfg();
+    daynight_btn_paint();
+    bl_level_paint();
+    bright_btn_paint();
 }
+
+/* Pet tlacitek po 140 px s mezerou 8 px: 30 + 4*148 + 140 = 762, takze
+ * se vejdou na sirku i s okraji. Vyska 120 px je minimalni dotykovy cil
+ * z docs/ui.md, stejny jako u ostatnich dialogovych tlacitek. */
+#define BL_BTN_W    140
+#define BL_BTN_H    120
+#define BL_BTN_X(i) (30 + (i) * (BL_BTN_W + 8))
 
 static void bright_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *m = modal_open(T(STR_BRIGHT_TITLE), C_ACTUAL);
 
-    if (host && host->bl_measure_toggle_us) bl_toggle_us = host->bl_measure_toggle_us();
-    /* Preklad je delsi nez puvodni cestina bez hacku a v UTF-8 zabere
-     * znak s diakritikou dva bajty - nemecka verze ma pres 200 bajtu. */
-    char info[256];
-    snprintf(info, sizeof(info), T(STR_BRIGHT_INFO),
-             (unsigned)bl_toggle_us, pwm_period_ms, pwm_period_ms / 10);
-    lbl_pwm_info = mk_lbl(m, info, UI_FONT_16, C_LABEL, 20, 80);
-    lv_label_set_long_mode(lbl_pwm_info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(lbl_pwm_info, 760);
+    lv_obj_t *info = mk_lbl(m, T(STR_BRIGHT_INFO), UI_FONT_16, C_LABEL, 30, 96);
+    lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(info, 740);
 
-    const int duty[5] = {10, 7, 5, 3, 1};
-    const char *cap[5] = {"100 %", "70 %", "50 %", "30 %", "10 %"};
-    for (int i = 0; i < 5; i++)
-        mk_button(m, 16 + i * 128, 170, 120, 110, cap[i], UI_FONT_24,
-                  C_ACTUAL, pwm_set_cb, (void *)(intptr_t)duty[i]);
+    for (int i = 0; i < BL_LEVELS; i++) {
+        char cap[8];
+        snprintf(cap, sizeof(cap), "%d %%", BL_LEVEL[i]);
+        btn_bl_level[i] = mk_button(m, BL_BTN_X(i), 200, BL_BTN_W, BL_BTN_H,
+                                    cap, UI_FONT_24, C_ACTUAL, bl_level_cb,
+                                    (void *)(intptr_t)BL_LEVEL[i]);
+    }
+    bl_level_paint();
 
-    mk_lbl(m, T(STR_FREQUENCY), UI_FONT_14, C_LABEL, 660, 150);
-    char fb[24];
-    snprintf(fb, sizeof(fb), "%d Hz", 1000 / pwm_period_ms);
-    btn_pwm_freq = mk_button(m, 660, 170, 124, 110, fb, UI_FONT_24,
-                             C_DEMAND, pwm_freq_cb, NULL);
-
-    mk_button(m, 16, 330, 380, 120, T(STR_FULL_BRIGHT), UI_FONT_24,
-              C_SAGE, pwm_stop_cb, NULL);
+    mk_lbl(m, T(STR_SET_DAYNIGHT), UI_FONT_14, C_LABEL, 30, 338);
+    btn_bl_mode = mk_button(m, 30, 358, 300, BL_BTN_H - 10, "", UI_FONT_32,
+                            C_DEMAND, daynight_cb, NULL);
+    daynight_btn_paint();
 }
 
 /* ---------------- stranky ---------------- */
@@ -1343,13 +1491,16 @@ static void build_dpf(lv_obj_t *scr)
     mk_lbl(p, T(STR_DPF_NO_VEHICLE), UI_FONT_16, C_LABEL, 20, 250);
 }
 
-/* Prvni rada nastaveni: pet tlacitek vedle sebe. Rozestup je tesny,
- * protoze sesty sloupec uz by se do CONT_W nevesel - kdyby pribylo dalsi
- * nastaveni, bude potreba druha rada, ne uzsi tlacitka. */
-#define SET_BW      130
+/* Nastaveni ma tri rady. Prvni ctyri tlacitka prepinaji jednu hodnotu
+ * tuknutim, druha rada otevira dialogy a prepina den/noc, treti nese
+ * vypinac displeje a diagnostiku. Nic se nesmi dostat pod 292 px: od tam
+ * dolu to prekryva vysunuta lista stranek. */
+#define SET_BW      160
 #define SET_BH      76
-#define SET_PITCH   143
+#define SET_PITCH   176
 #define SET_X(i)    (20 + (i) * SET_PITCH)
+#define SET_ROW2    132         /* druha rada tlacitek */
+#define SET_ROW3    216         /* treti rada, konci presne na 292 */
 
 static void build_nastav(lv_obj_t *scr)
 {
@@ -1367,29 +1518,45 @@ static void build_nastav(lv_obj_t *scr)
     blank_label(b, sizeof(b), cfg.blank_s);
     btn_blank = mk_button(p, SET_X(2), 28, BW, BH, b,
                           UI_FONT_24, C_DEMAND, blank_cb, NULL);
-    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, SET_X(3), 8);
-    mk_button(p, SET_X(3), 28, BW, BH, T(STR_PWM_TEST), UI_FONT_20,
-              C_ACTUAL, bright_cb, NULL);
-    mk_lbl(p, T(STR_SET_LANG), UI_FONT_14, C_LABEL, SET_X(4), 8);
-    mk_button(p, SET_X(4), 28, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
+    mk_lbl(p, T(STR_SET_LANG), UI_FONT_14, C_LABEL, SET_X(3), 8);
+    mk_button(p, SET_X(3), 28, BW, BH, i18n_name(cfg.lang), UI_FONT_24,
               C_SAGE, lang_cb, NULL);
 
-    mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, 20, 120);
-    lbl_wifi = mk_lbl(p, T(STR_WIFI_NOT_CONN), UI_FONT_24, C_LABEL, 20, 140);
-    mk_button(p, 360, 120, 320, BH + 20, T(STR_WIFI_PICK), UI_FONT_24,
+    mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, 20, SET_ROW2 - 20);
+    mk_button(p, 20, SET_ROW2, 320, BH, T(STR_WIFI_PICK), UI_FONT_24,
               C_DEMAND, wifi_scan_cb, NULL);
+
+    /* Jas. Kdyz deska stmivat neumi, nevznikne ani jedno tlacitko a na
+     * jejich miste je vysvetleni proc - predstirat ovladani, ktere nic
+     * nedela, by bylo horsi nez ho nemit. */
+    mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, 360, SET_ROW2 - 20);
+    btn_bright = NULL;
+    btn_daynight = NULL;
+    if (bl_can_dim()) {
+        btn_bright = mk_button(p, 360, SET_ROW2, BW, BH, "", UI_FONT_24,
+                               C_ACTUAL, bright_cb, NULL);
+        bright_btn_paint();
+        mk_lbl(p, T(STR_SET_DAYNIGHT), UI_FONT_14, C_LABEL, 540, SET_ROW2 - 20);
+        btn_daynight = mk_button(p, 540, SET_ROW2, 170, BH, "", UI_FONT_24,
+                                 C_DEMAND, daynight_cb, NULL);
+        daynight_btn_paint();
+    } else {
+        lv_obj_t *na = mk_lbl(p, T(STR_BRIGHT_NA), UI_FONT_14, C_LABEL,
+                              360, SET_ROW2);
+        lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(na, 350);
+    }
+
+    lbl_wifi = mk_lbl(p, T(STR_WIFI_NOT_CONN), UI_FONT_20, C_LABEL,
+                      20, SET_ROW3);
+    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, SET_ROW3 + 36);
 
     /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne jako
      * u automatickeho zhasnuti - resi to ui_tick() pres necinnost LVGL.
-     * Hlavni duvod existence: merit na ploskach BL/GND se zhasnutym
-     * podsvicenim, aniz by se cekalo na timeout.
-     *
-     * Tlacitko i radek s diagnostikou musi skoncit nad 292 px: od tam dolu
-     * je prekryva vysunuta lista stranek. */
-    mk_button(p, 20, 200, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
+     * Zhasina natvrdo, bez stmivani: hlavni duvod existence je merit na
+     * ploskach BL/GND a tam je potreba znamy stav, ne prejezd. */
+    mk_button(p, 360, SET_ROW3, 320, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
               C_ACTUAL, display_off_cb, NULL);
-
-    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 360, 240);
 }
 
 /* Sloupec je vysoky jako stranka, ale jeho obsah musi zustat nad uchytem
@@ -1643,19 +1810,20 @@ void ui_tick(void)
         if (now - nav_shown_ms > NAV_IDLE_MS) set_nav_state(0);
     }
 
-    /* Zhasinani displeje po necinnosti - jedina softwarova uspora, ktera
-     * na teto desce existuje (podsviceni je jen zap/vyp, ne PWM).
-     * lv_disp_get_inactive_time pocita od posledni akce uzivatele, takze
-     * resi probuzeni i usnuti jednim merenim. */
+    /* Zhasinani displeje po necinnosti. lv_disp_get_inactive_time pocita
+     * od posledni akce uzivatele, takze resi probuzeni i usnuti jednim
+     * merenim. Kdyz jde jas regulovat, zhasnuti zacina pulvterinovym
+     * stahnutim jasu (blank_begin/blank_step) a teprve pak padne panel;
+     * probuzeni je naopak okamzite, bez jakehokoli prejezdu. */
     uint32_t idle = lv_disp_get_inactive_time(NULL);
-    /* kdyz bezi pokus s PWM, nesmi mu do podsviceni mluvit zhasinani */
-    if (!host_pwm_running()) {
+    if (idle < 300 && (!backlight_on || bl_fading)) {
         /* ochranna lhuta po rucnim zhasnuti - jinak by displej probudil
          * tentyz dotek, kterym se zhasinalo */
-        if (idle < 300 && !backlight_on &&
-            (lv_tick_get() - blank_guard_ms) > 1500) backlight(true);
-        if (cfg.blank_s && backlight_on && idle > cfg.blank_s * 1000UL) backlight(false);
+        if (now - blank_guard_ms > 1500) backlight(true);
+    } else if (cfg.blank_s && backlight_on && idle > cfg.blank_s * 1000UL) {
+        blank_begin();
     }
+    blank_step();
 }
 
 /* ---------------- stavba ---------------- */
@@ -1684,6 +1852,11 @@ void ui_build(void)
     lv_obj_move_foreground(navbar);
     lv_obj_move_foreground(navgrid);
     lv_obj_move_foreground(navhandle);
+
+    /* Jas z NVS musi platit od prvniho snimku, ne az od prvniho tuknuti
+     * do nastaveni. Deska uz PWM nastavenou ma, tohle do ni jen posle
+     * ulozenou uroven prislusneho rezimu. */
+    bl_apply();
 
     /* Jen pri prvni stavbe. Po zmene jazyka se UI stavi znovu a namerene
      * hodnoty si musi zustat tam, kde byly - jinak by plnici tlak skocilo

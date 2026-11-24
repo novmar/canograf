@@ -65,9 +65,9 @@ static const char *const LANG_CS[] = {
     "TEPLOTA",
     "ZHASNOUT PO",
     "JAS",
+    "DEN / NOC",
     "JAZYK",
     "nikdy",
-    "PWM test",
 
     /* WiFi */
     "nepřipojeno",
@@ -93,13 +93,15 @@ static const char *const LANG_CS[] = {
     "DRŽ %d s",
     "HOTOVO",
 
-    /* pokus s PWM podsvicenim */
-    "Jas - pokus se softwarovým PWM",
-    "Jedno přepnutí přes I2C trvá %u us. Při periodě %d ms je "
-    "nejkratší puls %d ms - jestli při nízkém jasu zhasne úplně, "
-    "nestíhá naběhnout boost měnič AP3032.",
-    "FREKVENCE",
-    "ZPĚT NA PLNÝ JAS",
+    /* jas podsviceni */
+    "Jas",
+    "Úrovně níže nastavují ten režim, který je právě zapnutý. Noční se "
+    "přepíná ručně: deska sice hodiny má, ale nikdo je nenastavil, "
+    "takže hádat podle času by bylo horší než jedno tlačítko.",
+    "Na této desce ne. Stmívání potřebuje drátek z GPIO6 na plošku BL; "
+    "bez něj je podsvícení jen vypínač.",
+    "DEN",
+    "NOC",
 
     /* navigace */
     "MÍSTO PRO DALŠÍ FUNKCE",
