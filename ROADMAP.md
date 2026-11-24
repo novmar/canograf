@@ -168,10 +168,10 @@ precondition check and a backup of whatever it overwrites.
       conflict below**: `DI0` is on the I2C expander, and I2C is dead in deep
       sleep, so the ignition signal has to reach a real GPIO to wake anything
 
-### One free pin, three claims on it
+### One free pin, three claims - but two of them can share
 
 `GPIO6` is the only ESP32-S3 pin this board leaves unused, and three separate
-features want it. Only one can have it at a time:
+features want it:
 
 | claim | state | what it buys |
 |---|---|---|
@@ -184,12 +184,43 @@ cell, timestamps for the log - works over I2C and needs no interrupt line. The
 interrupt is only worth a pin for waking a sleeping processor, because that is
 the one case where nothing can be asked over a bus.
 
-The choice is genuinely exclusive. `EXIO6` and `EXIO7` on the expander are
-unrouted and look like spare pins, but they are not a way out of this: the
+Two of the three can share the pin by time, which is worked out below. What
+does **not** help: `EXIO6` and `EXIO7` on the expander are unrouted and look
+like spare pins, but they are not a way out of this - the
 expander sits on I2C, I2C is dead in deep sleep, so neither can wake anything.
 They cannot dim either - the filter wants PWM above roughly 500 Hz and one
 expander toggle was measured at 174 us. They are unused legs on a slow part,
 not a reserve.
+
+#### Dimming and the RTC alarm can share the pin by time
+
+The two roles are never needed at once: nothing is woken while the processor
+runs, and nothing is dimmed while it sleeps. So the pin can change job with
+the power state.
+
+- running: LEDC output, drives the `BL` pad, dimming works
+- going to sleep: switch to an RTC input with the internal pull-up, arm the
+  alarm. The pull-up puts `BL` high, which by the dimming curve means the
+  backlight is off - which is what sleep wants anyway
+- asleep: the RTC pulls the line low at the alarm and wakes the chip
+- awake again: back to LEDC output
+
+**The one place this breaks.** The RTC output is open-drain and can only pull
+down. Driving the pin push-pull high while the RTC holds it low is a short
+through the RTC's output transistor. That cannot happen while running, because
+the alarm is disabled - but it can happen at the moment of waking, since the
+RTC keeps `INT` low until the flag is cleared over I2C. So the order on wake is
+fixed: clear the alarm flag first, switch the pin to output second. Reversed,
+it drives against the RTC for as long as the I2C transaction takes.
+
+That leaves ignition wake as the only claim still locked out, because it needs
+a pin of its own and there is no second one.
+
+**Measure before building any of this.** The 3 W figure is mostly panel and
+backlight. Nobody has measured what the board draws with the panel off, and
+several parts cannot be switched off at all - the CAN transceiver has its
+control pin tied to ground, so it stays in normal mode. If the floor is high,
+sleeping saves little and this whole contest is moot.
 - [x] **Backlight dimming through `GPIO6`** - done and measured on hardware.
       One wire from `GPIO6` to the `BL` pad, no cut, nothing removed. The pad
       feeds the driver's feedback node through a 10 k / 1 uF filter, so a
