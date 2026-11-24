@@ -85,7 +85,7 @@ static const char *const LANG_EN[] = {
     "network again will ask for it.",
     "no network found",
     "scan failed - try again",
-    "TRY AGAIN",
+    "RETRY",
 
     /* dialogs */
     "BACK",

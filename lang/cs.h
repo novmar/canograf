@@ -83,7 +83,7 @@ static const char *const LANG_CS[] = {
     "se UI zeptá znovu.",
     "žádná síť nenalezena",
     "hledání se nezdařilo - zkuste znovu",
-    "ZKUSIT ZNOVU",
+    "ZNOVU",
 
     /* dialogy */
     "ZPĚT",

@@ -49,15 +49,31 @@ Ordered roughly by dependency. Nothing here is a promise.
 
 ## Known bugs
 
-- [ ] **Closing the WiFi scan dialog sometimes crashes.** `wifi_list` is left
-      pointing at a deleted object; if the scan finishes afterwards,
-      `wifi_poll()` writes into freed memory. Null the pointers and reset the
-      scan state when the dialog closes
-- [ ] Left edge swipe does not go back from the password dialog - the keyboard
-      swallows the gesture, the handler sits on the screen below
-- [ ] **Remembered networks.** Picking a network that was already connected
-      asks for the password again. Store several known networks, connect
-      without asking, and show them as a list
+- [x] **Closing the WiFi scan dialog sometimes crashes.** `wifi_list` was left
+      pointing at a deleted object and a scan finishing afterwards made
+      `wifi_poll()` write into freed memory. Every dialog now clears its own
+      state from an `LV_EVENT_DELETE` handler, so no exit path can forget it.
+      Reproduced and confirmed fixed with AddressSanitizer in the host build
+- [x] Left edge swipe does not go back from a dialog. The real cause was not
+      the keyboard: every LVGL object is created with `LV_OBJ_FLAG_GESTURE_BUBBLE`,
+      so the gesture walked past the dialog up to the screen, which switched
+      page underneath instead. Dialogs now clear that flag and handle the
+      gesture themselves
+- [x] One swipe could act twice. LVGL re-arms the gesture when the object under
+      the finger changes, so the rest of the same swipe fired again - pages
+      flew past two at a time. Acting on a gesture now swallows the rest of
+      the press
+- [x] A drag starting on a navigation button also counted as a tap and switched
+      page. Clicks are now discarded when finger travel exceeds 30 px
+- [x] **Remembered networks.** Six networks are kept in NVS, most recent first.
+      A known network connects without asking, is marked green with a tick in
+      the list, and a long press offers to forget it
+- [x] **WiFi scan ends on "scanning" and finds nothing.** `scanComplete()`
+      returns -2 for a failed scan and the UI treated anything below zero as
+      "still running". The scan now reports failure, an empty result and a
+      15 s timeout separately, with a retry button; the board puts the radio
+      into station mode and drops an unfinished connection attempt first,
+      because `esp_wifi_scan_start()` refuses to run in that state
 
 ## Next - talk to the car
 

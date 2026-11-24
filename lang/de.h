@@ -84,7 +84,7 @@ static const char *const LANG_DE[] = {
     "Verbinden fragt die Oberfläche erneut danach.",
     "kein Netz gefunden",
     "Suche fehlgeschlagen - erneut versuchen",
-    "ERNEUT VERSUCHEN",
+    "NOCHMAL",
 
     /* Dialoge */
     "ZURÜCK",

@@ -86,7 +86,7 @@ static void safe_name(char *dst, size_t n, const char *src)
  * Predstirana deska
  *
  * Sken vraci petici vymyslenych siti, dve z nich jsou "ulozene", aby
- * bylo videt odliseni v seznamu i zapomínani. Hesla nikam nejdou, drzi
+ * bylo videt odliseni v seznamu i zapominani. Hesla nikam nejdou, drzi
  * se jen v pameti teto zkousky.
  * ------------------------------------------------------------------- */
 #define FAKE_SCAN_MS 1200       /* jak dlouho predstirany sken "bezi" */
@@ -379,6 +379,10 @@ static void phase_wifi(void)
     run_ms(1600, false);                    /* sken dobehne */
     shot("wifi-seznam");
 
+    /* ZNOVU postavi dialog odznova z obsluhy tlacitka, ktere v nem lezi */
+    tap(710, 300, false);
+    run_ms(1600, false);
+
     /* neznama sit se zepta na heslo */
     tap(300, 184, false);
     shot("wifi-heslo");
@@ -393,6 +397,19 @@ static void phase_wifi(void)
     run_ms(700, false);                     /* dlouhy stisk */
     touch_release(false);
     shot("wifi-zapomenout");
+
+    /* Potvrzeni drzenim sit smaze a vrati seznam. Akce se spousti z
+     * timeru odpoctu a sama postavi novy dialog, takze je to zaroven
+     * zkouska, ze se pri tom nesaha na zruseny. */
+    int saved_before = fake_saved_n;
+    touch_at(210, 390);
+    touch_down = true;
+    run_ms(4200, false);                    /* 3 s odpocet a potvrzeni */
+    touch_release(false);
+    run_ms(1600, false);                    /* novy sken po navratu */
+    check("podrzeni ulozenou sit zapomene", fake_saved_n == saved_before - 1);
+    shot("wifi-po-zapomenuti");
+
     swipe(120, 240, 700, 250, 8, false, false);
     run_ms(200, false);
 }

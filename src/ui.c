@@ -549,7 +549,14 @@ static void modal_forget(void)
     if (hold_timer) { lv_timer_del(hold_timer); hold_timer = NULL; }
 }
 
-static void modal_deleted_cb(lv_event_t *e) { (void)e; modal_forget(); }
+/* Prestavba UI po zmene jazyka rusi starou obrazovku az pozdeji
+ * (lv_obj_del_async), takze tahle obsluha muze dobehnout ve chvili, kdy
+ * uz je otevreny jiny dialog. Uklizi se proto jen stav toho dialogu,
+ * ktery se opravdu rusi. */
+static void modal_deleted_cb(lv_event_t *e)
+{
+    if (lv_event_get_target(e) == modal) modal_forget();
+}
 
 static void modal_close_cb(lv_event_t *e) { (void)e; if (modal) lv_obj_del(modal); }
 
@@ -620,12 +627,12 @@ static void show_info(const char *title, const char *body, uint32_t accent)
  *
  * Proti show_info() ma ctyri veci navic:
  *   - dve STEJNE VELIKA tlacitka. Kdyby bylo zruseni mensi, cetlo by se jako
- *     druhoradá volba, a u akce, ktera umi poskodit vuz, to je spatne.
+ *     druhorada volba, a u akce, ktera umi poskodit vuz, to je spatne.
  *   - potvrzeni se musi DRZET 3 vteriny
  *   - odpocet je UPROSTRED OBRAZOVKY, ne na tlacitku. Na tlacitku ho
  *     zakryval prst, takze uzivatel nevidel, jak daleko odpocet je.
  *     Prst lezi dole, stred zustava volny, a cislice je pres pul dialogu.
- *     Kazda ubehla vterina celym prekryvem bliknne zlute: deska nema ani
+ *     Kazda ubehla vterina celym prekryvem blikne zlute: deska nema ani
  *     bzucak, ani motorek, takze zpetna vazba muze byt jedine videt a
  *     musi byt citelna i periferne.
  *   - po dokonceni se nejdriv kratce ukaze potvrzeni a teprve pak se

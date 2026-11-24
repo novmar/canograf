@@ -59,9 +59,13 @@ information should be readable in one or two glances, under two seconds - that
 only works if it does not move or need a tap.
 
 **Right rail** shows particulate filter loading on every page, colour coded:
-sage below 12 g, bone above 12, vermilion above 18.
+sage below 12 g, bone above 12, vermilion above 18. A regeneration tints the
+whole rail: dim red once it has been requested, blinking while it runs, with
+the fill draining from the top. Progress reported by the engine control unit
+moves the fill smoothly; without it the fill steps down in fifths, because a
+smooth sweep would read as a measurement and the estimate is not one.
 
-**Bottom** is a three-state navigation, driven by swiping up:
+**Bottom** is a three-state navigation:
 
 | state | height | what is shown |
 |---|---|---|
@@ -69,14 +73,46 @@ sage below 12 g, bone above 12, vermilion above 18.
 | 1 | 124 px | six page buttons |
 | 2 | 300 px | 3 x 6 tile grid for future functions, currently empty |
 
-States 1 and 2 collapse back to the handle after five seconds of inactivity, so
-the gauges get the screen back without anyone doing anything.
+It is an **overlay**. The first version resized every page to whatever the
+navigation left over, so pulling it up shrank the gauges and the content jumped
+about. Controls must not redraw content: pages are always 416 px tall and the
+navigation slides over them. The pages lose their bottom 124 px while the bar
+is out, which is why nothing important lives below 292 px - and the bar drops
+back to the handle after five seconds of inactivity anyway.
+
+The panel is **dragged like an Android bottom sheet**: up, hold, back down,
+without lifting the finger. It only changes its y position, never its size, so
+nothing is laid out again and only the strip it moved over is redrawn. On
+release it settles into the nearest state measured in pixels - the three states
+are not evenly spaced - unless the finger was moving faster than about
+400 px/s, which steps one state in that direction the way a flick should.
 
 Swiping left and right changes page. Swiping right **from the left edge**
 returns to the main page, the way Android does it. Arrow buttons were dropped:
 with six pages plus two arrows each control would have been 100 px, which is
 11.7 mm, below the minimum above. Gestures do the same job without stealing
 space.
+
+## A drag is not a tap
+
+LVGL sends `LV_EVENT_CLICKED` to the object the press **started** on, wherever
+the finger ends up. Navigation buttons are 110 px tall, so dragging the bar up
+from one of them also switched page. Every button therefore records the press
+point and discards the click when the finger travelled more than **30 px**,
+which is 3.5 mm: above the wobble of a stationary finger (LVGL itself treats up
+to 10 px as standing still) and below the 50 px a gesture needs, so one stroke
+never does two things.
+
+## Confirmation has to be visible, not felt
+
+Destructive actions are confirmed by holding a button for three seconds. The
+countdown used to be printed on that button, under the finger. It now takes the
+middle of the screen: a draining ring with the remaining seconds inside it, and
+every elapsed second flashes the whole overlay yellow. The board has no buzzer
+and no vibration motor, so feedback can only be seen, and it has to be visible
+in peripheral vision. When the time is up the ring turns sage and shows a tick
+for 700 ms before the action runs - otherwise the dialog would vanish before
+anyone noticed they had held long enough.
 
 ## Gauges have to flow
 
