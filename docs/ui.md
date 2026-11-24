@@ -70,14 +70,22 @@ smooth sweep would read as a measurement and the estimate is not one.
 | state | height | what is shown |
 |---|---|---|
 | 0 | 44 px | handle only, two short bars, the universal "pull me" mark |
-| 1 | 124 px | six page buttons |
-| 2 | 300 px | 3 x 6 tile grid for future functions, currently empty |
+| 1 | 152 px | six page buttons, 129 x 140 px each |
+| 2 | 416 px | the same bar, still at the top, with two rows of tiles below it |
+
+The page buttons were 110 px tall at first, which is 12.9 mm - below the
+14 mm an in-vehicle control needs. They are 140 px now, 16.4 mm, because
+they are the control pressed most often while moving. Six in one row still
+leaves 129 px each, enough for the full captions.
+
+States 1 and 2 are **one panel** that changes height, not two. That is why
+the page buttons stay visible at the top of the grid instead of sliding away.
 
 It is an **overlay**. The first version resized every page to whatever the
 navigation left over, so pulling it up shrank the gauges and the content jumped
 about. Controls must not redraw content: pages are always 416 px tall and the
-navigation slides over them. The pages lose their bottom 124 px while the bar
-is out, which is why nothing important lives below 292 px - and the bar drops
+navigation slides over them. The pages lose their bottom 152 px while the bar
+is out, which is why nothing important lives below 264 px - and the bar drops
 back to the handle after five seconds of inactivity anyway.
 
 The panel is **dragged like an Android bottom sheet**: up, hold, back down,
