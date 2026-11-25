@@ -59,7 +59,12 @@ typedef struct {
 static const chan_t CHAN[DIAG_CH__COUNT] = {
     /* ---- rychla skupina: bez ni je velicina k nicemu ---- */
     [DIAG_CH_RPM]      = { 0x2002u, 2u, DIAG_TIER_FAST, V_MAIN | V_INJ,  0.25f,    0.0f },
-    [DIAG_CH_SPEED]    = { 0x2003u, 2u, DIAG_TIER_FAST, V_MAIN,          0.01f,    0.0f },
+    /* V_ALL, ne V_MAIN: na rychlosti zavisi rezim jizdy, a ten plati na
+     * KAZDE strance - nejvic prave na nastaveni, ktere se za jizdy zamyka.
+     * Kdyby se rychlost mimo hlavni stranku necetla, zestarla by do vteriny
+     * a UI by nemelo z ceho poznat, jestli vuz jede; zamykalo by se tedy
+     * i na stojicim voze. Jeden DID navic v rychle skupine rozpocet unese. */
+    [DIAG_CH_SPEED]    = { 0x2003u, 2u, DIAG_TIER_FAST, V_ALL,           0.01f,    0.0f },
     [DIAG_CH_BOOST]    = { 0x2401u, 2u, DIAG_TIER_FAST, V_ENG | V_BOOST, 1.0f,     0.0f },
     [DIAG_CH_BOOST_SP] = { 0x2402u, 2u, DIAG_TIER_FAST, V_ENG | V_BOOST, 1.0f,     0.0f },
     [DIAG_CH_RAIL]     = { 0x2801u, 2u, DIAG_TIER_FAST, V_ENG,           1.0f,     0.0f },

@@ -90,10 +90,19 @@ colour as the missing dashes, so the two states are told apart by content
 
 ### Requirement 10 - every clickable element, measured
 
+> **Superseded by the driving mode.** This audit was taken before the
+> interface started changing with road speed. Two things it asserts are no
+> longer true: extended click areas now exist (`ext_click_area` appears twice
+> in `src/ui.c`), so drawn size is no longer touch size, and the sizes below
+> describe the **stationary** mode only. The dialog back button now has a
+> 174 x 120 touch area behind a 124 x 70 drawing, and the navigation handle
+> grows to 800 x 120 while moving. The table is kept because it is what
+> prompted the change and because it still describes what a stopped vehicle
+> shows - not because it is current.
+
 Click audit output, deduplicated. These are visible, clickable LVGL objects
-under 120 px in at least one dimension. There are no extended click areas
-anywhere (`grep ext_click_area src/ui.c` - no matches), so the drawn size is
-the touch size.
+under 120 px in at least one dimension, **as measured before the driving
+mode existed**.
 
 | Element | Size | Where |
 |---|---|---|
