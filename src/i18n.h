@@ -242,6 +242,47 @@ enum {
     STR_INJ_COND,           /* za jakych podminek to ma smysl */
     STR_INJ_STATE,          /* dve %s = otacky a teplota pri mereni */
 
+    /* ---- rezim WiFi ----
+     *
+     * Deska bud hleda cizi sit (stanice), nebo sit sama dela
+     * (pristupovy bod). Obe veci se VYLUCUJI: radic umi bud skenovat,
+     * nebo byt AP, a pokus o oboji konci v ESP_ERR_WIFI_STATE (viz
+     * docs/findings.md). Rezim AP proto nema seznam siti a misto nej
+     * rika, cim se k desce pripojit. */
+    STR_WIFI_MODE,          /* popisek prepinace rezimu */
+    STR_WIFI_MODE_STA,      /* hledam cizi sit */
+    STR_WIFI_MODE_AP,       /* sit delam sam */
+    STR_AP_SSID,            /* jmeno site, ktere deska vyrobila */
+    STR_AP_PASS,            /* heslo - opisuje se z obrazovky */
+    STR_AP_ADDR,            /* adresa, na ktere je stranka */
+    STR_AP_CLIENTS,         /* jedno %d = kolik zarizeni je pripojeno */
+    STR_AP_HINT,            /* co s tim ma clovek udelat */
+    STR_AP_NEWPASS,         /* tlacitko: vyrobit nove heslo */
+    STR_AP_NEWPASS_BODY,    /* co se tim rozpoji */
+
+    /* ---- server se zivymi hodnotami ----
+     *
+     * Prvni dva retezce patri panelu, zbytek je VIDET NA WEBU: stranka
+     * si je stahne z /meta, takze mluvi tim jazykem, ktery ma deska
+     * nastaveny. Texty o stavu hodnoty (ziva / stara / chybejici /
+     * odmitnuta) jsou legenda pod tabulkou. */
+    STR_WEB_SERVER,         /* popisek prepinace serveru v nastaveni */
+    STR_WEB_SRV_HINT,       /* co server je a co rozhodne neni */
+    STR_WEB_NA,             /* firmware server nema - misto tlacitka */
+    STR_WEB_TITLE,          /* nadpis stranky */
+    STR_WEB_READONLY,       /* stranka do vozidla nic nezapise */
+    STR_WEB_VIEW_NOTE,      /* proc nejsou ziva vsechna cisla najednou */
+    STR_WEB_NOLINK,         /* vuz pripojeny neni - jinak to vypada jako chyba */
+    STR_WEB_NOSRV,          /* stranka se nedovola desky */
+    STR_WEB_CSV,            /* tlacitko stazeni zaznamu */
+    STR_WEB_LOG,            /* co je to za cislo vedle poctu radku */
+    STR_WEB_DROP,           /* a kolik nejstarsich radku uz zasobnik prepsal */
+    STR_WEB_NOLOG,          /* zaznam se nevede, nebyla na nej pamet */
+    STR_WEB_MISSING,        /* legenda: hodnota neprisla */
+    STR_WEB_LIVE,
+    STR_WEB_STALE,
+    STR_WEB_REFUSED,
+
     STR__COUNT
 };
 

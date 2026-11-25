@@ -227,6 +227,48 @@ static const char *const LANG_CS[] = {
     "Teplý volnoběh, bez zátěže. Pod zátěží regulátor vyrovnání "
     "neběží a ta čtyři čísla jsou spíš stará než špatná.",
     "%s 1/min   %s C  při měření",
+
+    /* režim WiFi: připojit se k síti, nebo síť dělat */
+    "REŽIM",
+    "SÍŤ",
+    "PŘÍSTUPOVÝ BOD",
+    "JMÉNO SÍTĚ",
+    "HESLO",
+    "ADRESA",
+    "připojeno %d",
+    "Deska je sama sítí, takže to funguje i v garáži, kde není nic "
+    "dalšího. Připoj se k ní telefonem podle jména a hesla nahoře a "
+    "pak otevři tu adresu.\n\n"
+    "Seznam sítí v tomhle režimu není: rádio umí buď hledat, nebo být "
+    "přístupovým bodem, nikdy obojí.",
+    "NOVÉ HESLO",
+    "Vyrobí se nové heslo a ukáže se tady. Všechna zařízení, která "
+    "jsou právě připojená, se odpojí a musí se přihlásit znovu tím "
+    "novým.",
+
+    /* server se živými hodnotami; od WEB_TITLE dolů je to text,
+       který říká sama ta stránka */
+    "SERVER",
+    "Živé hodnoty v prohlížeči na telefonu. Jenom čte: stránka nemá "
+    "čím do vozidla zapsat.\n\n"
+    "Dokud běží, vidí hodnoty včetně tachometru každý, kdo se na tu "
+    "adresu dostane. V režimu přístupového bodu je to ten, kdo zná "
+    "heslo; v cizí síti všichni, kdo v ní jsou.",
+    "server v tomto firmwaru není",
+    "canograf - živé hodnoty",
+    "Jen čtení - tahle stránka do vozidla nic nezapíše.",
+    "Deska čte jen to, co má sama na obrazovce, takže ostatní skupiny "
+    "stárnou, dokud se na ní ta stránka neotevře.",
+    "Vozidlo připojené není - deska nic nečte, takže není co ukázat.",
+    "Deska neodpovídá - hodnoty níž jsou staré.",
+    "STÁHNOUT CSV",
+    "zaznamenaných řádků",
+    "nejstarších přepsáno",
+    "nenahrává se - nebyla na záznam paměť",
+    "nepřečteno",
+    "živá",
+    "stará",
+    "odmítnuta",
 };
 
 #endif /* LANG_CS_H */

@@ -22,6 +22,13 @@
 #include "i18n.h"
 #include "can/twai.h"
 #include "sleep_test.h"
+#if CANOGRAF_MOD_WEB
+/* Cela sluzba je v src/net/ a pri CANOGRAF_MOD_WEB=0 se do obrazu vubec
+ * neprelozi - skript konfigurace vyradi cely adresar, viz
+ * config/README.md. Tenhle soubor je jedine misto, kde se server potka
+ * se siti; sam o ni nevi. */
+#include "net/server.h"
+#endif
 
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -310,6 +317,16 @@ static void wifi_resume_connect(void)
 
 static void host_wifi_scan_start(void)
 {
+    /* V rezimu pristupoveho bodu se NESKENUJE. Radic umi bud jedno,
+     * nebo druhe, a WiFi.mode(WIFI_STA) nize by pristupovy bod slozil
+     * pod rukama cloveku, ktery je prave pres nej pripojeny. UI sem v
+     * tom rezimu nevede (seznam siti v nem vubec nevznika), tohle je
+     * druha pojistka - vedle radice, ktery by na to odpovedel
+     * ESP_ERR_WIFI_STATE a uz se nevzpamatoval. */
+    if (WiFi.getMode() & WIFI_MODE_AP) {
+        Serial.println("WiFi: jsme pristupovy bod, sken se nespousti");
+        return;
+    }
     WiFi.mode(WIFI_STA);
     wifi_pause_connect();
     WiFi.scanDelete();
@@ -395,6 +412,134 @@ static void host_wifi_forget_all(void)
      * nepamatuje. */
     WiFi.setAutoReconnect(false);
     WiFi.disconnect();
+}
+
+/* ---------------------------------------------------------------------
+ * Pristupovy bod: deska sit SAMA DELA
+ *
+ * V garazi, kde zadna sit neni, je to jediny zpusob, jak se k desce
+ * telefonem dostat.
+ *
+ * OBE VECI SE VYLUCUJI. Radic umi bud skenovat a pripojovat se, nebo
+ * byt pristupovym bodem. Pokus o oboji konci v ESP_ERR_WIFI_STATE a
+ * sken uz se nerozjede nikdy (docs/findings.md, oddil o skenu). UI
+ * proto v rezimu AP seznam siti vubec nepostavi a tenhle soubor si to
+ * jeste hlida sam: host_wifi_scan_start() se v rezimu AP ani nezacne
+ * ptat.
+ *
+ * JMENO je odvozene z MAC desky: nemeni se pri restartu, dve desky
+ * vedle sebe se nepopletou a neni na nem co tajit.
+ *
+ * HESLO SE GENERUJE a nejde nastavit. Jsou k tomu ctyri duvody:
+ *
+ *   1. Stejne MUSI BYT VIDET na displeji, jinak se k siti nikdo
+ *      nepripoji - deska nema kudy jinudy ho rict. Vlastni heslo tedy
+ *      nekoupi zadne utajeni, lezi na skle.
+ *   2. Opsat osm znaku z obrazovky je min prace nez je na te obrazovce
+ *      naklikat a pak stejne opsat.
+ *   3. Vlastni heslo clovek recykluje odjinud. Tohle je na displeji ve
+ *      voze, kolem ktereho se chodi - a prave recyklace skutecneho
+ *      hesla je tady to nebezpecne.
+ *   4. Generovane heslo umi deska zarucit: aspon osm znaku, jak zada
+ *      WPA2, a abeceda bez znaku, ktere se pri opisovani pletou.
+ *
+ * ABECEDA nema 0/O, 1/l/I, 2/Z, 5/S ani 8/B. Osm znaku z osmadvaceti
+ * je 3,8 . 10^11 moznosti, coz proti nekomu, kdo stoji u auta, staci.
+ *
+ * Heslo zustava v NVS, takze prezije restart. Kdyby se menilo pri
+ * kazdem startu, nesedelo by s tim, co si clovek opsal nebo vyfotil.
+ * ------------------------------------------------------------------- */
+#define AP_CLIENTS_MAX 4    /* tataz mez jako NET_SOCKETS_MAX, z druhe strany */
+#define AP_PASS_LEN    8    /* minimum, ktere WPA2 pripousti */
+#define AP_CHANNEL     1
+
+static const char AP_ALPHABET[] = "abcdefghjkmnpqrstuvwxyz34679";
+
+static char ap_ssid_buf[33];
+static char ap_pass_buf[AP_PASS_LEN + 1];
+
+static const char *host_wifi_ap_ssid(void)
+{
+    if (!ap_ssid_buf[0]) {
+        uint64_t mac = ESP.getEfuseMac();
+        snprintf(ap_ssid_buf, sizeof(ap_ssid_buf), "canograf-%04x",
+                 (unsigned)(mac & 0xFFFFu));
+    }
+    return ap_ssid_buf;
+}
+
+static void ap_pass_make(void)
+{
+    const size_t n = sizeof(AP_ALPHABET) - 1;
+
+    for (int i = 0; i < AP_PASS_LEN; i++)
+        ap_pass_buf[i] = AP_ALPHABET[esp_random() % n];
+    ap_pass_buf[AP_PASS_LEN] = '\0';
+    prefs.begin("talento", false);
+    prefs.putString("appw", ap_pass_buf);
+    prefs.end();
+}
+
+static const char *host_wifi_ap_pass(void)
+{
+    if (!ap_pass_buf[0]) {
+        prefs.begin("talento", true);
+        snprintf(ap_pass_buf, sizeof(ap_pass_buf), "%s",
+                 prefs.getString("appw", "").c_str());
+        prefs.end();
+        if (strlen(ap_pass_buf) < AP_PASS_LEN) ap_pass_make();
+    }
+    return ap_pass_buf;
+}
+
+/* Rozjede nebo slozi pristupovy bod. Volajici uz rozhodl; tady se to jen
+ * provede, vcetne toho, ze se pokus o pripojeni k cizi siti opravdu
+ * ZASTAVI - WiFi.disconnect() z Arduina to pri nestojicim spojeni tise
+ * neudela (docs/findings.md). */
+static void ap_apply(bool on)
+{
+    if (on) {
+        WiFi.setAutoReconnect(false);
+        esp_wifi_disconnect();
+        wifi_connect_paused = false;    /* uz neni k cemu se vracet */
+        WiFi.scanDelete();
+        WiFi.mode(WIFI_AP);
+        bool ok = WiFi.softAP(host_wifi_ap_ssid(), host_wifi_ap_pass(),
+                              AP_CHANNEL, 0, AP_CLIENTS_MAX);
+        Serial.printf("WiFi: pristupovy bod %s %s, max %d zarizeni\n",
+                      host_wifi_ap_ssid(), ok ? "bezi" : "SE NEROZJEL",
+                      AP_CLIENTS_MAX);
+        return;
+    }
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    if (saved_n) WiFi.begin(saved_ssid[0], saved_pass[0]);
+    Serial.println("WiFi: zpatky jako stanice");
+}
+
+static void host_wifi_set_ap(bool on)
+{
+    prefs.begin("talento", false);
+    prefs.putBool("apon", on);
+    prefs.end();
+    ap_apply(on);
+}
+
+/* -1 znamena "nevim", ne nula. Mimo rezim AP se nikdo pripojit nemuze a
+ * nula by tvrdila, ze se nikdo nepripojil. */
+static int host_wifi_ap_clients(void)
+{
+    if (!(WiFi.getMode() & WIFI_MODE_AP)) return -1;
+    return (int)WiFi.softAPgetStationNum();
+}
+
+/* Nove heslo vsechny pripojene rozpoji - softAP() se stejnym jmenem a
+ * jinym heslem je pro telefon nova sit. UI o tom rekne dopredu. */
+static void host_wifi_ap_newpass(void)
+{
+    ap_pass_make();
+    if (WiFi.getMode() & WIFI_MODE_AP) ap_apply(true);
 }
 
 /* ---------------- CAN a restart ---------------- */
@@ -483,6 +628,90 @@ static void diag_pump(void)
     diag_poller_poll(&g_diag, can_now_ms());
 }
 
+/* ---------------------------------------------------------------------
+ * Server se zivymi hodnotami
+ *
+ * Cela sluzba je v src/net/ a do obrazu se prelozi jen pri
+ * CANOGRAF_MOD_WEB=1 (config/README.md). Pri vypnutem modulu tu
+ * nezustane ani prepinac: UI_HOST.web_* jsou nullptr a rozhrani server
+ * vubec nenabidne, takze deska nema cim port otevrit a da se to overit
+ * na elf souboru.
+ *
+ * Tenhle soubor je JEDINE misto, kde se potkava server se siti. Server
+ * sam o WiFi nevi a vedet nemuze: dostane jen report_net_t, ve kterem
+ * ZADNE HESLO NENI a nebude - ani k cizi siti, ani k vlastnimu
+ * pristupovemu bodu. Viz net/report.h.
+ *
+ * Port zustava zavreny, dokud ho nekdo nezapne v nastaveni. Volba
+ * prezije restart: kdo nechal server bezet, ceka, ze po restartu zase
+ * nabehne.
+ * ------------------------------------------------------------------- */
+#if CANOGRAF_MOD_WEB
+
+static char web_addr_buf[20];
+
+/* Adresa, na ktere je deska k nalezeni - bez "http://" a bez portu.
+ * Je to to, co clovek opravdu napise do telefonu. */
+static const char *web_addr(void)
+{
+    if (WiFi.getMode() & WIFI_MODE_AP) {
+        snprintf(web_addr_buf, sizeof(web_addr_buf), "%s",
+                 WiFi.softAPIP().toString().c_str());
+        return web_addr_buf;
+    }
+    if (WiFi.status() != WL_CONNECTED) return "";
+    snprintf(web_addr_buf, sizeof(web_addr_buf), "%s",
+             WiFi.localIP().toString().c_str());
+    return web_addr_buf;
+}
+
+/* Vsechno, co se server o siti dozvi. Heslo tu nema polozku, takze ho
+ * nema jak poslat dal - je to stavba, ne opatrnost. */
+static void web_net_info(report_net_t *out)
+{
+    bool ap = (WiFi.getMode() & WIFI_MODE_AP) != 0;
+
+    out->ap         = ap;
+    out->sta        = (WiFi.status() == WL_CONNECTED);
+    out->can_normal = (can_mode() == CAN_MODE_NORMAL);
+    out->uptime_s   = (uint32_t)(millis() / 1000u);
+    out->clients    = host_wifi_ap_clients();
+    snprintf(out->ssid, sizeof(out->ssid), "%s",
+             ap ? host_wifi_ap_ssid()
+                : (out->sta ? WiFi.SSID().c_str() : ""));
+    snprintf(out->ip, sizeof(out->ip), "%s", web_addr());
+}
+
+/* Bezi? Pta se SLUZBY, ne nasi predstavy o ni. Kdyz se port nepodarilo
+ * otevrit, tlacitko v nastaveni to rekne samo tim, ze zustane na VYP. */
+static bool host_web_enabled(void) { return net_server_running(); }
+
+static void web_start(void)
+{
+    net_server_cfg_t c = {};
+    c.dp       = &g_diag;
+    c.net_info = web_net_info;
+    if (!net_server_start(&c)) Serial.println("web: nerozjelo se");
+}
+
+static void host_web_set(bool on)
+{
+    prefs.begin("talento", false);
+    prefs.putBool("webon", on);
+    prefs.end();
+    if (on) web_start();
+    else    net_server_stop();
+}
+
+/* Adresa stranky. Prazdno, kdyz server stoji nebo kdyz deska zadnou
+ * adresu nema - "server bezi" bez adresy je polovina informace. */
+static const char *host_web_url(void)
+{
+    return net_server_running() ? web_addr() : "";
+}
+
+#endif /* CANOGRAF_MOD_WEB */
+
 /* Neni const: kdyz se PWM nerozjede, musi se bl_set_percent za behu
  * vynulovat, at UI stmivani nenabizi.
  *
@@ -513,6 +742,21 @@ static ui_host_t UI_HOST = {
     .wifi_saved_count   = host_wifi_saved_count,
     .wifi_saved_ssid    = host_wifi_saved_ssid,
     .wifi_forget_all    = host_wifi_forget_all,
+    .wifi_set_ap        = host_wifi_set_ap,
+    .wifi_ap_ssid       = host_wifi_ap_ssid,
+    .wifi_ap_pass       = host_wifi_ap_pass,
+    .wifi_ap_clients    = host_wifi_ap_clients,
+    .wifi_ap_newpass    = host_wifi_ap_newpass,
+#if CANOGRAF_MOD_WEB
+    .web_enabled        = host_web_enabled,
+    .web_set            = host_web_set,
+    .web_url            = host_web_url,
+#else
+    /* Bez modulu nezustane ani prepinac - UI server vubec nenabidne. */
+    .web_enabled        = nullptr,
+    .web_set            = nullptr,
+    .web_url            = nullptr,
+#endif
     .can_stats          = host_can_stats,
     .can_stats_reset    = host_can_stats_reset,
     .can_is_normal      = host_can_is_normal,
@@ -630,13 +874,39 @@ void setup()
         diag_poller_init(&g_diag, &dc);
     }
 
-    WiFi.mode(WIFI_STA);
+#if CANOGRAF_MOD_WEB
+    /* Volba prezila restart. Port zustava zavreny, dokud ho nekdo
+     * nezapnul - a kdo ho zapnul, ceka, ze po restartu zase nabehne.
+     * Az za diag_poller_init(): bez vrstvy diagnostiky nema server co
+     * ukazovat a net_server_start() by to odmitl. */
+    prefs.begin("talento", true);
+    bool want_web = prefs.getBool("webon", false);
+    prefs.end();
+#endif
+
     saved_load();
-    if (saved_n) {
-        WiFi.begin(saved_ssid[0], saved_pass[0]);
-        Serial.printf("WiFi: zkousim %s (ulozenych siti %d)\n",
-                      saved_ssid[0], saved_n);
+
+    /* Rezim WiFi prezil restart. Kdo nechal desku jako pristupovy bod,
+     * stoji u ni s telefonem a ceka, ze se po restartu zase objevi -
+     * navrat do rezimu stanice by ho odstrihl a on by nevedel proc. */
+    prefs.begin("talento", true);
+    bool want_ap = prefs.getBool("apon", false);
+    prefs.end();
+
+    if (want_ap) {
+        ap_apply(true);
+    } else {
+        WiFi.mode(WIFI_STA);
+        if (saved_n) {
+            WiFi.begin(saved_ssid[0], saved_pass[0]);
+            Serial.printf("WiFi: zkousim %s (ulozenych siti %d)\n",
+                          saved_ssid[0], saved_n);
+        }
     }
+#if CANOGRAF_MOD_WEB
+    if (want_web) web_start();
+#endif
+
     ArduinoOTA.setHostname("talento-hmi");
     ArduinoOTA.begin();
 
@@ -663,5 +933,12 @@ void loop()
      * desetinasobnou a zaroven je to perioda lv_timeru, takze se obe
      * pravidelne veci v teto smycce toci stejne rychle. */
     diag_pump();
+#if CANOGRAF_MOD_WEB
+    /* Zaznam relace. Je to TATAZ smycka, ktera krmi diag_poller_poll(),
+     * takze do kruhoveho zasobniku zapisuje jediny pisar; obsluha
+     * stahovani z nej jen cte. Rozbor je u weblog_t v net/report.h.
+     * Vlastni vyrizovani pozadavku bezi v uloze serveru, tady se nedeje. */
+    net_server_tick(can_now_ms());
+#endif
     delay(20);
 }

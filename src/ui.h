@@ -134,6 +134,49 @@ typedef struct {
     const char *(*wifi_saved_ssid)(int i);         /* NULL mimo rozsah */
     void        (*wifi_forget_all)(void);
 
+    /* ---- pristupovy bod ----
+     *
+     * Deska bud hleda cizi sit, nebo sit SAMA DELA. V garazi, kde zadna
+     * sit neni, je to jediny zpusob, jak se k ni telefonem dostat.
+     *
+     * Obe veci se VYLUCUJI a neni to volba vzhledu: radic umi bud
+     * skenovat, nebo byt pristupovym bodem, a pokus o oboji konci
+     * donekonecna v ESP_ERR_WIFI_STATE (docs/findings.md). UI proto v
+     * rezimu AP seznam siti vubec nepostavi - ne ze by tlacitko jen
+     * zesedlo, ono tam neni - a deska si to jeste hlida sama.
+     *
+     * Ktery rezim prave plati, rika wifi_ap() vyse. Je to JEDINY zdroj
+     * pravdy, protoze se pta radice; druha promenna vedle nej by se s
+     * nim umela rozejit.
+     *
+     * JMENO A HESLO MUSI BYT VIDET NA DISPLEJI, jinak se k siti nikdo
+     * nepripoji - deska nema kudy je jinak rict. Heslo je proto to
+     * jedine, co UI o heslech vidi; ulozena hesla cizich siti zustavaji
+     * jen v NVS a UI se na ne nikdy nedostane.
+     *
+     * NULL kterekoliv z techto funkci znamena, ze deska pristupovy bod
+     * neumi - UI prepinani rezimu vubec nenabidne. */
+    void        (*wifi_set_ap)(bool on);
+    const char *(*wifi_ap_ssid)(void);
+    const char *(*wifi_ap_pass)(void);
+    int         (*wifi_ap_clients)(void);   /* -1 = nevim */
+    void        (*wifi_ap_newpass)(void);   /* vyrobi a ulozi nove heslo */
+
+    /* ---- server se zivymi hodnotami ----
+     *
+     * Port zustava zavreny, dokud ho nekdo nezapne tady; tak to chce
+     * pravidlo pro vzdalene konce v docs/safety.md. Server jen cte -
+     * cestu k zapisu do vozidla nema a mit nemuze, viz net/server.h.
+     *
+     * web_url() vraci adresu, na ktere stranka je, nebo "" kdyz
+     * neni kde (server stoji, nebo deska nema adresu). UI ji ukaze,
+     * protoze "server bezi" bez adresy je polovina informace.
+     *
+     * NULL znamena, ze firmware server nema - UI ho pak nenabidne. */
+    bool        (*web_enabled)(void);
+    void        (*web_set)(bool on);
+    const char *(*web_url)(void);
+
     /* Citace sbernice. Ukazatel plati porad a struktura se sama
      * obnovuje, takze si ho UI nemusi obnovovat; NULL znamena, ze deska
      * CAN nema a UI nulovani citacu vubec nenabidne. */

@@ -69,6 +69,11 @@ set_source_files_properties(${UI_FONTS} PROPERTIES COMPILE_OPTIONS "-w")
 # by nebylo jak zkouset, co se stane, kdyz jednotka neodpovida nebo DID
 # odmitne. Zadna z nich nezna ESP-IDF - to je az v can/twai.c, ktery tu
 # proto neni.
+#
+# net/report.c je tu ze stejneho duvodu: je to OBSAH odpovedi serveru a
+# jedine misto, kde se da bez desky zmerit, ze chybejici hodnota neni na
+# webu cislo a ze v zadne odpovedi neni heslo. Vlastni HTTP (net/server.c)
+# tu neni a byt nemuze - ten uz zna esp_http_server.
 add_executable(lv_shot
   "${CMAKE_CURRENT_SOURCE_DIR}/lv_shot.c"
   "${FW_SRC_DIR}/ui.c"
@@ -78,6 +83,7 @@ add_executable(lv_shot
   "${FW_SRC_DIR}/diag/legacy.c"
   "${FW_SRC_DIR}/diag/link.c"
   "${FW_SRC_DIR}/diag/poller.c"
+  "${FW_SRC_DIR}/net/report.c"
   ${UI_FONTS}
 )
 target_include_directories(lv_shot PRIVATE

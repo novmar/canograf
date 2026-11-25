@@ -130,14 +130,48 @@ runtime.
 | `CANOGRAF_ECU_TX_ID` | `0x000` | `0x7E0` | engine control unit request id, 11 bit |
 | `CANOGRAF_ECU_RX_ID` | `0x000` | `0x7E8` | engine control unit response id, 11 bit |
 
-### Optional modules
+### Web interface
 
-Reserved, all off, none of them exists yet. They are here so the names are
-settled before the code arrives.
+Live values in a browser on a phone. The code is in [`src/net/`](../src/net);
+the reasoning behind every decision it makes is in
+[`src/net/server.h`](../src/net/server.h).
 
 | key | default | meaning |
 |---|---|---|
-| `CANOGRAF_MOD_WEB` | `off` | web interface over WiFi |
+| `CANOGRAF_MOD_WEB` | `on` | `off`: `src/net/` is **not compiled into the image at all**, so the board cannot open a port. `on`: the server is in the image but **stopped** - it is switched on in the settings and the choice is kept in NVS |
+| `CANOGRAF_WEB_LOG_ROWS` | `7200` | session log capacity, in rows |
+| `CANOGRAF_WEB_LOG_MS` | `500` | one row every this many milliseconds |
+
+`CANOGRAF_MOD_WEB=on` does **not** mean "the port is open". The port stays
+closed until somebody opens it on the panel, and turning it on asks for a
+three second hold, with what it means written on the dialog.
+
+The server **only reads**. It has no way to write to the vehicle: every
+handler is `HTTP_GET` and `net_server_start()` refuses to come up if anything
+else ever appears in the handler table, and neither `net/server.c` nor
+`net/report.c` is allowed to see `can/twai.h` - an `#error` stops the build if
+it ever does. The network password never reaches a response either, because
+`report_net_t` has no field to put it in.
+
+With `CANOGRAF_MOD_WEB=off` the script appends `-<net/>` to `build_src_filter`,
+exactly like write protection does, so "not compiled in" is literally true and
+can be checked on the `.elf` with `nm`.
+
+`7200` rows at `500` ms is **one hour** of driving for about 1 MB of the 8 MB
+of PSRAM. A longer log costs more PSRAM, which is shared with the panel
+buffers; a shorter period costs the same. 500 ms is also how often the page
+refreshes, so the board has one cadence and not two that can drift apart.
+The log lives in PSRAM and not on the microSD card because this board's card
+select hangs off the CH422G expander, so every transaction costs a round trip
+over the same I2C bus that carries the touch controller.
+
+### Optional modules
+
+Reserved, off, neither exists yet. They are here so the names are settled
+before the code arrives.
+
+| key | default | meaning |
+|---|---|---|
 | `CANOGRAF_MOD_ELM327` | `off` | ELM327 emulation for existing diagnostic apps |
 | `CANOGRAF_MOD_SDLOG` | `off` | logging to the microSD card |
 

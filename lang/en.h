@@ -233,6 +233,50 @@ static const char *const LANG_EN[] = {
     "Warm idle, no load. Under load the balance regulator does not run "
     "and the four numbers are stale rather than wrong.",
     "%s rpm   %s C  at the measurement",
+
+    /* WiFi mode: join a network, or be one */
+    "MODE",
+    "NETWORK",
+    "ACCESS POINT",
+    "NETWORK NAME",
+    "PASSWORD",
+    "ADDRESS",
+    "%d connected",
+    "The board is its own network, so this works with nothing else "
+    "around. Join it from the phone with the name and password above, "
+    "then open the address.\n\n"
+    "There is no network list in this mode: the radio can either scan "
+    "or be an access point, never both.",
+    "NEW PASSWORD",
+    "A new password is generated and shown here. Every device "
+    "currently connected drops off and has to join again with the new "
+    "one.",
+
+    /* the live-value server; everything from WEB_TITLE down is what the
+       page itself says */
+    "SERVER",
+    "Live values in a browser on a phone. It only reads: the page has "
+    "no way to write anything to the vehicle.\n\n"
+    "While it is on, anyone who can reach this address sees the "
+    "readings, the odometer included. In access point mode that is "
+    "whoever knows the password; on someone else's network it is "
+    "everyone on it.",
+    "no server in this firmware",
+    "canograf - live values",
+    "Read only - this page cannot write anything to the vehicle.",
+    "The board reads only what its own screen is showing, so the other "
+    "groups go old until that page is opened on it.",
+    "No vehicle connected - the board is not reading anything, so "
+    "there are no values to show.",
+    "No answer from the board - the values below are old.",
+    "DOWNLOAD CSV",
+    "rows recorded",
+    "oldest dropped",
+    "not recording - no memory for the log",
+    "not read",
+    "live",
+    "old",
+    "refused",
 };
 
 #endif /* LANG_EN_H */

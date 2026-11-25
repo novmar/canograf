@@ -123,10 +123,13 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- docs/img/screens; then
+          # Jen PNG. lv_shot vedle snimku vypise i odpovedi serveru
+          # (index.html, meta, live, log.csv) - to je material pro
+          # kontrolu, ne nahled obrazovky, a do docs/img/screens nepatri.
+          if git diff --quiet -- 'docs/img/screens/*.png'; then
             echo "nahledy se nezmenily"
             exit 0
           fi
-          git add docs/img/screens
+          git add docs/img/screens/*.png
           git commit -m "ci: prekresleni nahledu obrazovek [skip ci]"
           git push

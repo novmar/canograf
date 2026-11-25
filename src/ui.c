@@ -119,7 +119,7 @@ static lv_obj_t *dtc_head, *dtc_odo, *dtc_row[DTC_ROWS], *dtc_hint;
 static lv_obj_t *dtc_ext, *dtc_ff;
 /* nastaveni */
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
-static lv_obj_t *btn_bright, *btn_profile, *btn_canmode, *btn_wifi;
+static lv_obj_t *btn_bright, *btn_profile, *btn_canmode, *btn_wifi, *btn_web;
 /* DPF */
 /* DPF: osm hodnot v mrizce, devata (napeti snimace) ve tretim sloupci,
  * takze popisku je o jeden vic nez hodnot v mrizce. */
@@ -159,6 +159,72 @@ static bool host_wifi_known(const char *ssid)
 {
     if (!host || !host->wifi_known || !ssid || !ssid[0]) return false;
     return host->wifi_known(ssid);
+}
+
+/* ---- pristupovy bod ----
+ *
+ * Ktery rezim plati, rika radic pres wifi_ap(). UI si o tom vlastni
+ * promennou nedrzi: dve pravdy vedle sebe se umi rozejit a na
+ * obrazovce by pak stalo neco jineho, nez cim deska opravdu je.
+ *
+ * host_wifi_can_ap() rika, jestli to deska vubec umi; bez nej se
+ * prepinac rezimu nepostavi a UI nic neslibuje. */
+static bool host_wifi_can_ap(void)
+{
+    return host && host->wifi_set_ap && host->wifi_ap_ssid &&
+           host->wifi_ap_pass;
+}
+
+static bool host_wifi_is_ap(void)
+{
+    return (host && host->wifi_ap) ? host->wifi_ap() : false;
+}
+
+static const char *host_wifi_ap_ssid(void)
+{
+    const char *s = host_wifi_can_ap() ? host->wifi_ap_ssid() : NULL;
+    return s ? s : "";
+}
+
+/* Heslo k VLASTNI siti desky. Jedine heslo, ktere UI vidi, a vidi ho
+ * jen proto, ze bez nej se k desce nikdo nepripoji - deska nema kudy
+ * jinudy ho rict. Hesla cizich siti zustavaji v NVS a sem se
+ * nedostanou. Server ho nevidi vubec, viz net/report.h. */
+static const char *host_wifi_ap_pass(void)
+{
+    const char *s = host_wifi_can_ap() ? host->wifi_ap_pass() : NULL;
+    return s ? s : "";
+}
+
+static int host_wifi_ap_clients(void)
+{
+    return (host && host->wifi_ap_clients) ? host->wifi_ap_clients() : -1;
+}
+
+/* ---- server se zivymi hodnotami ----
+ *
+ * host_web() rika, jestli firmware server vubec ma. Kdyz ne, UI ho
+ * nenabidne - prepinac, ktery nic nezapne, je horsi nez zadny.
+ *
+ * Jestli bezi, rika web_enabled(), tedy ten, kdo ho drzi. UI si o tom
+ * vlastni promennou nedrzi; dve pravdy vedle sebe se umi rozejit a na
+ * obrazovce by pak stalo neco jineho, nez co ma deska otevrene. */
+static bool host_web(void)
+{
+    return host && host->web_enabled && host->web_set;
+}
+
+static bool host_web_on(void)
+{
+    return host_web() ? host->web_enabled() : false;
+}
+
+/* Adresa, na ktere stranka je, nebo "" kdyz neni kde. "Server bezi" bez
+ * adresy je polovina informace - clovek nema co napsat do telefonu. */
+static const char *host_web_url(void)
+{
+    const char *s = (host && host->web_url) ? host->web_url() : NULL;
+    return s ? s : "";
 }
 
 static unsigned host_heap_kb(void)
@@ -1285,6 +1351,7 @@ static lv_obj_t *modal = NULL;
 
 /* stav, ktery zije jen po dobu otevreneho dialogu */
 static lv_obj_t *wifi_list, *wifi_ta, *wifi_kb;
+static lv_obj_t *ap_addr, *ap_clients;  /* dialog pristupoveho bodu */
 static int scan_state;                  /* 0 klid, 1 bezi sken, 2 dobehl */
 static uint32_t scan_started_ms;
 static lv_obj_t *hold_panel, *hold_ring, *hold_num;
@@ -1298,6 +1365,8 @@ static void modal_forget(void)
     wifi_list  = NULL;
     wifi_ta    = NULL;
     wifi_kb    = NULL;
+    ap_addr    = NULL;
+    ap_clients = NULL;
     scan_state = 0;
     hold_panel = NULL;
     hold_ring  = NULL;
@@ -1644,6 +1713,16 @@ static bool regen_on(void)
  * Znama sit se pripoji rovnou, neznama se zepta na heslo. Zapomenuti je
  * na dlouhem stisku radku - tuknuti uz je obsazene pripojenim a druhe
  * tlacitko v radku by bylo pod 120 px dotykovy cil.
+ *
+ * DVA REZIMY, DVA DIALOGY. Deska bud hleda cizi sit, nebo sit sama dela.
+ * Nejsou to dve podoby jednoho dialogu: v rezimu pristupoveho bodu neni
+ * co skenovat a seznam siti se tu vubec NEPOSTAVI - ne ze by zesedl,
+ * ono tam neni. Radic umi bud skenovat, nebo byt AP, a pokus o oboji
+ * konci donekonecna v ESP_ERR_WIFI_STATE (docs/findings.md, "scan").
+ *
+ * Nadpis rika, KDE clovek je, tlacitko vedle nej, KAM se dostane. Druhy
+ * rezim tedy neni schovany a zaroven nic nevypada jako stav i akce
+ * zaroven.
  * ------------------------------------------------------------------- */
 #define WIFI_SCAN_MS   15000    /* po teto dobe se sken vzdava */
 #define WIFI_ROWS      12       /* kolik radku se do seznamu postavi;
@@ -1654,6 +1733,38 @@ static char wifi_target[33];    /* sit urcena k zapomenuti; musi prezit
                                    vymenu seznamu za potvrzovaci dialog */
 
 static void wifi_scan_cb(lv_event_t *e);
+static void wifi_ap_cb(lv_event_t *e);
+
+/* Jedina cesta k dialogu WiFi. Ktery se otevre, rozhoduje RADIC pres
+ * wifi_ap() - ne vlastni promenna, ktera by se s nim umela rozejit. */
+static void wifi_cb(lv_event_t *e)
+{
+    if (host_wifi_is_ap()) wifi_ap_cb(e);
+    else                   wifi_scan_cb(e);
+}
+
+/* Prepnuti rezimu. Deje se hned, bez potvrzeni: je to vratne jednim
+ * tuknutim a vysledek je na obrazovce videt. Dialog se pak postavi
+ * znovu - uz ten druhy, protoze se zase zepta radice. */
+static void wifi_mode_cb(lv_event_t *e)
+{
+    bool to_ap = !host_wifi_is_ap();
+
+    if (!host_wifi_can_ap()) return;
+    host->wifi_set_ap(to_ap);
+    wifi_cb(e);
+}
+
+/* Tlacitko vedle nadpisu: vede do DRUHEHO rezimu. Nic nepostavi, kdyz
+ * deska pristupovy bod neumi - prepinac bez druhe strany by sliboval
+ * naprazdno. */
+static void wifi_mode_btn(lv_obj_t *m, bool in_ap)
+{
+    if (!host_wifi_can_ap()) return;
+    mk_button(m, 400, 14, 240, 70,
+              T(in_ap ? STR_WIFI_MODE_STA : STR_WIFI_MODE_AP),
+              UI_FONT_20, C_SAGE, wifi_mode_cb, NULL);
+}
 
 static void wifi_save_connect(const char *ssid, const char *pass)
 {
@@ -1784,12 +1895,92 @@ static void wifi_scan_cb(lv_event_t *e)
      * rozhazena. */
     mk_button(m, 660, 150, 124, 120, T(STR_WIFI_RETRY), UI_FONT_20,
               C_ACTUAL, wifi_scan_cb, NULL);
+    wifi_mode_btn(m, false);
     mk_lbl(m, T(STR_WIFI_SAVED), UI_FONT_16, C_LABEL, 30, 392);
 
     wifi_msg(STR_WIFI_SEARCHING);
     if (host && host->wifi_scan_start) host->wifi_scan_start();
     scan_state = 1;
     scan_started_ms = lv_tick_get();
+}
+
+/* ---------------------------------------------------------------------
+ * Pristupovy bod: deska sit SAMA DELA
+ *
+ * V garazi, kde zadna sit neni, je to jediny zpusob, jak se k desce
+ * telefonem dostat. Jmeno a heslo proto MUSI BYT VIDET: deska nema kudy
+ * jinudy je rict a bez nich se nikdo nepripoji.
+ *
+ * Heslo je nejvetsi vec na obrazovce, protoze je to to jedine, co se
+ * odsud opisuje do telefonu. Je to heslo k VLASTNI siti desky; hesla
+ * cizich siti zustavaji v NVS a UI se na ne nikdy nedostane (ui.h).
+ *
+ * Nic se tu neskenuje. Seznam siti v tomhle dialogu NENI a tim je
+ * zaroven splnene, ze se v rezimu AP neskenuje - volani
+ * wifi_scan_start() je jen ve vetvi wifi_scan_cb().
+ * ------------------------------------------------------------------- */
+static void ap_newpass_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    if (host && host->wifi_ap_newpass) host->wifi_ap_newpass();
+    wifi_ap_cb(NULL);           /* zpatky na dialog, uz s novym heslem */
+}
+
+static void ap_newpass_cb(lv_event_t *e)
+{
+    (void)e;
+    show_confirm(T(STR_AP_NEWPASS), T(STR_AP_NEWPASS_BODY), C_DEFICIT,
+                 ap_newpass_ok_cb);
+}
+
+/* Adresa i pocet pripojenych se za otevreneho dialogu meni (radic
+ * nabehne az za chvili, telefon se pripoji pozdeji), takze je dosazuje
+ * ap_poll() z ui_tick() a ne jen stavba. */
+static void ap_paint(void)
+{
+    if (!ap_addr) return;
+
+    const char *ip = host_wifi_ip();
+    lv_label_set_text(ap_addr, ip[0] ? ip : T(STR_NONE));
+    lv_obj_set_style_text_color(ap_addr,
+        lv_color_hex(ip[0] ? C_SAGE : C_LABEL), 0);
+
+    int n = host_wifi_ap_clients();
+    if (n < 0) lv_label_set_text(ap_clients, "");
+    else       lv_label_set_text_fmt(ap_clients, T(STR_AP_CLIENTS), n);
+}
+
+static void wifi_ap_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *m = modal_open(T(STR_WIFI_MODE_AP), C_SAGE);
+    wifi_mode_btn(m, true);
+
+    mk_lbl(m, T(STR_AP_SSID), UI_FONT_16, C_LABEL, 30, 96);
+    mk_lbl(m, host_wifi_ap_ssid(), UI_FONT_36, C_BRIGHT, 30, 118);
+
+    /* Nejvetsi pismo na obrazovce. Je to jedina vec, ktera se odsud
+     * opisuje do telefonu, a opisuje se v dilne vestoje. */
+    mk_lbl(m, T(STR_AP_PASS), UI_FONT_16, C_LABEL, 30, 172);
+    mk_lbl(m, host_wifi_ap_pass(), UI_FONT_48, C_DEMAND, 30, 194);
+
+    mk_lbl(m, T(STR_AP_ADDR), UI_FONT_16, C_LABEL, 30, 262);
+    ap_addr    = mk_lbl(m, "", UI_FONT_32, C_SAGE, 30, 284);
+    ap_clients = mk_lbl(m, "", UI_FONT_20, C_LABEL, 360, 294);
+    ap_paint();
+
+    lv_obj_t *h = mk_lbl(m, T(STR_AP_HINT), UI_FONT_16, C_LABEL, 400, 96);
+    lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(h, 370);
+
+    if (host && host->wifi_ap_newpass)
+        mk_dlg_button(m, 30, 350, 300, 120, T(STR_AP_NEWPASS), UI_FONT_20,
+                      C_DEFICIT, ap_newpass_cb, NULL);
+}
+
+static void ap_poll(void)
+{
+    if (ap_addr) ap_paint();
 }
 
 static void wifi_poll(void)
@@ -2155,6 +2346,59 @@ static void canmode_cb(lv_event_t *e)
 }
 
 /* ---------------------------------------------------------------------
+ * Server se zivymi hodnotami
+ *
+ * Stejny tvar jako rezim sbernice a ze stejneho duvodu:
+ *
+ *   - nikdy se nezapne sam, ani po startu,
+ *   - smerem NAHORU (otevrit port) je za potvrzenim drzenim, kde
+ *     stoji, co to znamena. Server sice jen cte, ale kdokoliv, kdo na
+ *     tu adresu dosahne, vidi vsechno vcetne stavu tachometru.
+ *   - smerem DOLU (zavrit port) jde hned. Zavrit se musi dat okamzite.
+ *
+ * Do vozidla tenhle server nezapise nic a zapsat nemuze - nema cim,
+ * viz net/server.h. Potvrzeni tu tedy neni kvuli vozu, ale kvuli tomu,
+ * co o nem rekne siti.
+ * ------------------------------------------------------------------- */
+/* Popisek NESE SAMO TLACITKO, na dvou radcich, a popisek nad nim zadny
+ * neni. Treti rada lezi 6 px pod druhou, takze se nad ni zadny
+ * nevejde - stal by pres tlacitka rady nad sebou. */
+static void web_btn_paint(void)
+{
+    char s[40];
+
+    if (!btn_web) return;
+
+    bool on = host_web_on();
+    lv_obj_t *l = lv_obj_get_child(btn_web, 0);
+
+    snprintf(s, sizeof(s), "%s\n%s", T(STR_WEB_SERVER), T(on ? STR_ON : STR_OFF));
+    lv_label_set_text(l, s);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(on ? C_SAGE : C_LABEL), 0);
+}
+
+static void web_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    host->web_set(true);
+    modal_close_cb(NULL);
+    web_btn_paint();
+}
+
+static void web_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!host_web()) return;
+    if (host_web_on()) {
+        host->web_set(false);
+        web_btn_paint();
+        return;
+    }
+    show_confirm(T(STR_WEB_SERVER), T(STR_WEB_SRV_HINT), C_DEMAND, web_ok_cb);
+}
+
+/* ---------------------------------------------------------------------
  * Jas podsviceni a profily
  *
  * Tlacitka, ne posuvnik. Posuvnik vyzaduje trefit se a pak jeste
@@ -2210,10 +2454,21 @@ static void bright_btn_paint(void)
 
 /* Tlacitko WIFI ukazuje, na ktere siti deska je. "VYBRAT SIT" tam
  * stalo porad a o stavu nerikalo nic - prave to byla otazka, kvuli
- * ktere na nej clovek sahal. */
+ * ktere na nej clovek sahal.
+ *
+ * V rezimu pristupoveho bodu rika jmeno site, kterou deska SAMA DELA, a
+ * pred nim "AP" - jinak by vypadalo stejne jako pripojeni k cizi siti,
+ * coz je presne ten rozdil, na kterem tady zalezi. */
 static void wifi_btn_paint(void)
 {
+    char t[48];
+
     if (!btn_wifi) return;
+    if (host_wifi_is_ap()) {
+        snprintf(t, sizeof(t), "%s %s", T(STR_WIFI_AP), host_wifi_ap_ssid());
+        dlg_btn_text(btn_wifi, t);
+        return;
+    }
     dlg_btn_text(btn_wifi, host_wifi_connected() ? host_wifi_ssid()
                                                  : T(STR_NONE));
 }
@@ -2880,7 +3135,15 @@ static void build_nastav(lv_obj_t *scr)
      * meni hodnotu rovnou. Viz mk_dlg_button(). */
     mk_lbl(p, "WIFI", UI_FONT_14, C_LABEL, SET_X(0), SET_ROW2 - 20);
     btn_wifi = mk_dlg_button(p, SET_X(0), SET_ROW2, BW, BH, "", UI_FONT_20,
-                             C_DEMAND, wifi_scan_cb, NULL);
+                             C_DEMAND, wifi_cb, NULL);
+    /* Jmeno site je cizi text libovolne delky a v rezimu AP ma jeste
+     * predponu, takze se popisek musi orezat na sirku tlacitka. Bez
+     * toho preteklym textem pres obrubu ven. */
+    {
+        lv_obj_t *l = lv_obj_get_child(btn_wifi, 0);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(l, BW - 16);
+    }
     wifi_btn_paint();
 
     mk_lbl(p, "CAN", UI_FONT_14, C_LABEL, SET_X(1), SET_ROW2 - 20);
@@ -2917,22 +3180,54 @@ static void build_nastav(lv_obj_t *scr)
         lv_obj_set_width(na, SET_BW);
     }
 
-    lbl_wifi = mk_lbl(p, "", UI_FONT_20, C_LABEL, 20, SET_ROW3);
-    lbl_heap = mk_lbl(p, "", UI_FONT_16, C_LABEL, 20, SET_ROW3 + 32);
+    /* Treti rada stoji na stejne mrizce sloupcu jako obe nad ni
+     * (SET_X), takze se tlacitka kryji svisle a ne kazde jinde.
+     *
+     *   SERVER     zap/vyp serveru se zivymi hodnotami
+     *   adresa     na ktere je deska k nalezeni, a pod ni pamet
+     *   ZHASNOUT   primy vypinac podsviceni
+     *   UDRZBA     resety, za dialogem
+     *
+     * Vic nez po 716 px nesmi nic sahnout: od 736 px je pravy sloupec
+     * DPF a stranka je od tam orezana. SET_X(3) + SET_BW = 708. */
+    btn_web = NULL;
+    if (host_web()) {
+        /* Tecky: otevrit port je za potvrzenim drzenim. Zavrit uz ne,
+         * to jde rovnou - stejne jako u rezimu sbernice. Popisek nese
+         * samo tlacitko, viz web_btn_paint(). */
+        btn_web = mk_dlg_button(p, SET_X(0), SET_ROW3, BW, BH, "",
+                                UI_FONT_20, C_DEMAND, web_cb, NULL);
+        web_btn_paint();
+    } else {
+        lv_obj_t *na = mk_lbl(p, T(STR_WEB_NA), UI_FONT_14, C_LABEL,
+                              SET_X(0), SET_ROW3);
+        lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(na, SET_BW);
+    }
+
+    /* Adresa, na ktere je deska k nalezeni. Kdyz bezi server, je to
+     * rovnou adresa stranky - proto je to JEDEN radek a ne dva, ktere
+     * by si mohly odporovat. */
+    lbl_wifi = mk_lbl(p, "", UI_FONT_20, C_LABEL, SET_X(1), SET_ROW3);
+    lv_label_set_long_mode(lbl_wifi, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_wifi, SET_PITCH - 16);
+    /* Pamet na dva radky: na jeden se pri sirce sloupce nevejde a
+     * utnuta na "PSRAM..." by nerikala nic. */
+    lbl_heap = mk_lbl(p, "", UI_FONT_14, C_LABEL, SET_X(1), SET_ROW3 + 30);
+    lv_label_set_long_mode(lbl_heap, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_heap, SET_PITCH - 16);
 
     /* Primy vypinac podsviceni. Probuzeni je dotekem kamkoliv, stejne
      * jako po ztlumeni - resi to ui_tick() pres necinnost LVGL.
      * Zhasina natvrdo, bez prejezdu: hlavni duvod existence je merit na
      * ploskach BL/GND a tam je potreba znamy stav. Neni to dialog ani
      * prepinac hodnoty, je to akce, takze nema tecky ani je mit nema. */
-    mk_button(p, 360, SET_ROW3, 170, BH, T(STR_SET_DISPLAY_OFF), UI_FONT_24,
-              C_ACTUAL, display_off_cb, NULL);
+    mk_button(p, SET_X(2), SET_ROW3, BW, BH, T(STR_SET_DISPLAY_OFF),
+              UI_FONT_20, C_ACTUAL, display_off_cb, NULL);
 
     /* Reset stoji az za vsim, co se da nastavit, a jeste jednou za
-     * dialogem - nemuze se na nej sahnout omylem pri hrani s jednotkami.
-     * Vic nez po 716 px nesmi nic sahnout: od 736 px je pravy sloupec
-     * DPF a stranka je od tam orezana. */
-    mk_dlg_button(p, 546, SET_ROW3, 170, BH, T(STR_SET_MAINT), UI_FONT_20,
+     * dialogem - nemuze se na nej sahnout omylem pri hrani s jednotkami. */
+    mk_dlg_button(p, SET_X(3), SET_ROW3, BW, BH, T(STR_SET_MAINT), UI_FONT_20,
                   C_DEFICIT, reset_cb, NULL);
 }
 
@@ -3704,11 +3999,6 @@ static int host_wifi_rssi(void)
     return (host && host->wifi_rssi) ? host->wifi_rssi() : 0;
 }
 
-static bool host_wifi_ap(void)
-{
-    return (host && host->wifi_ap) ? host->wifi_ap() : false;
-}
-
 static int wifi_bars_from_rssi(int rssi)
 {
     static const int STEP[WIFI_BARS] = { -55, -64, -73, -82, -90 };
@@ -3732,18 +4022,28 @@ static void wifi_status_build(lv_obj_t *bar)
 
 static void wifi_status_paint(void)
 {
+    char t[48];
+
     if (!lbl_ssid) return;
 
-    bool ap = host_wifi_ap();
+    bool ap = host_wifi_is_ap();
     bool on = host_wifi_connected();
     int  n  = (ap || !on) ? 0 : wifi_bars_from_rssi(host_wifi_rssi());
 
     /* Pristupovy bod neni pripojeni k cizi siti, takze sila signalu v
-     * nem nic neznamena a carky zustanou tmave. */
-    lv_label_set_text(lbl_ssid, ap ? T(STR_WIFI_AP)
-                                   : (on ? host_wifi_ssid() : T(STR_NONE)));
+     * nem nic neznamena a carky zustanou tmave.
+     *
+     * Rozlisit se musi OBOJIM, ne jen barvou: "AP" pred jmenem rekne,
+     * ze sit DELA DESKA, a zluta barva to pozna i perifernim pohledem.
+     * Samotne jmeno site vypada v obou rezimech uplne stejne. */
+    if (ap) {
+        snprintf(t, sizeof(t), "%s %s", T(STR_WIFI_AP), host_wifi_ap_ssid());
+        lv_label_set_text(lbl_ssid, t);
+    } else {
+        lv_label_set_text(lbl_ssid, on ? host_wifi_ssid() : T(STR_NONE));
+    }
     lv_obj_set_style_text_color(lbl_ssid,
-        lv_color_hex((ap || on) ? C_BRIGHT : C_LABEL), 0);
+        lv_color_hex(ap ? C_DEMAND : (on ? C_BRIGHT : C_LABEL)), 0);
     for (int i = 0; i < WIFI_BARS; i++)
         lv_obj_set_style_bg_color(wifi_bar[i],
             lv_color_hex(i < n ? C_SAGE : C_RULE), 0);
@@ -4365,20 +4665,31 @@ void ui_tick(void)
     case PG_DPF:
         dpf_paint();
         break;
-    case PG_NASTAV:
+    case PG_NASTAV: {
         /* Jmeno site uz nese tlacitko WIFI, takze radek pod nim rika
-         * to, co se na tlacitko nevejde: adresu a pamet. */
-        lv_label_set_text(lbl_wifi, host_wifi_ip());
+         * to, co se na tlacitko nevejde: adresu a pamet.
+         *
+         * Kdyz bezi server, je to rovnou ADRESA STRANKY - presne to,
+         * co clovek opisuje do telefonu. Kdyz nebezi, je to adresa
+         * desky v siti, tedy co platilo driv. Je to jeden radek, ne
+         * dva, protoze dva by si umely odporovat. */
+        bool web = host_web_on();
+        const char *addr = web ? host_web_url() : host_wifi_ip();
+
+        lv_label_set_text(lbl_wifi, addr);
         lv_obj_set_style_text_color(lbl_wifi,
-            lv_color_hex(host_wifi_connected() ? C_SAGE : C_LABEL), 0);
-        lv_label_set_text_fmt(lbl_heap, "heap %u kB   PSRAM %u kB",
+            lv_color_hex(!addr[0] ? C_LABEL : (web ? C_SAGE : C_ACTUAL)), 0);
+        lv_label_set_text_fmt(lbl_heap, "heap %u kB\nPSRAM %u kB",
                               host_heap_kb(), host_psram_kb());
         wifi_btn_paint();
         if (btn_canmode) canmode_btn_paint();
+        if (btn_web)     web_btn_paint();
         break;
+    }
     }
 
     wifi_poll();
+    ap_poll();
     perf_tick(now);
     /* Vsechny tri jsou "jen kdyz je ten panel otevreny"; inj_tick()
      * naopak bezi porad, protoze mereni muze dobehnout i potom, co se

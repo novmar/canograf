@@ -238,6 +238,50 @@ static const char *const LANG_DE[] = {
     "Warmer Leerlauf, ohne Last. Unter Last läuft der Abgleichregler "
     "nicht und die vier Zahlen sind eher alt als falsch.",
     "%s U/min   %s C  bei der Messung",
+
+    /* WLAN-Modus: einem Netz beitreten oder selbst eines sein */
+    "MODUS",
+    "NETZ",
+    "ACCESS POINT",
+    "NETZNAME",
+    "PASSWORT",
+    "ADRESSE",
+    "%d verbunden",
+    "Die Platine ist selbst das Netz, das funktioniert also auch in "
+    "einer Garage ohne alles. Mit Name und Passwort von oben am Handy "
+    "verbinden und dann die Adresse öffnen.\n\n"
+    "In diesem Modus gibt es keine Netzliste: das Funkmodul kann "
+    "entweder suchen oder Access Point sein, niemals beides.",
+    "NEUES PASSWORT",
+    "Ein neues Passwort wird erzeugt und hier angezeigt. Alle gerade "
+    "verbundenen Geräte fliegen heraus und müssen sich mit dem neuen "
+    "wieder anmelden.",
+
+    /* Server mit Live-Werten; ab WEB_TITLE ist es der Text, den die
+       Seite selbst sagt */
+    "SERVER",
+    "Live-Werte im Browser auf dem Handy. Er liest nur: die Seite hat "
+    "keinen Weg, etwas ins Fahrzeug zu schreiben.\n\n"
+    "Solange er läuft, sieht jeder die Werte samt Kilometerstand, der "
+    "diese Adresse erreicht. Im Access-Point-Modus ist das, wer das "
+    "Passwort kennt; in einem fremden Netz sind es alle darin.",
+    "kein Server in dieser Firmware",
+    "canograf - Live-Werte",
+    "Nur Lesen - diese Seite schreibt nichts ins Fahrzeug.",
+    "Die Platine liest nur, was ihr eigener Bildschirm zeigt; die "
+    "anderen Gruppen werden deshalb alt, bis dort jene Seite "
+    "geöffnet wird.",
+    "Kein Fahrzeug verbunden - die Platine liest nichts, es gibt also "
+    "nichts zu zeigen.",
+    "Keine Antwort von der Platine - die Werte unten sind alt.",
+    "CSV HERUNTERLADEN",
+    "aufgezeichnete Zeilen",
+    "älteste überschrieben",
+    "keine Aufzeichnung - kein Speicher dafür",
+    "nicht gelesen",
+    "live",
+    "alt",
+    "abgelehnt",
 };
 
 #endif /* LANG_DE_H */

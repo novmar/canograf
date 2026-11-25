@@ -275,6 +275,18 @@ def print_table(report, merged, board, vehicle):
     print("")
 
 
+def drop_dir(name):
+    """Vylouci jeden adresar z prekladu.
+
+    SRC_FILTER musi zustat retezec - PlatformIO ho pousti pres env.subst(),
+    ktery seznam prevede na jeho repr a pak neodpovida zadnemu souboru
+    (projevi se to az chybou linkeru)."""
+    src_filter = env.get("SRC_FILTER") or "+<*>"
+    if isinstance(src_filter, (list, tuple)):
+        src_filter = " ".join(src_filter)
+    env.Replace(SRC_FILTER="%s -<%s%s>" % (src_filter, name, os.sep))
+
+
 def apply_to_env(merged):
     defines = []
     for key in sorted(merged):
@@ -290,13 +302,13 @@ def apply_to_env(merged):
     # filtr na neexistujici adresar nicemu nevadi a az adresar vznikne, nemusi
     # se sahat do platformio.ini.
     if merged.get("CANOGRAF_ALLOW_WRITE", (None, "0", None))[1] == "0":
-        # SRC_FILTER musi zustat retezec - PlatformIO ho pousti pres
-        # env.subst(), ktery seznam prevede na jeho repr a pak neodpovida
-        # zadnemu souboru (projevi se to az chybou linkeru)
-        src_filter = env.get("SRC_FILTER") or "+<*>"
-        if isinstance(src_filter, (list, tuple)):
-            src_filter = " ".join(src_filter)
-        env.Replace(SRC_FILTER="%s -<write%s>" % (src_filter, os.sep))
+        drop_dir("write")
+
+    # Vypnuty web neznamena jen zhasle tlacitko: src/net/ se do obrazu
+    # vubec neprelozi, takze deska zadny port otevrit NEUMI. Hlida to
+    # tyz filtr jako u zapisu a da se to overit na elf souboru.
+    if merged.get("CANOGRAF_MOD_WEB", (None, "0", None))[1] == "0":
+        drop_dir("net")
 
 
 main()

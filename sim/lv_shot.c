@@ -24,6 +24,13 @@
 #include "ui.h"
 #include "i18n.h"
 
+/* Obsah odpovedi serveru a vestavena stranka. Vlastni HTTP (net/server.c)
+ * tu neni a byt nemuze - ten uz zna esp_http_server. Tohle je cisty C a
+ * je to jedine misto, kde se bez desky da zmerit, ze chybejici hodnota
+ * neni na webu cislo a ze v zadne odpovedi neni heslo. */
+#include "net/report.h"
+#include "net/page.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -109,8 +116,15 @@ static int fake_find(const char *ssid)
     return -1;
 }
 
+/* Pocitadlo je tu kvuli jedine kontrole: v rezimu pristupoveho bodu se
+ * NESMI skenovat. Radic umi bud jedno, nebo druhe, a pokus o oboji konci
+ * donekonecna v ESP_ERR_WIFI_STATE (docs/findings.md). Zmerit se to da
+ * jedine tim, ze se spocita, kolikrat UI o sken poprosilo. */
+static int fake_scan_starts = 0;
+
 static void fake_scan_start(void)
 {
+    fake_scan_starts++;
     fake_scan_running = true;
     fake_scan_done_at = lv_tick_get() + FAKE_SCAN_MS;
 }
@@ -127,9 +141,17 @@ static const char *fake_scan_ssid(int i)
     return (i >= 0 && i < FAKE_N) ? FAKE_SSID[i] : "";
 }
 
+/* Heslo k CIZI siti. Na desce zustava v NVS a UI se na nej nikdy
+ * nedostane; tady se drzi proto, aby mela zkouska co hledat v
+ * odpovedich serveru - heslo, ktere se nikde nedrzi, taky nikde
+ * nenajdeme a kontrola by nic netvrdila. */
+static char fake_sta_pw[65] = "tajne-heslo-ciziho-wifi";
+
+static const char *fake_sta_pass(void) { return fake_sta_pw; }
+
 static void fake_connect(const char *ssid, const char *pass)
 {
-    (void)pass;
+    if (pass && pass[0]) snprintf(fake_sta_pw, sizeof(fake_sta_pw), "%s", pass);
     if (fake_find(ssid) < 0 && fake_saved_n < (int)(sizeof(fake_saved) / 33))
         snprintf(fake_saved[fake_saved_n++], 33, "%s", ssid);
     snprintf(fake_conn, sizeof(fake_conn), "%s", ssid);
@@ -176,15 +198,64 @@ static void fake_can_reset(void) { memset(&fake_can, 0, sizeof(fake_can)); }
 static int fake_reboots = 0;
 static void fake_reboot(void) { fake_reboots++; }
 
-static bool fake_connected(void) { return fake_conn[0] != '\0'; }
+/* ---- pristupovy bod ----
+ *
+ * Predstira to, co dela radic: v rezimu AP neni deska pripojena k zadne
+ * cizi siti, ma vlastni adresu a hlasi, kolik zarizeni se k ni pripojilo.
+ * fake_ap() je JEDINY zdroj pravdy o rezimu, uplne stejne jako
+ * WiFi.getMode() na desce - UI si zadnou vlastni promennou drzet nesmi.
+ */
+static bool fake_is_ap = false;
+static char fake_ap_pw[16] = "kruh7fqm";
+static int  fake_ap_newpass_calls = 0;
+static int  fake_ap_joined = 2;         /* dva telefony na AP */
+
+static bool fake_connected(void) { return !fake_is_ap && fake_conn[0] != '\0'; }
 static const char *fake_ssid(void) { return fake_conn; }
-static const char *fake_ip(void) { return fake_conn[0] ? "192.168.1.42" : ""; }
+
+static const char *fake_ip(void)
+{
+    if (fake_is_ap) return "192.168.4.1";
+    return fake_conn[0] ? "192.168.1.42" : "";
+}
 
 /* Sila signalu. Nepripojena deska nema co hlasit, takze 0 - stejne jako
- * na desce, viz host_wifi_rssi() v main.cpp. Pristupovy bod predstirana
- * deska nezaklada. */
-static int fake_rssi(void) { return fake_conn[0] ? -58 : 0; }
-static bool fake_ap(void) { return false; }
+ * na desce, viz host_wifi_rssi() v main.cpp. V rezimu AP nema sila
+ * signalu zadny vyznam, takze taky 0. */
+static int fake_rssi(void) { return fake_connected() ? -58 : 0; }
+static bool fake_ap(void) { return fake_is_ap; }
+
+static void fake_set_ap(bool on) { fake_is_ap = on; }
+static const char *fake_ap_ssid(void) { return "canograf-7a3c"; }
+static const char *fake_ap_pass(void) { return fake_ap_pw; }
+static int fake_ap_clients(void) { return fake_is_ap ? fake_ap_joined : -1; }
+
+static void fake_ap_newpass(void)
+{
+    fake_ap_newpass_calls++;
+    snprintf(fake_ap_pw, sizeof(fake_ap_pw), "pwnew%03d", fake_ap_newpass_calls);
+    fake_ap_joined = 0;         /* nove heslo vsechny rozpoji */
+}
+
+/* ---- server se zivymi hodnotami ----
+ *
+ * Predstirana deska zadny port neotevira - na hostiteli neni co
+ * otevirat a zkouska se stejne diva na OBSAH odpovedi (net/report.c),
+ * ne na to, jak se prenese. Drzi se tu jen prepinac a adresa, aby
+ * mely nastaveni a zkouska co ukazat a co zmerit.
+ *
+ * Adresa je bez "http://": je to to, co clovek opravdu napise do
+ * telefonu, a vejde se do radku v nastaveni.
+ */
+static bool fake_web_on = false;
+
+static bool fake_web_enabled(void) { return fake_web_on; }
+static void fake_web_set(bool on) { fake_web_on = on; }
+
+static const char *fake_web_url(void)
+{
+    return fake_web_on ? fake_ip() : "";
+}
 
 /* Rezim sbernice. Predstirana deska se chova jako radic: po startu je v
  * listen-only a do normalniho rezimu se dostane jen tim, ze o to nekdo
@@ -237,6 +308,14 @@ static const ui_host_t FAKE_HOST = {
     .wifi_saved_count   = fake_saved_count,
     .wifi_saved_ssid    = fake_saved_ssid,
     .wifi_forget_all    = fake_forget_all,
+    .wifi_set_ap        = fake_set_ap,
+    .wifi_ap_ssid       = fake_ap_ssid,
+    .wifi_ap_pass       = fake_ap_pass,
+    .wifi_ap_clients    = fake_ap_clients,
+    .wifi_ap_newpass    = fake_ap_newpass,
+    .web_enabled        = fake_web_enabled,
+    .web_set            = fake_web_set,
+    .web_url            = fake_web_url,
     .can_stats          = fake_can_stats,
     .can_stats_reset    = fake_can_reset,
     .can_is_normal      = fake_can_is_normal,
@@ -266,6 +345,14 @@ static const ui_host_t FAKE_HOST_NODIM = {
     .wifi_saved_count   = fake_saved_count,
     .wifi_saved_ssid    = fake_saved_ssid,
     .wifi_forget_all    = fake_forget_all,
+    .wifi_set_ap        = fake_set_ap,
+    .wifi_ap_ssid       = fake_ap_ssid,
+    .wifi_ap_pass       = fake_ap_pass,
+    .wifi_ap_clients    = fake_ap_clients,
+    .wifi_ap_newpass    = fake_ap_newpass,
+    .web_enabled        = fake_web_enabled,
+    .web_set            = fake_web_set,
+    .web_url            = fake_web_url,
     .can_stats          = fake_can_stats,
     .can_stats_reset    = fake_can_reset,
     .can_is_normal      = fake_can_is_normal,
@@ -955,7 +1042,8 @@ static void shot(const char *name)
 #define SET_CAN_X      SET_CX(1)        /* rezim sbernice */
 #define SET_PROFILE_X  SET_CX(2)
 #define SET_BRIGHT_X   SET_CX(3)
-#define SET_RESET_X    (546 + 85)       /* UDRZBA, sirka 170 */
+#define SET_WEB_X      SET_CX(0)        /* SERVER - treti rada */
+#define SET_RESET_X    SET_CX(3)        /* UDRZBA - treti rada */
 /* dialog ztlumeni: rada dob nahore, rada urovni dole (DIM_* v ui.c) */
 #define DIM_T_X(i)     (30 + (i) * 170 + 80)
 #define DIM_T_Y        (120 + 60)
@@ -1907,6 +1995,155 @@ static void phase_wifi(void)
     run_ms(200, false);
 }
 
+/* ---------------------------------------------------------------------
+ * Pristupovy bod
+ *
+ * Tri veci, ktere musi platit, a kazda ma svou mutacni zkousku:
+ *
+ *   1. V REZIMU AP SE NESKENUJE. Radic umi bud skenovat, nebo byt
+ *      pristupovym bodem; pokus o oboji konci donekonecna v
+ *      ESP_ERR_WIFI_STATE (docs/findings.md). Meri se pocitadlem
+ *      fake_scan_starts, tedy tim, kolikrat UI o sken poprosilo.
+ *      Mutace: ve wifi_cb() v ui.c volat vzdycky wifi_scan_cb().
+ *      Kontrola "v rezimu AP se o sken nikdo nepozada" MUSI selhat.
+ *
+ *   2. JMENO I HESLO JSOU VIDET. Bez nich se k desce nikdo nepripoji -
+ *      deska nema kudy jinudy je rict. Meri se tim, ze se oba retezce
+ *      najdou mezi popisky dialogu.
+ *      Mutace: ve wifi_ap_cb() vynechat radek s host_wifi_ap_pass().
+ *      Kontrola "heslo k vlastni siti je na obrazovce" MUSI selhat.
+ *
+ *   3. AP JE POZNAT OD PRIPOJENI K CIZI SITI. Jmeno site vypada v obou
+ *      rezimech stejne, takze se stavovy radek musi lisit.
+ *      Mutace: ve wifi_status_paint() vynechat vetev if (ap).
+ *      Kontrola "stavovy radek rozlisi AP od cizi site" MUSI selhat.
+ * ------------------------------------------------------------------- */
+
+/* Najde retezec mezi vsemi popisky otevreneho dialogu. Dialog je
+ * posledni dite obrazovky, prvky v nem jsou jedna uroven hluboko. */
+static bool screen_has_text(lv_obj_t *root, const char *want)
+{
+    uint32_t n = lv_obj_get_child_cnt(root);
+
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(root, i);
+        if (lv_obj_check_type(c, &lv_label_class)) {
+            const char *t = lv_label_get_text(c);
+            if (t && strstr(t, want)) return true;
+        }
+        if (screen_has_text(c, want)) return true;
+    }
+    return false;
+}
+
+static void phase_ap(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+
+    /* Stanice je pripojena k siti, ktera se jmenuje PRESNE jako
+     * pristupovy bod desky. Jedine, cim se pak oba stavy ve stavovem
+     * radku lisi, je to, co pridava rezim - predrazene "AP" a barva.
+     * Bez teto pripravy by zkouska jen merila rozdil mezi "nejaka sit"
+     * a "zadna sit" a o rozliseni rezimu by nerikala nic. */
+    snprintf(fake_conn, sizeof(fake_conn), "%s", fake_ap_ssid());
+
+    /* Vychozi stav je stanice: deska hleda cizi sit. */
+    check("deska zacina jako stanice, ne jako AP", !fake_ap());
+    check("stanice je pripojena ke stejne pojmenovane siti",
+          fake_connected());
+
+    /* Dialog siti ma vedle nadpisu tlacitko do druheho rezimu. */
+    tap(SET_WIFI_X, SET_ROW2_Y, false);
+    run_ms(1600, false);                    /* sken dobehne */
+    int scans_before = fake_scan_starts;
+    check("v rezimu stanice se sken opravdu spusti", scans_before > 0);
+
+    /* ---- prepnuti do rezimu pristupoveho bodu ----
+     *
+     * 1. V REZIMU AP SE NESKENUJE. Pocitadlo se bere JESTE PRED
+     *    prepnutim: prave prepnuti dialog prestavi, a kdyby ho prestavel
+     *    na seznam siti, sken by se rozjel presne tady. Odectem az po
+     *    prepnuti by tahle - ta nejdulezitejsi - chvile z mereni vypadla.
+     *
+     *    Mutace: ve wifi_cb() v ui.c volat vzdycky wifi_scan_cb().
+     *    Kontrola "v rezimu AP se o sken nikdo nepozada" MUSI selhat. */
+    scans_before = fake_scan_starts;
+    tap(400 + 120, 14 + 35, false);         /* tlacitko PRISTUPOVY BOD */
+    run_ms(3400, false);                    /* dost na rozjezd i dobeh skenu */
+    check("tlacitko vedle nadpisu prepne radic do rezimu AP", fake_ap());
+    check("v rezimu AP se o sken nikdo nepozada",
+          fake_scan_starts == scans_before);
+
+    /* 2. JMENO I HESLO NA OBRAZOVCE. */
+    check("jmeno vlastni site je na obrazovce",
+          screen_has_text(lv_scr_act(), fake_ap_ssid()));
+    check("heslo k vlastni siti je na obrazovce",
+          screen_has_text(lv_scr_act(), fake_ap_pass()));
+    check("adresa, na ktere je deska, je na obrazovce",
+          screen_has_text(lv_scr_act(), "192.168.4.1"));
+    check("pocet pripojenych zarizeni je na obrazovce",
+          screen_has_text(lv_scr_act(), "2"));
+    shot("ap-bod");
+
+    /* Seznam siti v tomhle dialogu NENI - ne ze by zesedl, ono tam
+     * neni. Kdyby tam byl, nasel by se v nem nektery z vymyslenych SSID
+     * ze skenu. */
+    check("v rezimu AP neni na obrazovce seznam cizich siti",
+          !screen_has_text(lv_scr_act(), "Trafic-hotspot"));
+
+    /* ---- nove heslo ---- */
+    int pw_before = fake_ap_newpass_calls;
+    tap(30 + 150, 350 + 60, false);         /* NOVE HESLO */
+    run_ms(200, false);
+    shot("ap-nove-heslo");
+    tap(HOLD_X, HOLD_Y, false);             /* jen tuknuti nestaci */
+    check("tuknuti heslo nezmeni", fake_ap_newpass_calls == pw_before);
+
+    touch_at(HOLD_X, HOLD_Y);
+    touch_down = true;
+    run_ms(4200, false);                    /* 3 s odpocet a potvrzeni */
+    touch_release(false);
+    run_ms(600, false);
+    check("podrzeni vyrobi nove heslo",
+          fake_ap_newpass_calls == pw_before + 1);
+    check("nove heslo je hned na obrazovce",
+          screen_has_text(lv_scr_act(), fake_ap_pass()));
+    shot("ap-po-novem-hesle");
+
+    /* 3. STAVOVY RADEK. Meri se se ZAVRENYM dialogem - dialog lezi pres
+     *    celou obrazovku vcetne horni listy, takze s otevrenym by se
+     *    porovnaval jeho nadpis a ne stav site.
+     *
+     *    Otisk v rezimu AP se porovna s otiskem TEHOZ jmena site v
+     *    rezimu stanice (viz priprava fake_conn na zacatku faze). Jedine,
+     *    cim se oba lisi, je to, co pridava rezim.
+     *
+     *    Mutace: ve wifi_status_paint() v ui.c nahradit vetev AP jen
+     *        lv_label_set_text(lbl_ssid, host_wifi_ap_ssid());
+     *    a barvu nechat (ap || on) ? C_BRIGHT : C_LABEL. Posledni
+     *    kontrola teto faze MUSI selhat. */
+    swipe(120, 240, 700, 250, 8, false, false);
+    run_ms(600, false);
+    unsigned bar_ap = region_hash(SSID_BOX);
+    shot("ap-lista");
+
+    tap(SET_WIFI_X, SET_ROW2_Y, false);     /* zpatky do dialogu AP */
+    run_ms(400, false);
+
+    /* ---- zpatky na stanici ---- */
+    tap(400 + 120, 14 + 35, false);         /* tlacitko SIT */
+    run_ms(400, false);
+    check("tlacitko SIT vrati radic do rezimu stanice", !fake_ap());
+    check("po navratu do rezimu stanice se zase skenuje",
+          fake_scan_starts > scans_before);
+
+    swipe(120, 240, 700, 250, 8, false, false);
+    run_ms(600, false);
+    check("stavovy radek rozlisi AP od cizi site",
+          bar_ap != region_hash(SSID_BOX));
+}
+
 /* Doba do ztlumeni se nastavuje v dialogu ZTLUMIT PO, ne stridanim
  * hodnot na tlacitku: otevrit, tuknout na jednu ze ctyr dob, zavrit
  * gestem. DIM_STEP_S v ui.c je { nikdy, 30 s, 2 min, 10 min }.
@@ -2218,6 +2455,241 @@ static void phase_reset(void)
     shot("reset-nastaveni-hotovo");
 }
 
+/* ---------------------------------------------------------------------
+ * Server se zivymi hodnotami
+ *
+ * Dve casti. Prvni je PANEL: prepinac v nastaveni a adresa na displeji.
+ * Druha je OBSAH ODPOVEDI (net/report.c), a ta je tu to podstatne -
+ * jsou to vlastnosti, ktere se bez desky nedaji zmerit nikde jinde:
+ *
+ *   1. CHYBEJICI HODNOTA NENI NA WEBU CISLO. Meri se nad PRAZDNOU
+ *      vrstvou diagnostiky, kde zadna hodnota neprisla: ani jedna z
+ *      27 velicin nesmi v odpovedi nest cifru.
+ *   2. V ZADNE ODPOVEDI NENI HESLO. Ani heslo cizi site (to deska zna z
+ *      NVS), ani heslo vlastniho pristupoveho bodu. Hleda se ve vsech
+ *      ctyrech odpovedich, ktere server umi poslat.
+ *   3. KDYZ VUZ PRIPOJENY NENI, STRANKA TO REKNE. Prazdna pole bez te
+ *      vety vypadaji jako rozbity server.
+ *
+ * Krome kontrol se odpovedi i vypisou do souboru vedle snimku, takze se
+ * da stranka otevrit v prohlizeci a podivat se na ni.
+ * ------------------------------------------------------------------- */
+static bool has_digit(const char *s)
+{
+    for (; s && *s; s++)
+        if (*s >= '0' && *s <= '9') return true;
+    return false;
+}
+
+/* Projde vsechny vykreslene hodnoty v JSON ("t":"...") a rekne, jestli
+ * nektera z nich nese cifru. Je to tataz vec jako pohled na stranku:
+ * prohlizec dostava hotovy text a zadne cislo si nedopocita. */
+static bool json_values_have_digit(const char *json)
+{
+    const char *p = json;
+
+    while ((p = strstr(p, "\"t\":\"")) != NULL) {
+        p += 5;
+        for (; *p && *p != '"'; p++)
+            if (*p >= '0' && *p <= '9') return true;
+    }
+    return false;
+}
+
+static void dump_file(const char *name, const char *data, int len)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", g_outdir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "zapis %s selhal\n", path); shot_err = 1; return; }
+    fwrite(data, 1, (size_t)(len < 0 ? (int)strlen(data) : len), f);
+    fclose(f);
+    printf("%s\n", path);
+}
+
+static void phase_web_report(void)
+{
+    static weblog_row_t rows[8];
+    static weblog_t      log;
+    static char          buf[16384];
+    static diag_poller_t empty;         /* vrstva, ktere nikdy nic neprislo */
+    diag_poller_cfg_t    dc;
+    report_net_t         net;
+    int                  n;
+
+    diag_poller_cfg_default(&dc);
+    diag_poller_init(&empty, &dc);
+
+    memset(&net, 0, sizeof(net));
+    net.ap      = true;
+    net.clients = 2;
+    net.uptime_s = 412;
+    snprintf(net.ssid, sizeof(net.ssid), "%s", fake_ap_ssid());
+    snprintf(net.ip, sizeof(net.ip), "%s", fake_ip());
+
+    /* -----------------------------------------------------------------
+     * 1. CHYBEJICI HODNOTA NENI CISLO
+     *
+     * Mutacni zkouska: v report_value() v net/report.c dopsat do vetve
+     * DIAG_SHOW_NONE vykresleni diag_poller_value(). Obe nasledujici
+     * kontroly MUSI selhat.
+     * ----------------------------------------------------------------- */
+    int none_n = 0, num_n = 0;
+    for (int i = 0; i < report_ch_count(); i++) {
+        report_val_t v;
+        report_value(&v, &empty, i);
+        if (v.show == DIAG_SHOW_NONE && !has_digit(v.txt)) none_n++;
+        if (has_digit(v.txt)) num_n++;
+    }
+    check("neprectena velicina nema na webu zadnou cifru",
+          none_n == report_ch_count() && num_n == 0);
+
+    n = report_live_json(buf, sizeof(buf), &empty, &net, &log);
+    check("odpoved s neprectenymi hodnotami se vesla", n > 0);
+    check("v odpovedi serveru neni za neprectenou hodnotu cislo",
+          !json_values_have_digit(buf));
+
+    /* A naopak: nad vrstvou, ktera uz neco precetla, cisla BYT MUSI -
+     * jinak by predchozi kontrola prochazela i rozbitemu vykreslovani. */
+    n = report_live_json(buf, sizeof(buf), &g_dp, &net, &log);
+    check("odpoved s prectenymi hodnotami se vesla", n > 0);
+    check("prectene hodnoty v odpovedi serveru cisla jsou",
+          json_values_have_digit(buf));
+    dump_file("live", buf, n);
+
+    /* -----------------------------------------------------------------
+     * 2. HESLO NENI V ZADNE ODPOVEDI
+     *
+     * report_net_t zadnou polozku na heslo NEMA, takze se do odpovedi
+     * nema jak dostat. Tohle meri, ze to tak opravdu dopadlo - pro
+     * heslo cizi site i pro heslo vlastniho pristupoveho bodu.
+     *
+     * Mutacni zkouska: pridat do report_net_t polozku pass[65], v
+     * report_live_json ji vypsat a ve fill_net() ji naplnit. Kontrola
+     * MUSI selhat.
+     * ----------------------------------------------------------------- */
+    bool leak = false;
+
+    n = report_live_json(buf, sizeof(buf), &g_dp, &net, &log);
+    leak |= strstr(buf, fake_ap_pass()) != NULL;
+    leak |= strstr(buf, fake_sta_pass()) != NULL;
+
+    n = report_meta_json(buf, sizeof(buf));
+    check("popisky se vesly", n > 0);
+    leak |= strstr(buf, fake_ap_pass()) != NULL;
+    leak |= strstr(buf, fake_sta_pass()) != NULL;
+    dump_file("meta", buf, n);
+
+    weblog_init(&log, rows, 8, 500);
+    for (int i = 0; i < 4; i++) weblog_sample(&log, &g_dp, 500u * (uint32_t)i);
+
+    n = report_csv_head(buf, sizeof(buf), &log);
+    check("hlavicka CSV se vesla", n > 0);
+    leak |= strstr(buf, fake_ap_pass()) != NULL;
+    leak |= strstr(buf, fake_sta_pass()) != NULL;
+
+    int head = n;
+    n = report_csv_row(buf + head, (int)sizeof(buf) - head, &log, 0);
+    check("radek CSV se vesel", n > 0);
+    leak |= strstr(buf + head, fake_ap_pass()) != NULL;
+    leak |= strstr(buf + head, fake_sta_pass()) != NULL;
+
+    check("heslo k siti neni v zadne odpovedi serveru", !leak);
+    check("hesla, ktera se hledaji, nejsou prazdna",
+          fake_ap_pass()[0] && fake_sta_pass()[0]);
+
+    /* CSV: chybejici hodnota ma sloupec PRAZDNY, ne nulovy. */
+    weblog_init(&log, rows, 8, 500);
+    weblog_sample(&log, &empty, 0u);
+    n = report_csv_row(buf, sizeof(buf), &log, 0);
+    check("radek CSV s neprectenymi hodnotami se vesel", n > 0);
+    check("chybejici hodnota ma v CSV prazdny sloupec, ne nulu",
+          strstr(buf, ",,none") != NULL && strstr(buf, ",0,none") == NULL);
+
+    /* -----------------------------------------------------------------
+     * 3. KDYZ VUZ PRIPOJENY NENI, STRANKA TO REKNE
+     *
+     * Mutacni zkouska: v report_no_vehicle() v net/report.c vracet
+     * natvrdo false. Prvni z nasledujicich kontrol MUSI selhat.
+     * ----------------------------------------------------------------- */
+    check("bez pripojeneho vozu to odpoved rekne", report_no_vehicle(&empty));
+
+    /* A naopak. Radic musi nejdriv zacit vysilat, jinak se jednotky
+     * nikdo nezepta a "vuz pripojeny neni" plati pravem - presne tak,
+     * jak to rika i horni lista panelu. */
+    fake_can_normal = true;
+    run_ms(4000, false);
+    check("s odpovidajici jednotkou uz to odpoved netvrdi",
+          !report_no_vehicle(&g_dp));
+
+    /* Zaznam relace: ctyri vzorky nahore, osmiradkovy zasobnik. */
+    weblog_init(&log, rows, 8, 500);
+    for (int i = 0; i < 12; i++) weblog_sample(&log, &g_dp, 500u * (uint32_t)i);
+    check("zasobnik zaznamu se naplnil a prepisuje nejstarsi",
+          weblog_rows(&log) == 8u && log.dropped == 4u);
+    check("prepsany radek uz nejde precist", weblog_at(&log, 0) == NULL);
+    check("kolik radku zmizelo, stoji v hlavicce CSV",
+          report_csv_head(buf, sizeof(buf), &log) > 0 &&
+          strstr(buf, "dropped 4") != NULL);
+
+    /* Cely soubor ke stazeni, at je videt, co z desky opravdu vypadne. */
+    int at = report_csv_head(buf, sizeof(buf), &log);
+    for (uint32_t s = weblog_first(&log); s < log.head; s++) {
+        int r = report_csv_row(buf + at, (int)sizeof(buf) - at, &log, s);
+        if (r < 0) break;
+        at += r;
+    }
+    dump_file("log.csv", buf, at);
+    dump_file("index.html", NET_PAGE_HTML, -1);
+}
+
+/* Tlacitko SERVER a vedle nej radek s adresou - treti rada nastaveni,
+ * prvni dva sloupce. Zapnuty a vypnuty server se tu musi lisit: samotne
+ * "ZAP" by uzivatel nemel s cim porovnat. */
+#define SRV_BOX  20, PAGE_Y(194), 356, PAGE_Y(262)
+
+static void phase_web(void)
+{
+    ui_show_page(5);
+    run_ms(400, false);
+
+    /* Port zustava zavreny, dokud ho nekdo nezapne. Nikdy ne po startu. */
+    check("server po startu stoji", !fake_web_on);
+    unsigned srv_off = region_hash(SRV_BOX);
+
+    /* Zapnuti je za potvrzenim drzenim: server sice jen cte, ale kdo na
+     * tu adresu dosahne, vidi vsechno vcetne tachometru. */
+    tap(SET_WEB_X, SET_ROW3_Y, false);
+    shot("server-potvrzeni");
+    tap(HOLD_X, HOLD_Y, false);
+    check("tuknuti server nezapne", !fake_web_on);
+
+    hold_confirm();
+    check("podrzeni server zapne", fake_web_on);
+    run_ms(400, false);
+    check("adresa stranky je na displeji",
+          fake_web_url()[0] &&
+          screen_has_text(lv_scr_act(), fake_web_url()));
+    check("bezici server je v nastaveni poznat",
+          srv_off != region_hash(SRV_BOX));
+    shot("nastaveni-server");
+
+    /* Zavrit se musi dat okamzite, bez odpoctu. */
+    tap(SET_WEB_X, SET_ROW3_Y, false);
+    run_ms(400, false);
+    check("tuknuti server vypne", !fake_web_on);
+    check("po vypnuti vypada rada zase jako pred zapnutim",
+          srv_off == region_hash(SRV_BOX));
+
+    /* a zpatky zapnout, at zbytek zkousky i snimky ukazuji bezici server */
+    tap(SET_WEB_X, SET_ROW3_Y, false);
+    hold_confirm();
+    run_ms(400, false);
+    check("server jde zapnout znovu", fake_web_on);
+
+    phase_web_report();
+}
+
 /* Deska bez dratku z GPIO6 na plosku BL stmivat neumi a nesmi se tvarit,
  * ze ano. Postavi se cela UI znovu nad hostitelem, ktery bl_set_percent
  * nema, a misto tlacitka jasu musi byt v nastaveni vysvetleni, proc to
@@ -2412,9 +2884,11 @@ int main(int argc, char **argv)
     phase_dialogy();        /* konci v listen-only */
     phase_stav_wifi();
     phase_wifi();
+    phase_ap();
     phase_jas();
     phase_profily();
     phase_reset();
+    phase_web();
     phase_bez_dratku();     /* posledni - stavi UI nad jinym hostitelem */
 
     free(rgb);
