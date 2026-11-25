@@ -10,12 +10,19 @@ bufferu, vlastni flush callback si ho prekopiruje a PNG zapise
 ## Preklad a spusteni
 
 ```sh
-cmake -S sim -B sim/build
+cmake -S sim -B sim/build -DCMAKE_BUILD_TYPE=Release
 cmake --build sim/build
 ./sim/build/lv_shot /tmp/shots
 ```
 
 Vznikne `00-MAIN.png` az `05-SETUP.png`.
+
+**`-DCMAKE_BUILD_TYPE=Release` tam patri a neni to o rychlosti.** Bez nej
+prekladac neoptimalizuje, a protoze `-Wstringop-overflow` i
+`-Wformat-truncation` potrebuji k analyze optimalizovany kod, tise se
+vypnou. CI stavi s `Release` (viz `.github/workflows/ci.yml`), takze
+preklad bez nej projde lokalne a spadne az tam. Stalo se to peti behum
+po sobe, nez si toho nekdo vsiml.
 
 Druhy, nepovinny parametr je kod jazyka - `en`, `cs`, `de`, viz
 `lang/README.md`. Bez nej se kresli vychozi anglictina:

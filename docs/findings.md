@@ -257,3 +257,10 @@ backlight already.
   lived in `net/server.h`, which is not compiled when the web module is off -
   but the access point still works in that build, so the limit disappeared
   with the module. `[meas]`
+- **A local build without `-DCMAKE_BUILD_TYPE=Release` cannot see what CI
+  sees.** `-Wstringop-overflow` and `-Wformat-truncation` need optimised code
+  to analyse, so an unoptimised build silently turns them off. CI builds the
+  host target with `Release`; the command written down for humans did not. Five
+  runs failed in a row while every local check was green. The fix is not "look
+  at CI more often" - it is that the documented command has to be the same
+  command. `[meas]`

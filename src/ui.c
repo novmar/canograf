@@ -847,7 +847,11 @@ static void dlg_btn_text(lv_obj_t *b, const char *text)
     char s[48];
 
     if (!b) return;
-    snprintf(s, sizeof(s), "%s ...", text);
+    /* Krati se TEXT, nikdy ty tri tecky. Prave ony rikaji, ze tlacitko
+     * otevira dialog a nemeni hodnotu rovnou - kdyby je dlouhy preklad
+     * odriznul, zmizel by jediny rozdil mezi obema druhy tlacitek.
+     * 48 - 5 je misto na " ..." a zaviraci nulu. */
+    snprintf(s, sizeof(s), "%.*s ...", (int)(sizeof(s) - 5u), text);
     lv_label_set_text(lv_obj_get_child(b, 0), s);
 }
 

@@ -233,7 +233,11 @@ static int fake_ap_clients(void) { return fake_is_ap ? fake_ap_joined : -1; }
 static void fake_ap_newpass(void)
 {
     fake_ap_newpass_calls++;
-    snprintf(fake_ap_pw, sizeof(fake_ap_pw), "pwnew%03d", fake_ap_newpass_calls);
+    /* Pole je 16 B, ale %03d umi vydat az jedenact cislic, kdyby se
+     * citac rozjel - pak by se heslo tise orizlo a zkouska by porovnavala
+     * neco jineho, nez si mysli. Omezeni delky to drzi v mezich. */
+    snprintf(fake_ap_pw, sizeof(fake_ap_pw), "pwnew%03d",
+             fake_ap_newpass_calls % 1000);
     fake_ap_joined = 0;         /* nove heslo vsechny rozpoji */
 }
 
