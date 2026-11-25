@@ -23,7 +23,7 @@ static const char *const LANG_DE[] = {
     "EINST.",
 
     /* Kopfzeile */
-    "KÜHLMITTEL",
+    "KÜHLUNG",
     "KEIN BUS",
     "HÖRE ZU",
     "KEINE ANTWORT",
@@ -293,6 +293,37 @@ static const char *const LANG_DE[] = {
     "Routinen erreichen den Bus nie, egal was die App verlangt. Im "
     "Nur-Hören-Modus geht gar nichts hinaus. Immer nur ein Werkzeug.",
     "läuft, aber die Platine hat noch keine Adresse",
+
+    /* Fahrmodus; Begründung bei DRIVE_ON_KMH in ui.c */
+    "FAHRT",
+    "FAHRT?",
+    "Während der Fahrt sind die Einstellungen gesperrt. Helligkeit "
+    "und Busmodus bleiben verfügbar: Blendung ist eine Frage der "
+    "Sicherheit, und ohne Bus gibt es nichts zu lesen. Alles andere "
+    "entsperrt sich von selbst, sobald das Fahrzeug fünf Sekunden "
+    "steht.",
+    "Die Fahrzeuggeschwindigkeit wird nicht gelesen, also kann die "
+    "Oberfläche nicht wissen, ob das Fahrzeug fährt, und nimmt es "
+    "an - ein fehlender Wert ist keine Null. Helligkeit und Busmodus "
+    "bleiben verfügbar. Wenn das Fahrzeug wirklich steht, sagen Sie "
+    "es unten.",
+    "Nur die Stufen des gerade genutzten Profils. Die Helligkeit eines "
+    "Profils zu setzen, in dem das Fahrzeug nicht ist, ist "
+    "Werkstattarbeit.",
+    "Diagnose, Batterie und Injektorabgleich sind Werkstattwerkzeuge - "
+    "die letzten beiden lassen sich nur am stehenden Fahrzeug messen - "
+    "und alle drei enthalten Bedienelemente, die während der Fahrt zu "
+    "klein sind. Sie kommen zurück, sobald das Fahrzeug steht.",
+    "Einträge zu einem Fehler werden am stehenden Fahrzeug gelesen. Die "
+    "Liste selbst bleibt während der Fahrt lesbar.",
+    "FAHRZEUG\nSTEHT",
+    "Bestätigen Sie das nur, wenn das Fahrzeug wirklich steht. Sie "
+    "sagen damit, was die Platine nicht sehen kann: es gibt keinen "
+    "Geschwindigkeitswert, also nimmt die Oberfläche Fahrt an und "
+    "hält die Einstellungen gesperrt.\n\n"
+    "Es verfällt, sobald ein Wert über 10 km/h eintrifft, "
+    "und wird nie gespeichert - nach einem Neustart weiß die Platine "
+    "wieder nichts und beginnt auf der sicheren Seite.",
 };
 
 #endif /* LANG_DE_H */

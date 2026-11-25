@@ -447,7 +447,8 @@ typedef struct {
 
 static const ecu_did_t ECU_DID[] = {
     { 0x2002u, 2u,  7200u },   /* otacky   x0,25  = 1800 1/min */
-    { 0x2003u, 2u,  8600u },   /* rychlost x0,01  = 86 km/h */
+    { 0x2003u, 2u,  8600u },   /* rychlost x0,01; skutecnou hodnotu drzi
+                                  ecu_speed_raw, tahle se nepouzije */
     { 0x2401u, 2u,  1840u },   /* plnici tlak     = 1840 mbar */
     { 0x2402u, 2u,  1900u },   /* zadany tlak     = 1900 mbar */
     { 0x2801u, 2u,  1150u },   /* rail            = 1150 bar */
@@ -483,6 +484,18 @@ static bool emm_refuses = false;   /* 21 34 odmitnuto */
 static bool emm_charging = true;   /* smer proudu, ktery snimac hlasi */
 static bool ecu_frozen = false;    /* 252D: snimac tlaku prestal chodit */
 static bool ecu_fbc_ok = false;    /* odpovida jednotka na FD38..FD3B? */
+
+/* Rychlost vozidla, syrova (x0,01 km/h). Vychozi stav je STOJICI VUZ:
+ * tak vypada deska v dilne, a vsechny ostatni faze zkousky do
+ * nastaveni opravdu sahaji. Rezim jizdy ma vlastni fazi, ktera si ji
+ * nastavi sama. */
+static uint32_t ecu_speed_raw = 0u;
+
+/* Rychlost v km/h, at se to v zkousce cte jako v aute. */
+static void ecu_speed(float kmh)
+{
+    ecu_speed_raw = (uint32_t)(kmh * 100.0f + 0.5f);
+}
 
 /* Korekce po valcich, syrove. Dvoubajtove se znamenkem, deleno stem:
  * +0,42 / -1,85 / +0,11 / -0,08 mg, tedy rozptyl 2,27 mg a druhy valec
@@ -546,9 +559,14 @@ static int ecu_reply(const uint8_t *q, int qn, uint8_t *r)
                 return 3;
             }
             if (did == ECU_SKIP_DID) continue;
+            /* Rychlost vozidla se behem zkousky meni - rozhoduje o
+             * rezimu jizdy v UI, takze z ni musi jit udelat stojici
+             * vuz, popojeti v kolone i dalnice. Je to jediny udaj,
+             * ktery se hybe, zbytek tabulky plati porad. */
+            if (did == 0x2003u) raw = ecu_speed_raw;
             /* Priznak zamrzleho signalu je jediny bit (252D, bitoffset
              * 7), takze jednicka v nejnizsim bitu jednoho bajtu. */
-            raw = (did == 0x252Du) ? (ecu_frozen ? 1u : 0u) : d->raw;
+            else raw = (did == 0x252Du) ? (ecu_frozen ? 1u : 0u) : d->raw;
             ecu_put(r, &at, did, 2u);
             ecu_put(r, &at, raw, d->len);
         }
@@ -716,9 +734,16 @@ static void unit_rx(isotp_link_t *link,
 static uint32_t ecu_chat_at = 0;
 
 /* Jeden krok sbernice: doruci se, co se minule poslalo, jednotka dosila
- * rozdelanou odpoved a deska dostane cas. Vola se ze stejneho mista
- * jako ui_tick(), takze se pri anim_only nehybe ani sbernice a dva
- * snimky jdou porovnat. */
+ * rozdelanou odpoved a deska dostane cas. Na obrazovku to samo o sobe
+ * nesaha - kresli az ui_tick() - takze to bezi i v anim_only, kde se
+ * porovnavaji dva snimky.
+ *
+ * Driv se tu pri anim_only stala sbernice taky. To uz nejde: bez
+ * ramcu zestarne rychlost a UI prejde do rezimu jizdy, protoze
+ * chybejici rychlost neznamena stojici vuz. Zkouska animaci by tak
+ * sama od sebe schovala dlazdice, do kterych pak tuka. Cas pritom
+ * bezi dal, takze zastavena sbernice neni "nic se nedeje", ale
+ * "vozidlo zmlklo" - a to je neco jineho. */
 static void bus_step(void)
 {
     uint32_t now = lv_tick_get();
@@ -796,7 +821,8 @@ static void run_ms(int ms, bool anim_only)
 {
     for (int t = 0; t < ms; t += STEP_MS) {
         lv_tick_inc(STEP_MS);
-        if (!anim_only) { bus_step(); ui_tick(); }
+        bus_step();
+        if (!anim_only) ui_tick();
         lv_timer_handler();
     }
 }
@@ -969,6 +995,63 @@ static int modal_btns(void)
     return n;
 }
 
+/* ---------------------------------------------------------------------
+ * Zmereni VSECH dotykovych cilu na obrazovce
+ *
+ * Rozdil proti scan_btns(): nehleda tlacitka, ale vsechno, do ceho se
+ * da tuknout. Prepinac profilu v liste, sloupec DPF a uchyt navigace
+ * nejsou lv_btn - jsou to obycejne objekty s priznakem CLICKABLE - a
+ * prave ty byly pod dotykovym minimem.
+ *
+ * Meri se CLICK AREA, ne kresba. Uchyt navigace a tlacitko ZPET maji
+ * za jizdy rozsirenou dotykovou oblast (lv_obj_set_ext_click_area), a
+ * zmerit kresbu by u nich reklo neco jineho, nez na co clovek sahne.
+ *
+ * Klavesnice hesla je jeden objekt s matici tlacitek uvnitr, takze se
+ * do stromu nepromitne; pocita se zvlast a za jizdy nesmi byt vubec.
+ * ------------------------------------------------------------------- */
+typedef struct {
+    int        n;        /* kolik cilu je videt */
+    int        small;    /* kolik z nich je pod minimem */
+    lv_coord_t minw;
+    lv_coord_t minh;
+    int        matrix;   /* klavesnice a matice tlacitek */
+} touch_scan_t;
+
+#define TOUCH_MIN 120    /* 14 mm pri 8,54 px/mm, viz docs/ui.md */
+#define BL_LEVELS_UI 5   /* BL_LEVELS v ui.c */
+
+static void scan_touch(lv_obj_t *o, touch_scan_t *s)
+{
+    uint32_t cnt = lv_obj_get_child_cnt(o);
+
+    for (uint32_t i = 0; i < cnt; i++) {
+        lv_obj_t *c = lv_obj_get_child(o, i);
+
+        if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_check_type(c, &lv_btnmatrix_class) ||
+            lv_obj_check_type(c, &lv_keyboard_class))
+            s->matrix++;
+        if (lv_obj_has_flag(c, LV_OBJ_FLAG_CLICKABLE)) {
+            lv_area_t a;
+            lv_obj_get_click_area(c, &a);
+            lv_coord_t w = lv_area_get_width(&a), h = lv_area_get_height(&a);
+            s->n++;
+            if (w < TOUCH_MIN || h < TOUCH_MIN) s->small++;
+            if (w < s->minw) s->minw = w;
+            if (h < s->minh) s->minh = h;
+        }
+        scan_touch(c, s);
+    }
+}
+
+static touch_scan_t touch_targets(void)
+{
+    touch_scan_t s = { 0, 0, 9999, 9999, 0 };
+    scan_touch(lv_scr_act(), &s);
+    return s;
+}
+
 static int checks_failed = 0;
 
 static void check(const char *what, bool ok)
@@ -1113,13 +1196,66 @@ static void shot(const char *name)
 #define RAIL_X      768
 #define RAIL_Y      240
 
+/* ---------------------------------------------------------------------
+ * Rezim jizdy, mereny zvenku
+ *
+ * UI o rezimu nema verejnou funkci a nema ji mit - zkouska se ho pta
+ * stejne jako clovek, tedy pohledem. Cedule v horni liste je jedine
+ * misto, kde se rezim jizdy rika slovem, a v rezimu stani tam neni
+ * vubec nic (pozadi listy je C_PANEL).
+ *
+ * Souradnice: TOP_DRIVE_X = 340 v ui.c, font 20 s odsazenim 4 px.
+ * ------------------------------------------------------------------- */
+#define DRIVE_BOX   344, 24, 396, 44
+#define C_RULE32    lv_color_to32(lv_color_hex(0x1B2A38))
+
+static bool ui_driving(void)
+{
+    return region_has(DRIVE_BOX, C_RULE32);
+}
+
+/* Rada nastaveni za jizdy: SETD_* v ui.c, stred tlacitka. */
+#define SETD_CX(i)  (20 + (i) * 236 + 114)
+#define SETD_CY     PAGE_Y(130 + 60)
+#define SETD_CAN_X  SETD_CX(0)
+#define SETD_STOP_X SETD_CX(2)
+
+static void hold_confirm(void);
+
+/* Rezim sbernice se ovlada v obou rezimech, jen je jinde. Zkouska si
+ * to musi hlidat sama - tlacitko je tentyz objekt, ktery se prestehuje
+ * (drive_apply v ui.c). */
+static void tap_canmode(void)
+{
+    if (ui_driving()) tap(SETD_CAN_X, SETD_CY, false);
+    else              tap(SET_CAN_X, SET_ROW2_Y, false);
+}
+
+/* Deska bez zive rychlosti predpoklada JIZDU - viz DRIVE_ON_KMH v
+ * ui.c. V poslechu zadna rychlost nechodi, takze se na dilenskem
+ * stole musi rict, ze vuz stoji, jinak je nastaveni zamcene. Dela se
+ * to tudy, kudy to dela clovek: tlacitkem VUZ STOJI a potvrzenim
+ * drzenim. Tvrzeni padne az pri zmerene rychlosti nad prahem. */
+static void claim_standing(void)
+{
+    ui_show_page(5);
+    /* Nez se rozhodne, musi se rezim ustalit. Rychlost plati jeste
+     * DIAG_STALE_MIN_MS = 1000 ms potom, co prestala chodit, takze
+     * tesne po prepnuti do poslechu UI jeste o jizde nevi. */
+    run_ms(1600, false);
+    if (!ui_driving()) return;      /* vuz uz stoji, neni co tvrdit */
+    tap(SETD_STOP_X, SETD_CY, false);
+    hold_confirm();
+    run_ms(400, false);
+}
+
 /* Prepnuti radice pres UI, vcetne potvrzeni drzenim. Tudy to dela
  * uzivatel a jinudy to nejde - proto i zkouska. */
 static void can_go_normal(void)
 {
     ui_show_page(5);
     run_ms(200, false);
-    tap(SET_CAN_X, SET_ROW2_Y, false);
+    tap_canmode();
     touch_at(HOLD_X, HOLD_Y);
     touch_down = true;
     run_ms(3400, false);
@@ -1132,7 +1268,7 @@ static void can_go_listen(void)
 {
     ui_show_page(5);
     run_ms(200, false);
-    if (fake_can_normal) tap(SET_CAN_X, SET_ROW2_Y, false);
+    if (fake_can_normal) tap_canmode();
     run_ms(200, false);
 }
 
@@ -1162,6 +1298,26 @@ static void phase_hodnoty(void)
     ecu_present = false;
     ui_show_page(1);                            /* motor */
     run_ms(1400, false);
+
+    /* -----------------------------------------------------------------
+     * CHYBEJICI RYCHLOST NEZNAMENA, ZE VUZ STOJI.
+     *
+     * Tohle je stav po kazdem startu desky: rychlost jeste nikdo
+     * neprecetl. Nejde o chybu ani o okrajovy pripad - nastane
+     * pokazde - a odpoved na nej je videt hned od prvniho snimku.
+     *
+     * Mutacni zkouska: v ui.c zmenit vychozi hodnotu drive_mode na
+     * false, nebo v drive_eval() nahradit vetev bez zive rychlosti za
+     * want = false. Deska pak bude po startu tvrdit, ze vuz stoji, a
+     * obe kontroly MUSI selhat.
+     * ----------------------------------------------------------------- */
+    check("po startu, nez prijde prvni rychlost, plati rezim jizdy",
+          ui_driving());
+    {
+        touch_scan_t t = touch_targets();
+        check("a nic pod dotykovym minimem na obrazovce neni",
+              t.small == 0 && t.matrix == 0 && t.n > 0);
+    }
 
     check("bez sbernice hlasi vrstva DOWN", diag_link_state(dl) == DIAG_LINK_DOWN);
     unsigned bar_down = region_hash(STATE_BOX);
@@ -1880,9 +2036,18 @@ static void phase_navigace(void)
 static void phase_dialogy(void)
 {
     can_go_listen();            /* dialog se nabidne jen smerem nahoru */
+
+    /* V poslechu uz nechodi rychlost, takze UI po vterine predpoklada
+     * jizdu a nastaveni zamkne - chybejici rychlost neni nula. Tady i
+     * ve vsech dalsich fazich je to deska na dilenskem stole, takze se
+     * jednou rekne, ze vuz stoji. Tvrzeni plati az do faze jizdy, ktera
+     * ho shodi zmerenou rychlosti nad prahem. */
+    claim_standing();
+    check("tvrzeni 'vuz stoji' odemkne zamcene nastaveni", !ui_driving());
+
     unsigned page_before = content_hash();
 
-    tap(SET_CAN_X, SET_ROW2_Y, false);      /* JEN POSLECH -> potvrzeni */
+    tap_canmode();                          /* JEN POSLECH -> potvrzeni */
     shot("potvrzeni");
 
     /* Gesto zprava musi dialog zavrit, NEsmi pod nim prepnout stranku a
@@ -1895,7 +2060,7 @@ static void phase_dialogy(void)
     check("zavreny dialog rezim sbernice nezmeni", !fake_can_normal);
 
     /* znovu a tentokrat opravdu podrzet */
-    tap(SET_CAN_X, SET_ROW2_Y, false);
+    tap_canmode();
     touch_at(HOLD_X, HOLD_Y);               /* tlacitko DRZ 3 s */
     touch_down = true;
     run_ms(1040, false);                    /* tesne po preskoceni na "2" */
@@ -1922,7 +2087,7 @@ static void phase_dialogy(void)
     /* Zpatky do poslechu se jde rovnou, bez potvrzeni: ztisit se musi
      * dat okamzite. Mutacni zkouska: v canmode_cb() v ui.c poslat i
      * cestu dolu pres show_confirm(). */
-    tap(SET_CAN_X, SET_ROW2_Y, false);
+    tap_canmode();
     run_ms(200, false);
     check("tuknuti vrati radic do poslechu", !fake_can_normal);
     shot("can-poslech");
@@ -1944,7 +2109,7 @@ static void phase_dialogy(void)
      *     if (hold_done) return;
      * gesto dialog zavre, akce se uz nespusti a kontrola selze.
      * ----------------------------------------------------------------- */
-    tap(SET_CAN_X, SET_ROW2_Y, false);      /* JEN POSLECH -> potvrzeni */
+    tap_canmode();                          /* JEN POSLECH -> potvrzeni */
     touch_at(HOLD_X, HOLD_Y);
     touch_down = true;
     run_ms(3040, false);                    /* tesne pres tri vteriny */
@@ -1953,7 +2118,7 @@ static void phase_dialogy(void)
     run_ms(900, false);
     check("zpetne gesto behem oznameni akci nezrusi", fake_can_normal);
 
-    tap(SET_CAN_X, SET_ROW2_Y, false);      /* a zpatky do poslechu */
+    tap_canmode();                          /* a zpatky do poslechu */
     run_ms(200, false);
 }
 
@@ -2820,6 +2985,221 @@ static void phase_elm(void)
     run_ms(400, false);
 }
 
+/* ---------------------------------------------------------------------
+ * REZIM JIZDY
+ *
+ * Ctyri veci, kazda s vlastni mutacni zkouskou:
+ *
+ *   1. nad prahem nezustane na obrazovce nic, do ceho se neda trefit
+ *   2. hystereze opravdu brani prepinani kolem prahu
+ *   3. chybejici rychlost neznamena rezim stani
+ *   4. tvrzeni "vuz stoji" padne, jakmile vuz opravdu jede
+ *
+ * Prahy jsou v ui.c: DRIVE_ON_KMH 10, DRIVE_OFF_KMH 5, DRIVE_OFF_MS
+ * 5000. Zkouska je zna, protoze jinak by nemela co merit; kdyz se
+ * zmeni, musi se zmenit i tady - a prave to je ta pojistka.
+ * ------------------------------------------------------------------- */
+static void phase_jizda(void)
+{
+    /* Vuz stoji a jednotka odpovida: zmerena nula, ne domnenka. */
+    ecu_speed(0.0f);
+    if (!fake_can_normal) can_go_normal();
+    ui_show_page(5);
+    run_ms(1200, false);
+    check("se zmerenou nulou plati rezim stani", !ui_driving());
+
+    {
+        touch_scan_t t = touch_targets();
+        check("na stojicim voze drobne prvky na obrazovce jsou",
+              t.small > 0);
+    }
+    shot("nastaveni-stoji");
+
+    /* -----------------------------------------------------------------
+     * 1. PRAH. Pod nim se nic nedeje, nad nim se rozhrani prepne.
+     *
+     * 9,5 km/h je tesne pod prahem - kdyby se porovnavalo na vetsi nez
+     * nula nebo na jinou mez, tahle kontrola to pozna.
+     * ----------------------------------------------------------------- */
+    ecu_speed(9.5f);
+    run_ms(1500, false);
+    check("tesne pod prahem porad plati rezim stani", !ui_driving());
+
+    ecu_speed(86.0f);
+    run_ms(1500, false);
+    check("nad prahem plati rezim jizdy", ui_driving());
+
+    /* -----------------------------------------------------------------
+     * Nad prahem nesmi na obrazovce zustat ani jeden dotykovy cil pod
+     * 120 px. Meri se CLICK AREA, ne kresba, a prochazi se cely strom
+     * LVGL - tedy i prepinac profilu v liste, sloupec DPF a uchyt
+     * navigace, ktere nejsou tlacitka.
+     *
+     * Prochazi se VSECHNY stranky, vysunuta mrizka dlazdic i dialog
+     * jasu, protoze kazdy z nich mel vlastni drobny prvek.
+     *
+     * Mutacni zkouska: v drive_apply() v ui.c vyhodit kteroukoliv
+     * vetev - treba tu, ktera schovava set_lock, nebo tu, ktera bere
+     * CLICKABLE sloupci DPF. Kontrola MUSI selhat a rekne, jak maly
+     * cil nasla.
+     * ----------------------------------------------------------------- */
+    for (int i = 0; i < ui_page_count(); i++) {
+        ui_show_page(i);
+        run_ms(300, false);
+
+        touch_scan_t t = touch_targets();
+        char what[96];
+        snprintf(what, sizeof(what),
+                 "za jizdy nema stranka %d cil pod 120 px (nejmensi %dx%d)",
+                 i, (int)t.minw, (int)t.minh);
+        check(what, t.small == 0 && t.matrix == 0 && t.n > 0);
+    }
+    shot("jizda-nastaveni");
+
+    /* Seznam chyb za jizdy: radky zustavaji CITELNE, jen uz nejsou
+     * dotykovy cil, a napoveda pod nimi uz nezve k tuknuti. */
+    ui_show_page(3);
+    run_ms(400, false);
+    shot("jizda-chyby");
+
+    ui_show_page(0);
+    run_ms(300, false);
+    shot("jizda-hlavni");
+
+    /* vysunuta mrizka dlazdic: dilenske nastroje za jizdy mizi */
+    tap(TAP_HANDLE_X, TAP_HANDLE_Y, true);                          /* lista */
+    run_ms(400, true);
+    swipe(NAVBTN_X(2), NAVBTN_Y, NAVBTN_X(2), 180, 6, false, true); /* mrizka */
+    run_ms(400, true);
+    {
+        touch_scan_t t = touch_targets();
+        check("za jizdy nema ani vysunuta mrizka cil pod 120 px",
+              t.small == 0 && t.matrix == 0);
+    }
+    shot("jizda-mrizka");
+
+    /* Zpatky na nastaveni. Tlacitkem stranky, protoze to zaroven listu
+     * zasune - jinak by prekryla tlacitko JAS pod ni. */
+    tap(NAVBTN_X(5), 140, false);
+    run_ms(800, false);
+
+    /* dialog jasu - jediny, ktery se za jizdy otevre */
+    tap(SETD_CX(1), SETD_CY, false);        /* JAS */
+    run_ms(500, false);
+    {
+        touch_scan_t t = touch_targets();
+        check("dialog jasu se za jizdy otevre",
+              modal_btns() == BL_LEVELS_UI + 1);
+        check("dialog jasu za jizdy nema cil pod 120 px",
+              t.small == 0 && t.matrix == 0);
+    }
+    shot("jizda-jas");
+    swipe(120, 240, 700, 250, 8, false, false);
+    run_ms(400, false);
+
+    /* -----------------------------------------------------------------
+     * 2. HYSTEREZE. Mezi prahy se nerozhoduje nic a pod dolnim prahem
+     * se ceka pet vterin.
+     *
+     * Nejdriv 7 km/h: nad dolnim prahem, pod hornim. Kdyby byl prah
+     * jen jeden, rozhrani by se tady vratilo do stani.
+     *
+     * Mutacni zkouska: v drive_eval() v ui.c nahradit DRIVE_OFF_KMH za
+     * DRIVE_ON_KMH. Prvni kontrola MUSI selhat.
+     * ----------------------------------------------------------------- */
+    ecu_speed(7.0f);
+    run_ms(3000, false);
+    check("mezi prahy rezim jizdy zustava", ui_driving());
+
+    /* Kolona: popojeti na 12 a zase pod pet, porad dokola. Rozhrani se
+     * nesmi hnout ani jednou.
+     *
+     * Mutacni zkouska: v drive_eval() v ui.c nahradit odpocet
+     * DRIVE_OFF_MS za okamzity navrat (want = false). Nektera z
+     * kontrol v kole MUSI selhat.
+     * ----------------------------------------------------------------- */
+    for (int i = 0; i < 3; i++) {
+        ecu_speed(2.0f);
+        run_ms(2500, false);                /* pod dolnim prahem, ale kratce */
+        check("brzdeni v kolone rezim jizdy neopousti", ui_driving());
+        ecu_speed(12.0f);
+        run_ms(1200, false);
+        check("popojeti v kolone rezim jizdy drzi", ui_driving());
+    }
+
+    /* Az opravdove zastaveni. Pet vterin souvisle pod dolnim prahem. */
+    ecu_speed(0.0f);
+    run_ms(3000, false);
+    check("tri vteriny po zastaveni je porad rezim jizdy", ui_driving());
+    run_ms(3500, false);
+    check("pet vterin po zastaveni se vraci rezim stani", !ui_driving());
+
+    /* -----------------------------------------------------------------
+     * 3. CHYBEJICI RYCHLOST NENI NULA.
+     *
+     * Vuz stoji, zmereno, vsechno odemcene - a ted se vytrhne kabel.
+     * Rychlost zmizi a rozhrani se MUSI vratit do rezimu jizdy, ne
+     * zustat ve stani. Presne tohle je ten nebezpecny smer: za jizdy
+     * se to stane ve chvili, kdy deska prestala ukazovat a clovek na
+     * ni sahne.
+     *
+     * Mutacni zkouska: v drive_eval() v ui.c pripustit i
+     * DIAG_SHOW_STALE, nebo nahradit vetev bez zive rychlosti za
+     * want = false. Obe kontroly MUSI selhat.
+     * ----------------------------------------------------------------- */
+    check("pred vytrzenim kabelu plati rezim stani", !ui_driving());
+    ecu_present = false;
+    run_ms(3000, false);                    /* rychlost zestarne */
+    check("po ztrate rychlosti se vraci rezim jizdy", ui_driving());
+    {
+        touch_scan_t t = touch_targets();
+        check("a drobne prvky zmizi i bez zmerene rychlosti",
+              t.small == 0 && t.matrix == 0);
+    }
+    ui_show_page(5);
+    run_ms(300, false);
+    shot("jizda-bez-rychlosti");
+
+    /* -----------------------------------------------------------------
+     * 4. TVRZENI "VUZ STOJI" A JEHO KONEC.
+     *
+     * Bez nej by se deska, ke ktere zadny vuz pripojeny neni, uz nikdy
+     * nedostala do nastaveni. Padne ale ve chvili, kdy vuz opravdu
+     * jede - tvrzeni nesmi prebit mereni.
+     *
+     * Mutacni zkouska: v drive_eval() v ui.c vyhodit radek
+     *     if (v >= DRIVE_ON_KMH) drive_stop_claim = false;
+     * druha kontrola MUSI selhat - rozhrani zustane odemcene i pri
+     * 86 km/h.
+     * ----------------------------------------------------------------- */
+    claim_standing();
+    check("bez rychlosti smi clovek rict, ze vuz stoji", !ui_driving());
+
+    ecu_present = true;
+    ecu_speed(86.0f);
+    run_ms(2000, false);
+    check("zmerena jizda tvrzeni shodi", ui_driving());
+
+    ecu_speed(0.0f);
+    run_ms(7000, false);
+    check("po zastaveni je nastaveni zase dostupne", !ui_driving());
+
+    /* A kabel ven jeste jednou. Tvrzeni uz neplati - vuz mezitim
+     * opravdu jel - takze se musi vratit rezim jizdy. Bez tohohle
+     * konce by jedno tvrzeni z dilny prezilo celou jizdu a drzelo
+     * drobne ovladani i potom, co deska prestala cokoliv vedet. */
+    ecu_present = false;
+    run_ms(3000, false);
+    check("tvrzeni z dilny neprezije skutecnou jizdu", ui_driving());
+
+    /* Dalsi faze stavi UI znovu a sahaji do nastaveni, takze se konci
+     * stojicim vozem se zmerenou nulou. Navrat je okamzity: odpocet
+     * peti vterin je proti kolone, ne proti prave prichozimu mereni. */
+    ecu_present = true;
+    run_ms(2000, false);
+    check("po navratu rychlosti se stani obnovi hned", !ui_driving());
+}
+
 /* Deska bez dratku z GPIO6 na plosku BL stmivat neumi a nesmi se tvarit,
  * ze ano. Postavi se cela UI znovu nad hostitelem, ktery bl_set_percent
  * nema, a misto tlacitka jasu musi byt v nastaveni vysvetleni, proc to
@@ -3020,6 +3400,7 @@ int main(int argc, char **argv)
     phase_reset();
     phase_web();
     phase_elm();
+    phase_jizda();
     phase_bez_dratku();     /* posledni - stavi UI nad jinym hostitelem */
 
     free(rgb);

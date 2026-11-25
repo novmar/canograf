@@ -49,21 +49,37 @@ kept with a note, because the reason it changed is usually the useful part.
 - Top row is a **status bar**: WiFi name or `none`, signal as 0-5 bars like a
   phone, an icon for transmitting / receiving / not connected, and the vehicle
   link state. `[done]`
-- Touch targets at least 120 px. `[part]` - **the blanket claim was wrong.**
-  It holds for the controls pressed while moving: page buttons 129 x 140,
-  menu tiles, confirm buttons 360 x 120. It does not hold for settings rows
-  (160 x 68), dialog back (124 x 70), brightness levels (104 x 120), fault
-  and network rows, the profile switcher, the nav handle or the keyboard.
-  `docs/ui.md` was always honest about this; only this file overstated it.
-  Decide which of those are driving controls and must grow, and which are
-  bench controls and may stay.
+- Touch targets at least 120 px. `[part]` - **the blanket claim was wrong**,
+  and the fix was not to grow everything. Since the interface now has two
+  modes (below), the rule reads: **above 10 km/h there is no touch target
+  under 120 px anywhere on the screen** - checked by walking the whole LVGL
+  tree and measuring the click area, not the drawing, on every page, on the
+  tile grid and in the one dialog that opens while moving.
+  Below the threshold the small controls stay, because at a standstill a
+  person can aim with their eye. Two controls keep their drawing and grow only
+  the touch area - the dialog back button to 174 x 120 and the navigation
+  handle to 800 x 120 - and both are at a screen edge with nothing beside
+  them. What is still open: the 20-25 mm that thin gloves want, and the
+  keyboard, which is simply unreachable while moving rather than fixed.
 - Pages should be splittable like windows in i3 or sway: halves or thirds,
   each field either split again or holding one widget. Granularity by size -
   percent plus caption, or a value up to 10000, possibly 1000 with a `x10`
   multiplier the way a tachometer does it. `[idea]` - designed in
   `docs/tiles.md`, not built
 - Interface that changes with road speed: below about 10 km/h sliders and
-  denser controls are fine, moving it should be large buttons only. `[idea]`
+  denser controls are fine, moving it should be large buttons only. `[done]` -
+  two modes from `2003`. Enters driving at 10 km/h immediately, leaves it
+  below 5 km/h sustained for five seconds; the double hysteresis is what keeps
+  a queue from flipping the layout every few seconds.
+  **A missing speed is not a zero**: with no live reading the interface assumes
+  driving, because assuming standing is dangerous exactly when the cable comes
+  out at speed, while assuming driving is only annoying on a bench. That state
+  also occurs after every power-up and permanently with no vehicle attached,
+  so the person may state that the vehicle is standing behind a three-second
+  hold; it is offered only when the speed is missing, dropped by the first
+  reading above 10 km/h, and never stored.
+  Settings lock while moving except brightness and bus mode, and the lock says
+  why rather than greying out. Full table in `docs/ui.md`.
 
 ### Gestures
 

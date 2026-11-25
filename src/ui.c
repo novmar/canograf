@@ -58,6 +58,7 @@
 #define TOP_WIFI_X  12      /* carky signalu */
 #define TOP_SSID_X  52      /* jmeno site */
 #define TOP_TEMP_X  270     /* teplota chladici kapaliny */
+#define TOP_DRIVE_X 338     /* cedule rezimu jizdy, jen kdyz vuz jede */
 #define TOP_XFER_X  440     /* sipky prenosu po sbernici */
 #define TOP_STATE_X 478     /* stav pripojeni k vozidlu */
 
@@ -126,6 +127,12 @@ static lv_obj_t *btn_bright, *btn_profile, *btn_canmode, *btn_wifi, *btn_web;
 static lv_obj_t *lbl_dpf[8], *lbl_dpf_cap[9], *lbl_dpf_u, *lbl_regen;
 /* horni lista: prepinac profilu - jmeno a tri rysky vedle sebe */
 static lv_obj_t *prof_btn, *prof_name, *prof_mark[UI_PROFILES];
+/* horni lista: cedule rezimu jizdy; v rezimu stani je schovana */
+static lv_obj_t *lbl_drive;
+/* mrizka navigace: tri dilenske nastroje, ktere za jizdy mizi, a
+ * popisek, ktery na jejich miste rekne proc */
+#define NAV_TOOLS 3
+static lv_obj_t *nav_tool[NAV_TOOLS], *nav_tool_note;
 /* diagnostika: prekryv s FPS a pameti zije porad, jen byva schovany */
 static lv_obj_t *perf_lbl;
 static bool perf_on = false;
@@ -289,6 +296,85 @@ static bool host_can_normal(void)
 static diag_poller_t *dp = NULL;
 
 void ui_set_diag(diag_poller_t *p) { dp = p; }
+
+/* ---------------------------------------------------------------------
+ * REZIM JIZDY
+ *
+ * UI ma dva rezimy a rozhoduje mezi nimi rychlost vozidla z
+ * DIAG_CH_SPEED. Neni to vzhled - je to odpoved na otazku, jestli se
+ * clovek na obrazovku muze DIVAT, nebo jestli po ni jen sahne.
+ *
+ *   STOJI   vsechno jako dosud. Drobne ovladaci prvky jsou v poradku:
+ *           u stojiciho vozu se da mirit okem a chyba nic nestoji.
+ *   JEDE    prvky pod dotykovym minimem (120 px = 14 mm, docs/ui.md)
+ *           bud zmizi, nebo se zvetsi. Co s kterym, je rozhodnute u
+ *           kazdeho zvlast v drive_apply() - jedno pravidlo pro
+ *           vsechny by schovalo i to, co se jen cte.
+ *
+ * ---------------------------------------------------------------
+ * Prah a hystereze
+ * ---------------------------------------------------------------
+ * DRIVE_ON je 10 km/h, tedy nad chuzi. Pod nim se vuz bud parkuje,
+ * nebo ho nekdo tlaci, a to nejsou situace, ve kterych ma smysl brat
+ * cloveku nastaveni.
+ *
+ * Hystereze je ZDVOJENA, protoze jeden prah by v kolone prepinal
+ * rozhrani tam a zpet:
+ *
+ *   - jiny prah nahoru a dolu: nahoru 10 km/h, dolu 5 km/h. Pet km/h
+ *     odstupu je o rad vic nez sum mereni (DID 2003 ma krok
+ *     0,01 km/h), takze kolem prahu nic nekmita.
+ *   - DOBA pod dolnim prahem: 5 vterin. Samotny prah by v kolone
+ *     nestacil - popojeti na 12 km/h a zase na nulu prekroci oba.
+ *     Teprve pet vterin souvisle pod 5 km/h znamena, ze vuz opravdu
+ *     stoji, a ne ze jen brzdi.
+ *
+ * Je to ZAMERNE NESOUMERNE: do rezimu jizdy se prepina OKAMZITE,
+ * zpatky az po peti vterinach. Zdrzeni v nebezpecnem smeru by bylo
+ * pet vterin, ve kterych vuz jede a na obrazovce jsou drobna
+ * tlacitka; zdrzeni v bezpecnem smeru nestoji nic.
+ *
+ * ---------------------------------------------------------------
+ * Kdyz rychlost NENI k dispozici
+ * ---------------------------------------------------------------
+ * Chybejici rychlost NENI nula. Plati jen DIAG_SHOW_LIVE: stara
+ * hodnota (DIAG_SHOW_STALE) odpovida na otazku "jak rychle vuz jel",
+ * ne "jede ted", a odmitnuty nebo neprecteny DID neodpovida vubec.
+ *
+ * Vychozi stav bez rychlosti je proto JEDE. Obe volby neco stoji a
+ * tahle stoji min:
+ *
+ *   rezim stani za jizdy je NEBEZPECNY. Nastane presne tehdy, kdyz
+ *   se za jizdy vytrhne kabel nebo jednotka prestane odpovidat -
+ *   tedy ve chvili, kdy clovek na desku sahne, protoze mu prestala
+ *   ukazovat. Rozhrani by se mu pod rukou zmensilo.
+ *
+ *   rezim jizdy na stojicim voze jen OTRAVUJE. Je to dilna, clovek
+ *   se diva a ma cas.
+ *
+ * Stejny stav nastane pokazde pri startu desky, nez prijde prvni
+ * odpoved, a trvale na desce, ke ktere zadny vuz pripojeny neni. Aby
+ * z toho nebyla cihla - bez nastaveni se nepreklepne jazyk ani
+ * nenajde sit - smi clovek rict, ze vuz stoji, a to POTVRZENIM
+ * DRZENIM jako u kazde jine vazne volby (drive_stop_claim).
+ *
+ * To tvrzeni:
+ *   - jde nabidnout JEN tehdy, kdyz rychlost chybi. Pri merenych
+ *     90 km/h neni co prohlasovat a tlacitko neexistuje.
+ *   - padne v okamziku, kdy prijde PRVNI ziva rychlost, at je
+ *     jakakoliv. Mereni je vzdycky vic nez tvrzeni.
+ *   - se nikam neuklada. Po restartu deska zase nic nevi a zacina
+ *     znovu na bezpecne strane.
+ * ------------------------------------------------------------------- */
+#define DRIVE_ON_KMH    10.0f
+#define DRIVE_OFF_KMH    5.0f
+#define DRIVE_OFF_MS    5000u
+
+static bool     drive_mode = true;      /* vychozi stav, viz rozbor vyse */
+static bool     drive_measured = false; /* opira se rezim o zivou rychlost? */
+static bool     drive_stop_claim = false;
+static bool     drive_slow = false;     /* bezi odpocet navratu do stani */
+static uint32_t drive_slow_at = 0;
 
 /* ---------------------------------------------------------------------
  * Nastaveni
@@ -1539,8 +1625,28 @@ static lv_obj_t *modal_open(const char *title, uint32_t accent)
          * obrazovek nedalo vycouvat jinak nez tlacitkem s jinym vyznamem.
          * Dialog s klavesnici predava prazdny nadpis - tam by se tlacitko
          * prekryvalo se vstupnim polem a klavesnice ma vlastni zavreni. */
-        mk_button(modal, 660, 14, 124, 70, T(STR_BACK), UI_FONT_20,
-                  C_LABEL, modal_close_cb, NULL);
+        lv_obj_t *bk = mk_button(modal, 660, 14, 124, 70, T(STR_BACK),
+                                 UI_FONT_20, C_LABEL, modal_close_cb, NULL);
+        /* ZPET je 124 x 70 px, tedy 14,5 x 8,2 mm - na vysku pod
+         * dotykovym minimem. Schovat ho nejde: je to jedina cesta z
+         * dialogu ven krome zpetneho gesta a uvaznout v dialogu za
+         * jizdy je to posledni, co kdo potrebuje. Nakreslit ho vetsi
+         * taky ne - roh vpravo nahore je nad obsahem kazdeho dialogu
+         * a 120 px vysoky obdelnik by do nej zajel.
+         *
+         * Roste proto jen DOTYKOVA oblast, o 25 px na kazdou stranu:
+         * 174 x 120 px, kresba zustava. Plati to v obou rezimech -
+         * malo trefitelne ZPET bylo spatne uz na stojicim voze a
+         * docs/conformance.md to vedlo jako nedostatek.
+         *
+         * Jedine misto, kde se oblast s necim potkava, je dialog jasu
+         * ve variante pro stojici vuz: posledni uroven lezi na
+         * 660..764 x 96..216 a oblast ZPET konci na 109. Tech 104 x 13
+         * px pripadne UROVNI, ne tlacitku ZPET - LVGL hleda cil doteku
+         * od POSLEDNIHO ditete a urovne vznikaji az po nem. Neni to
+         * nahoda ani zavislost na poradi kresleni, je to definovane
+         * poradi prohledavani ve lv_indev_search_obj(). */
+        lv_obj_set_ext_click_area(bk, 25);
     }
     return modal;
 }
@@ -2715,10 +2821,57 @@ static void bl_level_cb(lv_event_t *e)
     bright_btn_paint();
 }
 
+/* ---------------------------------------------------------------------
+ * Jas za jizdy
+ *
+ * Dialog je jediny, ktery se za jizdy otevre, a v podobe pro stojici
+ * vuz by nesel pouzit: uroven je 104 px siroka = 12,2 mm, pod
+ * dotykovym minimem.
+ *
+ * Za jizdy je proto v dialogu JEN PET UROVNI MISTO PATNACTI - ty
+ * prave platneho profilu. Nastavovat jas profilu, ve kterem vuz zrovna
+ * neni, je dilenska uprava a patri k ostatnim zamcenym: za jizdy
+ * clovek nerika "DILNA ma mit 50 %", rika "ted me to oslnuje".
+ * Jedna rada misto tri uvolni sirku, takze uroven vyroste na 140 px
+ * = 16,4 mm, a uvolni i vysku, takze rada lezi pod rohem, do ktereho
+ * zasahuje zvetsena dotykova oblast tlacitka ZPET.
+ * ------------------------------------------------------------------- */
+#define BLD_W     140
+#define BLD_X(i)  (20 + (i) * (BLD_W + 8))
+#define BLD_Y     200
+
+_Static_assert(BLD_W >= 120 && BL_ROW_H >= 120,
+               "uroven jasu za jizdy je pod dotykovym cilem 14 mm");
+_Static_assert(BLD_X(BL_LEVELS - 1) + BLD_W <= 800,
+               "posledni uroven jasu by prelezla pravou hranu");
+_Static_assert(BLD_Y >= 110,
+               "rada by zasahla do dotykove oblasti tlacitka ZPET");
+_Static_assert(BLD_Y + BL_ROW_H <= 480,
+               "rada urovni jasu by prelezla spodni hranu");
+
 static void bright_cb(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *m = modal_open(T(STR_BRIGHT_TITLE), C_ACTUAL);
+
+    if (drive_mode) {
+        lv_obj_t *dn = mk_lbl(m, T(STR_DRIVE_BRIGHT), UI_FONT_16,
+                              C_LABEL, 30, 96);
+        lv_label_set_long_mode(dn, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(dn, 600);      /* ne az pod tlacitko ZPET */
+        mk_lbl(m, T(PROF_STR[cfg.profile]), UI_FONT_24, C_BRIGHT,
+               20, BLD_Y - 30);
+        for (int i = 0; i < BL_LEVELS; i++) {
+            char cap[8];
+            snprintf(cap, sizeof(cap), "%d %%", BL_LEVEL[i]);
+            btn_bl_level[cfg.profile][i] =
+                mk_button(m, BLD_X(i), BLD_Y, BLD_W, BL_ROW_H, cap,
+                          UI_FONT_24, C_ACTUAL, bl_level_cb,
+                          BL_UD(cfg.profile, BL_LEVEL[i]));
+        }
+        bl_rows_paint();
+        return;
+    }
 
     /* Vedle nadpisu dve vety: co profil nese a co plati pro vsechny
      * (aby nikdo nehledal, proc prepnuti profilu nezmeni jazyk), a
@@ -3248,10 +3401,102 @@ static void build_dpf(lv_obj_t *scr)
 _Static_assert(SET_ROW3 + SET_BH <= SET_BOTTOM,
                "treti rada nastaveni by zmizela pod vysunutou listou");
 
+/* ---------------------------------------------------------------------
+ * Nastaveni za jizdy
+ *
+ * Cela mrizka 160 x 68 px zmizi. Je to pet prepinacu hodnot a tri
+ * cesty do dialogu a ani jedna z nich nema za jizdy co delat:
+ * jednotky, jazyk, ztlumeni po necinnosti, profil, WiFi, server,
+ * zhasnuti displeje a udrzba se nastavuji jednou a na stojacku.
+ * Zvetsovat je by znamenalo vyrobit osm velkych tlacitek k necemu,
+ * co se za jizdy nema delat vubec.
+ *
+ * Zustavaji DVE veci, protoze obe se resi prave za jizdy:
+ *
+ *   JAS      oslneni je bezpecnostni vec. Noc, tunel, protijedouci
+ *            dalkova - to vsechno prijde za jizdy a ctvrtvterina
+ *            oslepeneho ridice je horsi nez jakykoliv dialog.
+ *   CAN      jediny prepinac, bez ktereho se neprecte NIC. Kdyby se
+ *            zamkl, deska, ktera jeste neni v normalnim rezimu, by
+ *            se do nej uz nedostala - a protoze bez nej nechodi
+ *            rychlost, nedostala by se ani zpatky do rezimu stani.
+ *            To uz neni zamek, to je zadrhnuti. Prepnuti je navic
+ *            samo o sobe za potvrzenim drzenim.
+ *
+ * Treti misto patri tvrzeni "vuz stoji" a je tam jen tehdy, kdyz
+ * rychlost chybi - viz rozbor u DRIVE_ON_KMH.
+ *
+ * Tri cile 228 x 120 px = 26,7 x 14,1 mm. Vic se jich pri dodrzeni
+ * dotykoveho minima na sirku stranky nevejde.
+ * ------------------------------------------------------------------- */
+#define SETD_W      228
+#define SETD_H      120
+#define SETD_PITCH  236
+#define SETD_X(i)   (20 + (i) * SETD_PITCH)
+#define SETD_Y      130
+#define SETD_CAP_Y  (SETD_Y - 20)
+
+_Static_assert(SETD_W >= 120 && SETD_H >= 120,
+               "rada nastaveni za jizdy je pod dotykovym cilem 14 mm");
+_Static_assert(SETD_X(2) + SETD_W <= CONT_W,
+               "treti tlacitko by zalezlo pod pravy sloupec DPF");
+_Static_assert(SETD_Y + SETD_H <= SET_BOTTOM,
+               "rada za jizdy by zmizela pod vysunutou listou");
+
+/* Dve skupiny, ktere se prepinaji najednou: co se za jizdy zamyka a co
+ * misto toho ukaze. Jeden priznak na skupinu je spolehlivejsi nez osm
+ * jednotlivych - na novy prvek v mrizce se neda zapomenout. */
+static lv_obj_t *set_lock, *set_drive, *lbl_set_lock, *btn_set_unlock;
+
+static void drive_update(void);
+
+static void drive_stop_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    drive_stop_claim = true;
+    /* Dialog zavira akce, ne odpocet - viz hold_tick_cb(). Az potom se
+     * rezim prepocita, at se stranka pod nim prekresli uz bez neho. */
+    modal_close_cb(NULL);
+    drive_update();
+}
+
+static void drive_stop_cb(lv_event_t *e)
+{
+    (void)e;
+    show_confirm(T(STR_DRIVE_STOPPED), T(STR_DRIVE_STOPPED_BODY),
+                 C_ACTUAL, drive_stop_ok_cb);
+}
+
 static void build_nastav(lv_obj_t *scr)
 {
-    lv_obj_t *p = page[PG_NASTAV] = mk_page(scr);
+    lv_obj_t *q = page[PG_NASTAV] = mk_page(scr);
     const lv_coord_t BW = SET_BW, BH = SET_BH;
+
+    /* Obe skupiny vznikaji PRED tlacitky, ktera zustavaji - LVGL hleda
+     * cil doteku od posledniho ditete, takze JAS a CAN maji prednost
+     * tam, kde by se oblasti potkaly. Skupiny samy dotek neberou. */
+    set_lock = lv_obj_create(q);
+    lv_obj_set_pos(set_lock, 0, 0);
+    lv_obj_set_size(set_lock, CONT_W, PAGE_H);
+    lv_obj_set_style_bg_opa(set_lock, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(set_lock, 0, 0);
+    lv_obj_set_style_pad_all(set_lock, 0, 0);
+    lv_obj_clear_flag(set_lock, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(set_lock, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    set_drive = lv_obj_create(q);
+    lv_obj_set_pos(set_drive, 0, 0);
+    lv_obj_set_size(set_drive, CONT_W, PAGE_H);
+    lv_obj_set_style_bg_opa(set_drive, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(set_drive, 0, 0);
+    lv_obj_set_style_pad_all(set_drive, 0, 0);
+    lv_obj_clear_flag(set_drive, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(set_drive, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    /* Co se za jizdy zamyka, vznika ve skupine set_lock. Souradnice
+     * jsou stejne jako driv - skupina lezi pres celou stranku a ma
+     * nulove odsazeni. */
+    lv_obj_t *p = set_lock;
 
     mk_lbl(p, T(STR_SET_SPEED), UI_FONT_14, C_LABEL, SET_X(0), 8);
     btn_units_v = mk_button(p, SET_X(0), SET_ROW1, BW, BH,
@@ -3296,7 +3541,7 @@ static void build_nastav(lv_obj_t *scr)
         /* Tecky tu jsou kvuli smeru, ktery je dulezity: zacit vysilat
          * jde jen pres potvrzovaci dialog. Zpet do poslechu se vraci
          * rovnou, protoze ztisit se musi dat okamzite. */
-        btn_canmode = mk_dlg_button(p, SET_X(1), SET_ROW2, BW, BH, "",
+        btn_canmode = mk_dlg_button(q, SET_X(1), SET_ROW2, BW, BH, "",
                                     UI_FONT_20, C_DEFICIT, canmode_cb, NULL);
         canmode_btn_paint();
     } else {
@@ -3314,7 +3559,7 @@ static void build_nastav(lv_obj_t *scr)
     mk_lbl(p, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL, SET_X(3), SET_ROW2 - 20);
     btn_bright = NULL;
     if (bl_can_dim()) {
-        btn_bright = mk_dlg_button(p, SET_X(3), SET_ROW2, BW, BH, "",
+        btn_bright = mk_dlg_button(q, SET_X(3), SET_ROW2, BW, BH, "",
                                    UI_FONT_20, C_ACTUAL, bright_cb, NULL);
         bright_btn_paint();
     } else {
@@ -3373,6 +3618,27 @@ static void build_nastav(lv_obj_t *scr)
      * dialogem - nemuze se na nej sahnout omylem pri hrani s jednotkami. */
     mk_dlg_button(p, SET_X(3), SET_ROW3, BW, BH, T(STR_SET_MAINT), UI_FONT_20,
                   C_DEFICIT, reset_cb, NULL);
+
+    /* ---- co je na teze strance videt za jizdy ----
+     *
+     * Duvod je nahore a cely vetou. Zesedle tlacitko rika "ted ne" a
+     * nerekne proc; clovek pak zkousi, jestli se neprekliknul. Text
+     * dosazuje drive_apply() - lisi se podle toho, jestli rychlost
+     * opravdu merime, nebo jestli chybi a rezim je domnenka. */
+    lbl_set_lock = mk_lbl(set_drive, "", UI_FONT_20, C_LABEL, 20, 8);
+    lv_label_set_long_mode(lbl_set_lock, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_set_lock, CONT_W - 40);
+
+    mk_lbl(set_drive, "CAN", UI_FONT_14, C_LABEL, SETD_X(0), SETD_CAP_Y);
+    mk_lbl(set_drive, T(STR_SET_BRIGHT), UI_FONT_14, C_LABEL,
+           SETD_X(1), SETD_CAP_Y);
+
+    /* Tvrzeni "vuz stoji". Vznika vzdycky, ale drive_apply() ho ukaze
+     * jen tehdy, kdyz rychlost chybi - pri merenych 90 km/h neni co
+     * prohlasovat. Za potvrzenim drzenim jako kazda jina vazna volba. */
+    btn_set_unlock = mk_button(set_drive, SETD_X(2), SETD_Y, SETD_W, SETD_H,
+                               T(STR_DRIVE_STOPPED), UI_FONT_20, C_ACTUAL,
+                               drive_stop_cb, NULL);
 }
 
 /* ---------------------------------------------------------------------
@@ -4287,6 +4553,27 @@ static void build_chrome(lv_obj_t *scr)
 
     xfer_build(bar);
 
+    /* Znacka rezimu jizdy. Mezi teplotou a sipkami prenosu je 110 px
+     * volnych - jedine misto v liste, ktere na nic nesaha.
+     *
+     * Je to vyplnena cedule, ne jen text: rezim jizdy musi byt poznat
+     * jednim pohledem z libovolne stranky, a na strance motoru se
+     * jinak nemeni vubec nic (nema na sobe jediny maly ovladaci
+     * prvek). V rezimu stani cedule NENI - pritomnost obdelniku v
+     * liste je ta zmena, ktera je videt i periferne.
+     *
+     * Barva schvalne zadna z vyhrazenych: modra je zadana hodnota,
+     * kostena merena, cervena porucha, zelena v toleranci. Cedule je
+     * stav rozhrani, ne velicina, takze je to svetly text na vlasove
+     * sedi. Rozdil mezi merenym a domnelym rezimem nese TEXT (otaznik
+     * jako u neovereneho udaje), ne odstin - barva sama nesmi nic
+     * znamenat. */
+    lbl_drive = mk_lbl(bar, "", UI_FONT_20, C_BRIGHT, TOP_DRIVE_X, 20);
+    lv_obj_set_style_bg_color(lbl_drive, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_bg_opa(lbl_drive, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(lbl_drive, 4, 0);
+    lv_obj_add_flag(lbl_drive, LV_OBJ_FLAG_HIDDEN);
+
     /* Misto drivejsiho natvrdo napsaneho DEMO: dva radky, ktere rikaji,
      * jestli jsou cisla na obrazovce z auta. Nahore uroven pripojeni,
      * pod ni stari nejmladsiho udaje od jednotky. */
@@ -4408,21 +4695,21 @@ static void build_chrome(lv_obj_t *scr)
             lv_coord_t x = NAV_BTN_X(c), y = NAV_TILE_Y(r);
             int idx = r * NAV_TILE_COLS + c;
             if (idx == NAV_TILE_DEBUG) {
-                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
-                          T(STR_NAV_DEBUG), UI_FONT_20, C_DEMAND,
-                          debug_cb, NULL);
+                nav_tool[0] = mk_button(navpanel, x, y, NAV_BTN_W,
+                                        NAV_TILE_H, T(STR_NAV_DEBUG),
+                                        UI_FONT_20, C_DEMAND, debug_cb, NULL);
                 continue;
             }
             if (idx == NAV_TILE_BATT) {
-                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
-                          T(STR_NAV_BATT), UI_FONT_20, C_SAGE,
-                          batt_cb, NULL);
+                nav_tool[1] = mk_button(navpanel, x, y, NAV_BTN_W,
+                                        NAV_TILE_H, T(STR_NAV_BATT),
+                                        UI_FONT_20, C_SAGE, batt_cb, NULL);
                 continue;
             }
             if (idx == NAV_TILE_INJ) {
-                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
-                          T(STR_NAV_INJ), UI_FONT_20, C_SAGE,
-                          inj_cb, NULL);
+                nav_tool[2] = mk_button(navpanel, x, y, NAV_BTN_W,
+                                        NAV_TILE_H, T(STR_NAV_INJ),
+                                        UI_FONT_20, C_SAGE, inj_cb, NULL);
                 continue;
             }
             /* zatim prazdne misto; dotek na nem patri panelu, takze se
@@ -4431,6 +4718,32 @@ static void build_chrome(lv_obj_t *scr)
             lv_obj_set_style_bg_color(t, lv_color_hex(C_INK), 0);
             lv_obj_set_style_border_color(t, lv_color_hex(C_RULE), 0);
         }
+
+    /* Vsechny tri dlazdice jsou DILENSKE NASTROJE: diagnostika,
+     * mereni klidoveho odberu a vyrovnani vstrikovacu. Vsechny tri to
+     * o sobe rikaji uz ve svych vlastnich komentarich - merit odber se
+     * da jen na stojicim voze a vyrovnani jen na teplem volnobehu - a
+     * vsechny tri maji uvnitr ovladaci prvky pod dotykovym minimem
+     * (prepinac FPS 260 x 100, ULOZIT a VYCHOZI 128 x 100).
+     *
+     * Za jizdy proto mizi cele. Zvetsovat jejich vnitrek by znamenalo
+     * predelat tri panely kvuli necemu, co se za jizdy nedela, a
+     * nechat je male by znamenalo nechat za jizdy otevrenou cestu k
+     * patnacti malym tlacitkum. Na jejich miste rekne popisek proc. */
+    nav_tool_note = mk_lbl(navpanel, T(STR_DRIVE_TOOLS), UI_FONT_16,
+                           C_LABEL, NAV_BTN_X(0), NAV_TILE_Y(0));
+    lv_label_set_long_mode(nav_tool_note, LV_LABEL_LONG_WRAP);
+    /* Popisek zabere presne blok tri dlazdic krat dve rady a ma vlastni
+     * pozadi i obrubu. Bez toho by mu obruby dlazdic prochazely
+     * textem - zkouseno, cist se to neda. */
+    lv_obj_set_size(nav_tool_note, NAV_BTN_W * 3 + 2 * NAV_TILE_GAP,
+                    NAV_TILE_H * 2 + NAV_TILE_GAP);
+    lv_obj_set_style_bg_color(nav_tool_note, lv_color_hex(C_INK), 0);
+    lv_obj_set_style_bg_opa(nav_tool_note, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(nav_tool_note, lv_color_hex(C_RULE), 0);
+    lv_obj_set_style_border_width(nav_tool_note, 1, 0);
+    lv_obj_set_style_pad_all(nav_tool_note, 14, 0);
+    lv_obj_add_flag(nav_tool_note, LV_OBJ_FLAG_HIDDEN);
 
     /* Prekryv s FPS a pameti. Zije porad a je vetsinou schovany, aby ho
      * slo z diagnostiky zapnout bez prestavby UI. */
@@ -4629,7 +4942,12 @@ static void dtc_paint(void)
         snprintf(b, sizeof(b), T(STR_DTC_SHOWN), (unsigned)DTC_ROWS);
         lv_label_set_text(dtc_hint, b);
     } else {
-        lv_label_set_text(dtc_hint, T(STR_DTC_TAP));
+        /* Za jizdy radky na dotek nereaguji, takze je nesmi zvat k
+         * tuknuti. Napoveda misto toho rekne, co se tim prijde a ze
+         * samotny seznam cist jde - prazdna napoveda by vypadala, jako
+         * by se na chyby nedalo divat vubec. */
+        lv_label_set_text(dtc_hint,
+                          T(drive_mode ? STR_DRIVE_FAULTS : STR_DTC_TAP));
     }
 
     /* Detail vybrane chyby. */
@@ -4724,10 +5042,253 @@ static void dpf_paint(void)
     }
 }
 
+/* ---------------------------------------------------------------------
+ * Prepnuti rezimu
+ *
+ * Jedno misto, ve kterem je u KAZDEHO prvku pod dotykovym minimem
+ * napsane, co se s nim za jizdy stane a proc. Neni to jedno pravidlo
+ * pro vsechny - seznam chyb se da cist bez jedineho doteku, kdezto
+ * tlacitka v nastaveni jsou akce.
+ *
+ *   nastaveni, osm tlacitek  160 x 68  ZMIZI    nastavuje se na stojacku
+ *   ZHASNOUT DISPLEJ         170 x 68  ZMIZI    zhasly displej za jizdy
+ *                                               nerika nic; od oslneni
+ *                                               je stmivani, ktere
+ *                                               zustava
+ *   UDRZBA                   170 x 68  ZMIZI    nevratne mazani
+ *   CAN                      160 x 68  ROSTE    bez nej neni co cist a
+ *                            na 228 x 120       jeho zamceni by desku
+ *                                               zadrhlo, viz SETD_W
+ *   JAS                      160 x 68  ROSTE    oslneni je bezpecnostni
+ *                            na 228 x 120       vec a resi se za jizdy
+ *   urovne jasu              104 x 120 ROSTE    jas zustava dostupny,
+ *                            na 140 x 120       takze musi jit trefit
+ *   ZPET v dialogu           124 x 70  ROSTE    jedina cesta z dialogu;
+ *                            dotykem na         kresba zustava, viz
+ *                            174 x 120          modal_open()
+ *   uchyt navigace           800 x 44  ROSTE    stranky se prepinaji
+ *                            dotykem na         prave za jizdy; kresba
+ *                            800 x 120          zustava, viz nize
+ *   radky seznamu chyb       350 x 48  PRESTANE BYT CILEM. Seznam se
+ *                                      cte a roluje bez jedineho
+ *                                      doteku; tuknuti jen vybira
+ *                                      zaznam, ke kteremu se doctou
+ *                                      19 04 a 19 06 - a to je
+ *                                      dilenska prace. Radky zustavaji
+ *                                      videt, protoze CIST chybovou
+ *                                      pamet za jizdy smysl ma.
+ *   prepinac profilu v liste 164 x 64  PRESTANE BYT CILEM. Jmeno
+ *                                      profilu zustava videt - je to
+ *                                      informace - ale prepnout ho
+ *                                      nejde. Jas, kvuli kteremu by to
+ *                                      clovek delal, je dostupny
+ *                                      primo a vetsim tlacitkem.
+ *   sloupec DPF               64 x 416 PRESTANE BYT CILEM. Je to
+ *                                      ukazatel; podrzeni na nem jen
+ *                                      skace na stranku DPF a ta je v
+ *                                      liste stranek, kde ma tlacitko
+ *                                      129 x 140.
+ *   dlazdice nastroju        129 x 120 ZMIZI    obsahuji prepinac FPS
+ *                                      260 x 100 a dve tlacitka
+ *                                      128 x 100; vsechny tri nastroje
+ *                                      se pouzivaji u stojiciho vozu
+ *   klavesnice hesla          60 x 60  ZMIZI    jedina cesta k ni je
+ *                                      tlacitko WIFI, ktere zmizelo;
+ *                                      otevreny dialog se navic pri
+ *                                      prechodu zavira
+ *
+ * Dlazdice samotne (129 x 120) a tlacitka stranek (129 x 140) uz nad
+ * minimem jsou a nemeni se.
+ * ------------------------------------------------------------------- */
+static void drive_apply(bool close_modal)
+{
+    bool d = drive_mode;
+
+    /* Otevreny dialog patri rezimu, ve kterem se otviral: jeho
+     * rozvrzeni se uz nezmeni a muze v nem byt klavesnice nebo seznam
+     * siti. Zavira se proto cely - ale JEN pri prechodu do jizdy
+     * podle ZMERENE rychlosti.
+     *
+     * Prechod do domnele jizdy (rychlost prestala chodit) dialog
+     * nechava byt a ma to dva duvody. Zaprve je to na dilenskem stole
+     * uplne bezny stav: v poslechu zadna rychlost nechodi, takze by
+     * se kazdy rozdelany dialog zavrel sam od sebe po vterine.
+     * Zadruhe by se tim zavrelo i rozdelane potvrzeni rezimu
+     * sbernice - tedy jedina cesta k tomu, aby rychlost zacala chodit.
+     *
+     * Nebezpecny smer tim netrpi. Zmerena rychlost nad prahem
+     * znamena, ze radic uz v normalnim rezimu JE, takze se v tomhle
+     * smeru nema co zadrhnout, a prave tenhle smer dialog zavira.
+     *
+     * Dobehly odpocet je vyjimka i tady: akce uz je rozhodnuta a
+     * zavreni by ji tise zahodilo (viz modal_close_cb), a dialog sam
+     * zmizi do 700 ms. */
+    if (close_modal && modal && !hold_done) lv_obj_del(modal);
+
+    /* ---- nastaveni ---- */
+    if (set_lock) {
+        if (d) lv_obj_add_flag(set_lock, LV_OBJ_FLAG_HIDDEN);
+        else   lv_obj_clear_flag(set_lock, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (set_drive) {
+        if (d) lv_obj_clear_flag(set_drive, LV_OBJ_FLAG_HIDDEN);
+        else   lv_obj_add_flag(set_drive, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (lbl_set_lock)
+        lv_label_set_text(lbl_set_lock,
+                          T(drive_measured ? STR_DRIVE_LOCK
+                                           : STR_DRIVE_LOCK_ASSUMED));
+    /* Tvrzeni "vuz stoji" je na miste jen tehdy, kdyz rychlost chybi.
+     * Pri merenych 90 km/h neni co prohlasovat a tlacitko tam nema co
+     * delat - zesedle by jen zvalo ke zkouseni. */
+    if (btn_set_unlock) {
+        if (d && !drive_measured)
+            lv_obj_clear_flag(btn_set_unlock, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(btn_set_unlock, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_canmode) {
+        lv_obj_set_pos(btn_canmode, d ? SETD_X(0) : SET_X(1),
+                       d ? SETD_Y : SET_ROW2);
+        lv_obj_set_size(btn_canmode, d ? SETD_W : SET_BW,
+                        d ? SETD_H : SET_BH);
+    }
+    if (btn_bright) {
+        lv_obj_set_pos(btn_bright, d ? SETD_X(1) : SET_X(3),
+                       d ? SETD_Y : SET_ROW2);
+        lv_obj_set_size(btn_bright, d ? SETD_W : SET_BW,
+                        d ? SETD_H : SET_BH);
+    }
+
+    /* ---- co prestava byt dotykovym cilem ---- */
+    if (prof_btn) {
+        if (d) lv_obj_clear_flag(prof_btn, LV_OBJ_FLAG_CLICKABLE);
+        else   lv_obj_add_flag(prof_btn, LV_OBJ_FLAG_CLICKABLE);
+    }
+    if (rail) {
+        if (d) lv_obj_clear_flag(rail, LV_OBJ_FLAG_CLICKABLE);
+        else   lv_obj_add_flag(rail, LV_OBJ_FLAG_CLICKABLE);
+        /* Rozdelany odpocet podrzeni uz nema kam dojit. */
+        rail_hold_live = false;
+        rail_hold_done = false;
+    }
+    for (int i = 0; i < DTC_ROWS; i++) {
+        if (!dtc_row[i]) continue;
+        if (d) lv_obj_clear_flag(dtc_row[i], LV_OBJ_FLAG_CLICKABLE);
+        else   lv_obj_add_flag(dtc_row[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+    /* Vybrany zaznam plati jen tak dlouho, dokud se na nej da tuknout. */
+    if (d && dp) diag_poller_dtc_select(dp, -1);
+
+    /* ---- uchyt navigace ----
+     *
+     * 800 x 44 px je na vysku 5,2 mm. Nakreslit ho 120 px vysoky by
+     * sezralo ctvrtinu stranky kvuli pruhu, ktery nic neukazuje.
+     * Roste proto jen dotykova oblast, o 76 px na kazdou stranu:
+     * nahoru do 120 px, do stran a dolu mimo displej. Pruh nad
+     * uchytem uz je stejne mrtvy - spodnich 152 px kazde stranky
+     * prekryva vysunuta lista, takze tam schvalne nic nelezi
+     * (docs/ui.md). */
+    if (navhandle) lv_obj_set_ext_click_area(navhandle, d ? 76 : 0);
+
+    /* ---- dilenske nastroje v mrizce ---- */
+    for (int i = 0; i < NAV_TOOLS; i++) {
+        if (!nav_tool[i]) continue;
+        if (d) lv_obj_add_flag(nav_tool[i], LV_OBJ_FLAG_HIDDEN);
+        else   lv_obj_clear_flag(nav_tool[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (nav_tool_note) {
+        if (d) lv_obj_clear_flag(nav_tool_note, LV_OBJ_FLAG_HIDDEN);
+        else   lv_obj_add_flag(nav_tool_note, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* ---- cedule v liste ---- */
+    if (lbl_drive) {
+        if (d) {
+            lv_label_set_text(lbl_drive,
+                              T(drive_measured ? STR_DRIVE_TAG
+                                               : STR_DRIVE_TAG_ASSUMED));
+            lv_obj_clear_flag(lbl_drive, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(lbl_drive, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+/* Jeden krok rozhodovani o rezimu. Vola se z ui_tick(), tedy asi
+ * 50x za vterinu; prekresluje se jen pri ZMENE. */
+static void drive_eval(uint32_t now)
+{
+    bool was_measured = drive_measured;
+    bool want;
+
+    /* Jen DIAG_SHOW_LIVE. Stara hodnota rika, jak rychle vuz jel, ne
+     * jestli jede ted, a odmitnuty nebo neprecteny DID nerika nic. */
+    if (dp && ch_show(DIAG_CH_SPEED) == DIAG_SHOW_LIVE) {
+        float v = diag_poller_value(dp, DIAG_CH_SPEED);
+
+        drive_measured = true;
+
+        /* Tvrzeni "vuz stoji" rusi jen rychlost, ktera mu ODPORUJE.
+         * Zmerena nula ho naopak potvrzuje, takze ho nema proc
+         * shazovat - a kdyby ho shodila, musel by clovek v dilne
+         * tvrdit znovu po kazdem prepnuti do poslechu, protoze v
+         * poslechu rychlost prestane chodit. */
+        if (v >= DRIVE_ON_KMH) drive_stop_claim = false;
+
+        if (v >= DRIVE_ON_KMH) {
+            drive_slow = false;
+            want = true;
+        } else if (v < DRIVE_OFF_KMH) {
+            if (!drive_mode || !was_measured) {
+                /* Bud uz vuz stoji, nebo byla jizda jen DOMNENKA a
+                 * prave dorazilo mereni, ktere ji vyvraci. Ani v
+                 * jednom pripade neni co rozkmitavat: odpocet je
+                 * proti kolone, ne proti pravde. Diky tomu se deska
+                 * po pripojeni kabelu k parkujicimu vozu odemkne
+                 * hned, ne az za pet vterin. */
+                drive_slow = false;
+                want = false;
+            } else {
+                /* Pet vterin souvisle pod dolnim prahem. Popojeti v
+                 * kolone odpocet zrusi, protoze rychlost mezitim
+                 * vyskoci nad nej. */
+                if (!drive_slow) { drive_slow = true; drive_slow_at = now; }
+                want = (now - drive_slow_at) < DRIVE_OFF_MS;
+            }
+        } else {
+            /* Mezi prahy se nerozhoduje nic - to je ta hystereze. */
+            drive_slow = false;
+            want = drive_mode;
+        }
+    } else {
+        drive_measured = false;
+        drive_slow     = false;
+        want = !drive_stop_claim;
+    }
+
+    if (want != drive_mode || drive_measured != was_measured) {
+        bool measured_entry = want && !drive_mode && drive_measured;
+        drive_mode = want;
+        drive_apply(measured_entry);
+    }
+}
+
+/* Rezim se prepocita hned, ne az za dvacet milisekund. Pouziva to
+ * tvrzeni "vuz stoji": po potvrzeni drzenim se musi nastaveni odemknout
+ * ve chvili, kdy clovek pusti prst. */
+static void drive_update(void)
+{
+    drive_eval(lv_tick_get());
+}
+
 void ui_tick(void)
 {
     uint32_t now = lv_tick_get();
 
+    /* Rezim jizdy nejdriv: rozhoduje o tom, co je vubec na obrazovce,
+     * takze zbytek kroku uz kresli do spravneho rozvrzeni. */
+    drive_eval(now);
     vals_step();
     status_bar_paint(now);
 
@@ -4897,6 +5458,13 @@ void ui_build(void)
     build_dpf(scr);
     build_nastav(scr);
     ui_show_page(PG_HLAVNI);
+
+    /* Stavelo se v rozvrzeni pro stojici vuz, protoze to je to
+     * jedine, ktere drzi vsechny prvky. Rezim ale zacina na JEDE -
+     * deska jeste nema od ceho vedet, ze vuz stoji - takze se to
+     * musi srovnat hned, ne az prvnim ui_tick(). Jinak by byl prvni
+     * snimek po startu v rezimu, ktery neplati. */
+    drive_apply(false);
 
     /* Navigace je prekryv, takze musi byt v z-poradi nad strankami.
      * Stranky vznikaji az po chrome, takze bez tohohle by se lista

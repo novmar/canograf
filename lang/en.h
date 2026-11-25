@@ -287,6 +287,34 @@ static const char *const LANG_EN[] = {
     "reach the bus, whatever the app asks for. In listen-only mode "
     "nothing is sent at all. One tool at a time.",
     "running, but the board has no address yet",
+
+    /* the driving mode; see DRIVE_ON_KMH in ui.c */
+    "DRIVE",
+    "DRIVE?",
+    "Settings are locked while the vehicle is moving. Brightness and "
+    "the bus mode stay available: glare is a safety matter and without "
+    "the bus there is nothing to read. Everything else unlocks itself "
+    "once the vehicle has been standing for five seconds.",
+    "Vehicle speed is not being read, so the interface cannot tell "
+    "whether the vehicle is moving and assumes that it is - a missing "
+    "reading is not a zero. Brightness and the bus mode stay "
+    "available. If the vehicle really is standing, say so below.",
+    "Only the levels of the profile in use. Setting the brightness of "
+    "a profile the vehicle is not in is bench work.",
+    "Diagnostics, battery and injector balance are bench tools - the "
+    "last two can only be measured on a standing vehicle - and all "
+    "three hold controls too small to hit while moving. They come back "
+    "once the vehicle stands.",
+    "Records of one fault are read on a bench. The list itself stays "
+    "readable while moving.",
+    "VEHICLE IS\nSTANDING",
+    "Confirm this only if the vehicle really is standing. It says that "
+    "you can see what the board cannot: there is no speed reading, so "
+    "the interface assumes the vehicle is moving and keeps the "
+    "settings locked.\n\n"
+    "It is dropped the moment a reading above 10 km/h arrives, and it "
+    "is never stored - after a restart the board knows nothing again "
+    "and starts on the safe side.",
 };
 
 #endif /* LANG_EN_H */

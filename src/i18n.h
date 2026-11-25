@@ -290,6 +290,23 @@ enum {
     STR_ELM_HINT,           /* co se tim otevre a co to NEUMI */
     STR_ELM_NOADDR,         /* bezi, ale deska nema adresu */
 
+    /* ---- rezim jizdy ----
+     *
+     * UI ma dva rezimy podle rychlosti vozidla. Texty musi rozlisovat
+     * dve veci, ktere se snadno slijou do jedne: jestli vuz MERENE
+     * jede, nebo jestli se rychlost nema odkud vzit a rezim je
+     * domnenka. V druhem pripade smi clovek rict, ze vuz stoji -
+     * proto ty dve dvojice. Rozbor je u DRIVE_ON_KMH v ui.c. */
+    STR_DRIVE_TAG,          /* cedule v liste, rychlost merime */
+    STR_DRIVE_TAG_ASSUMED,  /* cedule v liste, rychlost chybi */
+    STR_DRIVE_LOCK,         /* proc je nastaveni zamcene, merena rychlost */
+    STR_DRIVE_LOCK_ASSUMED, /* proc je zamcene, kdyz rychlost chybi */
+    STR_DRIVE_BRIGHT,       /* proc jsou v dialogu jen urovne jednoho profilu */
+    STR_DRIVE_TOOLS,        /* proc v mrizce nejsou dilenske nastroje */
+    STR_DRIVE_FAULTS,       /* proc se za jizdy neda tuknout na radek chyby */
+    STR_DRIVE_STOPPED,      /* tlacitko: vuz stoji */
+    STR_DRIVE_STOPPED_BODY, /* co tim clovek tvrdi a jak dlouho to plati */
+
     STR__COUNT
 };
 

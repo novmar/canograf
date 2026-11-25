@@ -23,7 +23,7 @@ static const char *const LANG_CS[] = {
     "NASTAV",
 
     /* horni lista */
-    "CHLADICÍ KAPALINA",
+    "TEPLOTA",
     "BEZ SBĚRNICE",
     "POSLOUCHÁM",
     "BEZ ODPOVĚDI",
@@ -279,6 +279,32 @@ static const char *const LANG_CS[] = {
     "nedostanou, ať si aplikace řekne o cokoliv. V režimu poslechu "
     "neodejde vůbec nic. Vždy jen jeden nástroj.",
     "běží, ale deska zatím nemá adresu",
+
+    /* režim jízdy; rozbor je u DRIVE_ON_KMH v ui.c */
+    "JEDE",
+    "JEDE?",
+    "Za jízdy je nastavení zamčené. Jas a režim sběrnice zůstávají: "
+    "oslnění je bezpečnostní věc a bez sběrnice není co číst. Všechno "
+    "ostatní se odemkne samo, jakmile vůz pět vteřin stojí.",
+    "Rychlost vozidla se nečte, takže rozhraní nemá jak poznat, jestli "
+    "vůz jede, a předpokládá, že ano - chybějící údaj není nula. Jas a "
+    "režim sběrnice zůstávají dostupné. Jestli vůz opravdu stojí, "
+    "řekněte to níže.",
+    "Jen úrovně právě platného profilu. Nastavovat jas profilu, ve "
+    "kterém vůz není, je dílenská práce.",
+    "Diagnostika, baterie a vyrovnání vstřikovačů jsou dílenské "
+    "nástroje - poslední dva se dají měřit jen na stojícím voze - a "
+    "všechny tři mají uvnitř ovládací prvky, do kterých se za jízdy "
+    "nikdo netrefí. Vrátí se, jakmile vůz stojí.",
+    "Záznamy k jedné chybě se čtou na stojícím voze. Samotný seznam "
+    "zůstává za jízdy čitelný.",
+    "VŮZ\nSTOJÍ",
+    "Potvrďte jen tehdy, když vůz opravdu stojí. Říkáte tím, co deska "
+    "nevidí: rychlost nečte, takže předpokládá, že vůz jede, a drží "
+    "nastavení zamčené.\n\n"
+    "Platí to do chvíle, kdy dorazí rychlost nad 10 km/h, a "
+    "nikam se to neukládá - po restartu deska zase nic neví a začíná "
+    "na bezpečné straně.",
 };
 
 #endif /* LANG_CS_H */

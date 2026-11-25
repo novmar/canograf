@@ -33,6 +33,129 @@ The first version had a confirmation button about 8 mm across. It was reported
 as "small, and you cannot tell whether you hit it". Both halves of that
 complaint were real: too small, and no feedback.
 
+The 14 mm rule held for the controls that were deliberately designed as
+driving controls and for nothing else. Settings rows, brightness levels, list
+rows, the profile switcher, the navigation handle and the keyboard were all
+below it. That is now resolved by **two modes**, below, rather than by growing
+everything: a control that has no business being pressed at 90 km/h does not
+need to be 14 mm, it needs to be gone.
+
+## Two modes, decided by road speed
+
+The interface has two shapes and the vehicle picks between them. The question
+it answers is not cosmetic: **can the person look at the screen, or are they
+only going to reach for it?**
+
+| | standing | driving |
+|---|---|---|
+| when | measured speed below the threshold | measured speed above it, **or no speed at all** |
+| small controls | fine, aim with the eye | gone or grown |
+| settings | all of them | brightness and bus mode only |
+| bench tools | all three tiles | hidden, with the reason on the grid |
+| marker | none | filled `DRIVE` tag in the status strip |
+
+### Threshold and hysteresis
+
+```
+enter driving    >= 10 km/h    immediately
+leave driving    <  5 km/h     sustained for 5 s
+between 5 and 10               nothing is decided
+```
+
+Ten km/h is above walking pace, so pushing the van into a bay or rolling to a
+parking slot does not take the settings away. The hysteresis is **doubled on
+purpose**, because one gap is not enough:
+
+- A 5 km/h gap between the two thresholds is three orders of magnitude wider
+  than the resolution of `2003` (0.01 km/h), so nothing flutters at the edge.
+- A gap alone still fails in a queue: creeping forward to 12 km/h and back to
+  zero crosses both thresholds every few seconds. So dropping back also needs
+  **five seconds continuously below 5 km/h**. A queue cycle never reaches it; a
+  vehicle that has actually stopped reaches it once.
+
+It is **deliberately asymmetric**: nothing at all in the dangerous direction,
+five seconds in the safe one. Five seconds of small buttons on a moving vehicle
+is a real cost; five extra seconds of large buttons on a stationary one is not.
+
+The dwell is skipped in one case: when driving mode was an *assumption* and a
+measurement arrives that contradicts it. The countdown exists against queues,
+not against the truth, so plugging the cable into a parked van unlocks the
+board at once.
+
+### No speed is not zero speed
+
+Only `DIAG_SHOW_LIVE` counts. A stale reading answers *how fast the vehicle
+was going*, not *whether it is moving now*; a refused or never-read identifier
+answers nothing. **With no live reading the interface assumes driving.**
+
+Both choices cost something and this one costs less:
+
+- Assuming *standing* is dangerous. It happens exactly when the cable is pulled
+  or the ECU stops answering - which, on a moving vehicle, is the moment the
+  person reaches for the board because it stopped showing anything. The
+  interface would shrink under their hand.
+- Assuming *driving* is merely annoying. That happens on a bench, where there
+  is time to look.
+
+The same state occurs **after every power-up**, before the first answer, and
+permanently on a board with no vehicle attached. So that this does not brick a
+bench board - no settings means no language, no network, not even a way to arm
+the bus - the person may state that the vehicle is standing. It is behind the
+same three-second hold as every other serious choice, it is offered **only**
+when the speed is missing, it is dropped by the first reading above 10 km/h,
+and it is never stored: after a restart the board knows nothing again and
+starts on the safe side.
+
+The tag says which it is. `DRIVE` is measured; `DRIVE?` is assumed. The
+question mark is the same mark the interface already uses for an unverified
+reading, and it carries the difference on its own - colour never does.
+
+### What happens to each control that was too small
+
+Measured from the pixels, not from the source. One rule for all of them would
+be wrong: a fault list is read without touching it, while a settings row is an
+action.
+
+| control | was | driving |
+|---|---|---|
+| settings rows, 8 of them | 160 x 68 | **gone** - set once, on a bench |
+| display off | 170 x 68 | **gone** - a dark screen says nothing; dimming covers glare and stays |
+| service / resets | 170 x 68 | **gone** - irreversible |
+| bus mode | 160 x 68 | **grows** to 228 x 120 |
+| brightness | 160 x 68 | **grows** to 228 x 120 |
+| brightness levels | 104 x 120 | **grow** to 140 x 120, live profile only |
+| dialog back | 124 x 70 | **touch area grows** to 174 x 120, drawing unchanged |
+| navigation handle | 800 x 44 | **touch area grows** to 800 x 120, drawing unchanged |
+| fault rows | 350 x 48 | **stop being targets**, stay readable |
+| profile switcher | 164 x 64 | **stops being a target**, name stays readable |
+| DPF rail | 64 x 416 | **stops being a target**, stays an indicator |
+| bench tiles | 129 x 120 | **gone** - they hold 260 x 100 and 128 x 100 controls inside |
+| network rows, keyboard | 598 x 58, 60 x 60 | **unreachable** - the WiFi button is gone |
+
+Two of these keep their drawing and grow only the touch area
+(`lv_obj_set_ext_click_area`), which is the only place in the interface where
+the two differ. Both are at a screen edge with nothing beside them, and both
+would have cost real screen area if drawn at 120 px: a 120 px handle eats a
+quarter of the page for a strip that shows nothing.
+
+The bus mode is the one settings control that **must** stay, and not for
+comfort. Without it nothing can be read, and because speed is what releases
+driving mode, a board locked out of normal mode could never get back to
+standing mode either. That is not a lock, it is a latch. Switching it is
+already behind a hold confirmation.
+
+Brightness stays because glare is a safety matter that happens at speed -
+night, a tunnel, oncoming high beams - and a quarter of a second of a dazzled
+driver is worse than any dialog.
+
+### Locked says why
+
+A greyed-out button says "not now" and not why, so people tap it again to find
+out. The locked settings page carries a sentence instead, and the sentence
+differs between the measured case and the assumed one, because the person can
+do something about the second.
+
+
 ## Feedback must be obvious
 
 Pressing any button swaps **the whole background** to the accent colour and
