@@ -295,6 +295,12 @@ static const ui_host_t FAKE_HOST_NODIM = {
 #define ECU_REQ_ID 0x7E0u       /* deska -> jednotka */
 #define ECU_RSP_ID 0x7E8u       /* jednotka -> deska */
 
+/* Energetika EMM. Jina jednotka, jiny protokol: 10 C0 a 21 xx, viz
+ * src/diag/legacy.h. Je tu proto, ze proud baterie neumi nikdo jiny. */
+#define EMM_REQ_ID 0x74Du
+#define EMM_RSP_ID 0x76Du
+#define EMM_DATA   44           /* datovych bajtu za hlavickou 61 34 */
+
 /* Vybrane chyby. Kodovani je trojice bajtu, jak ji vraci 19 02; prevod
  * na "P2263-22" dela diag_dtc_text() v poller.c. */
 #define ECU_DTC1 0x226322u      /* P2263-22 */
@@ -302,6 +308,7 @@ static const ui_host_t FAKE_HOST_NODIM = {
 
 static diag_poller_t g_dp;
 static isotp_link_t  ecu_link;
+static isotp_link_t  emm_link;
 
 static bool ecu_present   = true;   /* odpovida jednotka vubec? */
 static int  bus_tx_frames = 0;      /* kolik ramcu se deska pokusila poslat */
@@ -341,11 +348,31 @@ static const ecu_did_t ECU_DID[] = {
     { 0x24BAu, 2u,   112u },   /* zatizeni x0,1   = 11,2 g */
     { 0x2557u, 3u, 12400u },   /* od regenerace x0,1 = 1240 s */
     { 0x2006u, 3u, 214763u },  /* tachometr       = 214763 km */
+    { 0x2448u, 2u,  1250u },   /* pred turbinou   = 1250 mbar */
+    { 0x2443u, 2u, 32833u },   /* rozdil na filtru x1 -32768 = 65 mbar */
+    { 0x2444u, 2u, 32830u },   /* napeti snimace x0,01 -327,68 = 0,62 V */
+    { 0x252Du, 1u,     0u },   /* priznak zamrzleho signalu, prepina se nize */
 };
 #define ECU_DIDS ((int)(sizeof(ECU_DID) / sizeof(ECU_DID[0])))
 
 /* DID, ktery jednotka v odpovedi vynecha, i kdyz ho zna. */
 #define ECU_SKIP_DID 0x240Du
+
+/* Co se behem zkousky prepina. Jsou to stavy skutecne jednotky, ne
+ * nastaveni UI: zamrzly snimac a odmitnuty dodavatelsky rozsah jsou
+ * veci, ktere se na voze opravdu stavaji, a UI je musi unest. */
+static bool emm_present = true;
+static bool emm_refuses = false;   /* 21 34 odmitnuto */
+static bool emm_charging = true;   /* smer proudu, ktery snimac hlasi */
+static bool ecu_frozen = false;    /* 252D: snimac tlaku prestal chodit */
+static bool ecu_fbc_ok = false;    /* odpovida jednotka na FD38..FD3B? */
+
+/* Korekce po valcich, syrove. Dvoubajtove se znamenkem, deleno stem:
+ * +0,42 / -1,85 / +0,11 / -0,08 mg, tedy rozptyl 2,27 mg a druhy valec
+ * na kraji - presne tak vypada jeden opotrebeny vstrikovac. */
+#define ECU_FBC_LO 0xFD38u
+#define ECU_FBC_HI 0xFD3Bu
+static const uint32_t ECU_FBC[4] = { 42u, 65351u, 11u, 65528u };
 
 static const ecu_did_t *ecu_find(uint16_t did)
 {
@@ -377,8 +404,23 @@ static int ecu_reply(const uint8_t *q, int qn, uint8_t *r)
         r[at++] = 0x62u;
         for (int p = 1; p + 1 < qn; p += 2) {
             uint16_t did = (uint16_t)((q[p] << 8) | q[p + 1]);
-            const ecu_did_t *d = ecu_find(did);
+            const ecu_did_t *d;
+            uint32_t raw;
 
+            /* Dodavatelsky rozsah Bosch. Jednotka ho SMI neznat a
+             * odmitnuti je tu normalni odpoved - prave tenhle konec
+             * UI nesmi kreslit jako poruchu. */
+            if (did >= ECU_FBC_LO && did <= ECU_FBC_HI) {
+                if (!ecu_fbc_ok) {
+                    r[0] = 0x7Fu; r[1] = 0x22u; r[2] = 0x31u;
+                    return 3;
+                }
+                ecu_put(r, &at, did, 2u);
+                ecu_put(r, &at, ECU_FBC[did - ECU_FBC_LO], 2u);
+                continue;
+            }
+
+            d = ecu_find(did);
             /* Neznamy DID odmita CELOU davku - tak se chova skutecna
              * jednotka, odpoved na 22 nema misto na chybu u jednoho
              * udaje. */
@@ -387,8 +429,11 @@ static int ecu_reply(const uint8_t *q, int qn, uint8_t *r)
                 return 3;
             }
             if (did == ECU_SKIP_DID) continue;
+            /* Priznak zamrzleho signalu je jediny bit (252D, bitoffset
+             * 7), takze jednicka v nejnizsim bitu jednoho bajtu. */
+            raw = (did == 0x252Du) ? (ecu_frozen ? 1u : 0u) : d->raw;
             ecu_put(r, &at, did, 2u);
-            ecu_put(r, &at, d->raw, d->len);
+            ecu_put(r, &at, raw, d->len);
         }
         return at;
     }
@@ -417,6 +462,53 @@ static int ecu_reply(const uint8_t *q, int qn, uint8_t *r)
         ecu_put(r, &at, 0x2003u, 2u); ecu_put(r, &at, 4200u, 2u);
         ecu_put(r, &at, 0x2001u, 2u); ecu_put(r, &at, 3540u, 2u);
         return at;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------
+ * Energetika: 10 C0 a 21 34
+ *
+ * Odpoved je jeden blok 61 34 a 44 datovych bajtu. Polozky se do nej
+ * davaji na presne ty indexy, ktere ma profil v poller.c - tedy na
+ * sloupec firstbyte z popisu jednotky zmenseny o tri. Kdyby se index
+ * na jedne ze dvou stran posunul, cisla na obrazovce budou nesmysl a
+ * kontrola nize to pozna podle hodnot, ne podle otisku.
+ * ------------------------------------------------------------------- */
+static void emm_put(uint8_t *d, int at, uint32_t v, int len)
+{
+    for (int i = len - 1; i >= 0; i--) d[at++] = (uint8_t)(v >> (8 * i));
+}
+
+static int emm_reply(const uint8_t *q, int qn, uint8_t *r)
+{
+    if (qn >= 2 && q[0] == 0x10u) {              /* 10 C0 */
+        r[0] = 0x50u; r[1] = q[1];
+        return 2;
+    }
+    if (qn >= 2 && q[0] == 0x3Eu) {              /* tester present */
+        r[0] = 0x7Eu; r[1] = q[1];
+        return 2;
+    }
+    if (qn >= 2 && q[0] == 0x21u && q[1] == 0x34u) {
+        if (emm_refuses) {
+            r[0] = 0x7Fu; r[1] = 0x21u; r[2] = 0x31u;
+            return 3;
+        }
+        memset(r, 0, 2u + EMM_DATA);
+        r[0] = 0x61u; r[1] = 0x34u;
+
+        uint8_t *d = r + 2;
+        emm_put(d,  4,   128u, 2);   /* zatizeni alternatoru x0,39063 = 50 % */
+        /* Proud: x0,01 - 200. Obe strany jsou schvalne stejne velke -
+         * 21450 je +14,50 A (dobiji se), 18550 je -14,50 A (nekdo
+         * bere). Cislice jsou tedy v obou pripadech tytez a jediny
+         * rozdil, ktery se muze objevit na obrazovce, je znamenko. */
+        emm_put(d, 23, emm_charging ? 21450u : 18550u, 2);
+        emm_put(d, 25, 87500u, 3);   /* stav nabiti /1000 = 87,5 % */
+        emm_put(d, 28,   920u, 2);   /* x0,001 + 11,5 = 12,42 V pri uspani */
+        emm_put(d, 30,  9870u, 2);   /* x0,001 = 9,87 V pri startovani */
+        return 2 + EMM_DATA;
     }
     return 0;
 }
@@ -475,25 +567,29 @@ static bool bus_send(void *user, uint32_t id, const uint8_t *data, uint8_t dlc)
     return true;
 }
 
-/* Jeden prijaty ramec na strane jednotky. */
-static void ecu_rx(const busf_t *f, uint32_t now)
+/* Jeden prijaty ramec na strane jedne jednotky. Obe jednotky se lisi
+ * jen spojem a stavitelem odpovedi, takze je to jedna funkce - jinak
+ * by druha jednotka byla kopie te prvni a rozesly by se. */
+static void unit_rx(isotp_link_t *link,
+                    int (*reply)(const uint8_t *, int, uint8_t *),
+                    const busf_t *f, uint32_t now)
 {
-    uint8_t rsp[64];
+    uint8_t rsp[80];
     int qn, rn;
 
     /* Flow control patri odesilacimu spoji jednotky. */
-    isotp_on_frame(&ecu_link, f->id, f->d, f->dlc, now);
+    isotp_on_frame(link, f->id, f->d, f->dlc, now);
 
     /* Pozadavek je vzdycky single frame - horni pulbajt 0, delka v
      * dolnim. Vic nez sedm bajtu se tester nepta a viceramcovy prijem
      * by znamenal druhy spoj. */
-    if (f->id != ECU_REQ_ID || f->dlc < 1u || (f->d[0] >> 4) != 0u) return;
+    if (f->dlc < 1u || (f->d[0] >> 4) != 0u) return;
     qn = f->d[0] & 0x0Fu;
     if (qn < 1 || qn > 7 || qn + 1 > (int)f->dlc) return;
 
     ecu_requests++;
-    rn = ecu_reply(&f->d[1], qn, rsp);
-    if (rn > 0) isotp_send(&ecu_link, rsp, (uint16_t)rn, now);
+    rn = reply(&f->d[1], qn, rsp);
+    if (rn > 0) isotp_send(link, rsp, (uint16_t)rn, now);
 }
 
 /* Jak casto vozidlo samo od sebe neco posle. Na X82 jezdi po HS CAN
@@ -517,7 +613,11 @@ static void bus_step(void)
 
     for (int i = 0; i < n; i++) {
         diag_poller_on_frame(&g_dp, q[i].id, q[i].d, q[i].dlc, q[i].tx, now);
-        if (q[i].tx && ecu_present) ecu_rx(&q[i], now);
+        if (!q[i].tx) continue;
+        if (q[i].id == ECU_REQ_ID && ecu_present)
+            unit_rx(&ecu_link, ecu_reply, &q[i], now);
+        else if (q[i].id == EMM_REQ_ID && emm_present)
+            unit_rx(&emm_link, emm_reply, &q[i], now);
     }
 
     /* Vozidlo mluvi samo od sebe. Prave z toho pozna diag_link, ze deska
@@ -531,6 +631,7 @@ static void bus_step(void)
     }
 
     isotp_poll(&ecu_link, now);
+    isotp_poll(&emm_link, now);
     diag_poller_arm(&g_dp, fake_can_normal);
     diag_poller_poll(&g_dp, now);
 }
@@ -545,6 +646,10 @@ static void bus_init(void)
     ic.rx_id = ECU_REQ_ID;
     ic.send  = ecu_send;
     isotp_init(&ecu_link, &ic);
+
+    ic.tx_id = EMM_RSP_ID;
+    ic.rx_id = EMM_REQ_ID;
+    isotp_init(&emm_link, &ic);
 
     diag_poller_cfg_default(&dc);
     dc.send = bus_send;
@@ -1067,6 +1172,295 @@ static void phase_hodnoty(void)
 
     ui_show_page(0);
     run_ms(600, false);
+}
+
+/* ---------------------------------------------------------------------
+ * Tri nove skupiny velicin
+ *
+ * Vsechny tri maji spolecne to, ze zadna z nich nebyla prectena ze
+ * skutecneho vozu - jsou dohledane v souboru jednotky. Tahle faze
+ * zkousi prave ty konce, na kterych se to pozna:
+ *
+ *   - neovereny udaj je v UI oznaceny, dokud jednotka poprve neodpovi
+ *   - proud baterie si nese ZNAMENKO, takze nabijeni a odber nejsou
+ *     tataz vec
+ *   - pri zamrzlem signalu se tlakovy rozdil neukaze jako cislo
+ *   - odmitnuty dodavatelsky rozsah je normalni stav, ne chybova hlaska
+ * ------------------------------------------------------------------- */
+#define C_PROBE32   lv_color_to32(lv_color_hex(0xB98A3C))
+#define C_DEFICIT32 lv_color_to32(lv_color_hex(0xC8432B))
+#define C_LABEL32   lv_color_to32(lv_color_hex(0x65798B))
+
+/* Stranka DPF: ctvrta rada (DPF_RY(3) = 196) pod horni listou. */
+#define DPF_EXHP_CAP  20, PAGE_Y(196), 200, PAGE_Y(214)
+#define DPF_EXHP_BOX  20, PAGE_Y(214), 200, PAGE_Y(248)
+#define DPF_DP_BOX    215, PAGE_Y(214), 400, PAGE_Y(248)
+#define DPF_DPU_BOX   420, PAGE_Y(214), 600, PAGE_Y(248)
+/* Saze: druha rada, pravy sloupec. Overena velicina - cteme ji z vozu
+ * od zacatku, takze jeji popisek oznaceny byt NESMI. */
+#define DPF_SOOT_CAP  215, PAGE_Y(68), 400, PAGE_Y(86)
+/* Mezery mezi sloupci v rade popisku. Popisek je preklad, takze jeho
+ * sirka se s jazykem meni a do sousedniho sloupce se natahne tise -
+ * na snimku to vypada jako jedno dlouhe slovo. Prazdny prouzek tesne
+ * pred dalsim sloupcem je proto jedina vec, ktera to umi zmerit. */
+#define DPF_GAP2      205, PAGE_Y(196), 213, PAGE_Y(214)
+#define DPF_GAP3      410, PAGE_Y(196), 418, PAGE_Y(214)
+
+/* Panel baterie (dialog pres celou obrazovku, BATT_X v ui.c). */
+#define BATT_I_CAP    20, 100, 300, 120
+#define BATT_I_BOX    20, 122, 300, 178
+#define BATT_SOC_BOX  20, 246, 200, 280
+#define BATT_GAP1     195, 228, 203, 248
+#define BATT_GAP2     380, 228, 388, 248
+#define BATT_GAP3     565, 228, 573, 248
+
+/* Panel vstrikovacu. */
+#define INJ_SPREAD_CAP 330, 100, 470, 120
+#define INJ_SPREAD_BOX 330, 122, 520, 178
+#define INJ_CYL1_CAP   330, 226, 430, 244
+#define INJ_BODY       20, 90, 790, 470
+/* Tlacitko ZMERIT: 240 x 100 na (30, 100), tedy stred (150, 150). */
+#define INJ_BTN_CX     150
+#define INJ_BTN_CY     150
+/* Dlazdice BATERIE a VSTRIKOVACE jsou prvni dve v HORNI rade mrizky
+ * (NAV_TILE_BATT a NAV_TILE_INJ v ui.c). */
+#define NAVTILE_BATT_C 0
+#define NAVTILE_BATT_R 0
+#define NAVTILE_INJ_C  1
+#define NAVTILE_INJ_R  0
+
+/* Mrizka dlazdic: lista nahoru, pak tah az na mrizku a tuknuti. */
+static void open_tile(int col, int row)
+{
+    tap(TAP_HANDLE_X, TAP_HANDLE_Y, false);
+    swipe(NAVBTN_X(2), NAVBTN_Y, NAVBTN_X(2), 180, 6, false, false);
+    tap(NAVTILE_X(col), NAVTILE_Y(row), false);
+}
+
+static void close_panel(void)
+{
+    swipe(120, 240, 700, 250, 8, false, false);     /* gestem zpet */
+    swipe(400, 200, 400, 470, 6, false, false);     /* mrizku zpet na uchyt */
+}
+
+static void phase_nove_veliciny(void)
+{
+    /* -----------------------------------------------------------------
+     * 1. NEOVERENY UDAJ JE POZNAT OD OVERENEHO.
+     *
+     * Jednotka prave mlci, takze se tu nic noveho neprecte: protitlak
+     * (2448) na tomhle voze jeste nikdy neodpovedel a jeho popisek
+     * proto nese znacku. Saze vedle nej uz precteny byly, takze jejich
+     * popisek znacku nemit NESMI - jinak by znacka nerikala nic.
+     *
+     * Mutacni zkouska: v ui.c nechat ch_probe() vracet vzdycky false.
+     * Oznaceni zmizi i u protitlaku a kontrola MUSI selhat. Druha
+     * mutace: nechat ho vracet vzdycky true, pak se oznaci i saze a
+     * selze kontrola pod ni.
+     * ----------------------------------------------------------------- */
+    ecu_present = false;
+    ui_show_page(4);                    /* DPF */
+    run_ms(600, false);
+
+    check("neovereny udaj ma u popisku vlastni znacku",
+          region_has(DPF_EXHP_CAP, C_PROBE32));
+    check("overeny udaj vedle nej znacku nema",
+          !region_has(DPF_SOOT_CAP, C_PROBE32) &&
+          region_has(DPF_SOOT_CAP, C_LABEL32));
+    check("a dokud jednotka mlci, neni misto cisla nic",
+          !region_has(DPF_EXHP_BOX, C_ACTUAL32));
+    shot("dpf-neovereno");
+
+    /* -----------------------------------------------------------------
+     * 2. PO PRVNI ODPOVEDI UZ TO NENI DOMNENKA.
+     *
+     * Znacka rika "tenhle vuz na to jeste neodpovedel", takze v
+     * okamziku, kdy odpovi, musi zmizet. Kdyby zustala, prestala by
+     * byt informaci a stala by se ozdobou.
+     * ----------------------------------------------------------------- */
+    ecu_present = true;
+    run_ms(3000, false);
+
+    check("po prvni odpovedi uz popisek znacku nema",
+          !region_has(DPF_EXHP_CAP, C_PROBE32));
+    check("protitlak se ukaze jako cislo", region_has(DPF_EXHP_BOX, C_ACTUAL32));
+    check("tlakovy rozdil take", region_has(DPF_DP_BOX, C_ACTUAL32));
+    check("a napeti snimace vedle nej", region_has(DPF_DPU_BOX, C_ACTUAL32));
+    check("popisky ctvrte rady se nedotykaji sousedniho sloupce",
+          region_uniform(DPF_GAP2) && region_uniform(DPF_GAP3));
+    unsigned dp_live = region_hash(DPF_DP_BOX);
+    shot("dpf-tlaky");
+
+    /* -----------------------------------------------------------------
+     * 3. ZAMRZLY SIGNAL: TLAKOVY ROZDIL NENI CISLO.
+     *
+     * 252D je priznak, kterym jednotka sama rika, ze snimac prestal
+     * menit hodnotu. Zamrzly snimac porad posila posledni cislo a to
+     * vypada naprosto vericne - proto se na jeho miste nesmi objevit
+     * zadne cislo, jen to, co se opravdu vi.
+     *
+     * Protitlak vedle je z jineho snimace a zustava cislem; bez te
+     * druhe pulky by kontrola prosla i tehdy, kdyby prestala chodit
+     * cela stranka.
+     *
+     * Mutacni zkouska: v dpf_paint() v ui.c smazat vetev
+     * ch_flag(DIAG_CH_DPF_FROZEN) a nechat tam jen val_fmt(). Zamrzly
+     * rozdil se zase nakresli jako platne cislo a kontrola MUSI selhat.
+     * ----------------------------------------------------------------- */
+    ecu_frozen = true;
+    run_ms(12000, false);               /* priznak je v pomale skupine */
+
+    check("pri zamrzlem signalu neni tlakovy rozdil cislo",
+          !region_has(DPF_DP_BOX, C_ACTUAL32));
+    check("misto nej je videt, ze signal zamrzl",
+          region_has(DPF_DP_BOX, C_DEFICIT32) &&
+          region_hash(DPF_DP_BOX) != dp_live);
+    check("protitlak z jineho snimace zustava cislem",
+          region_has(DPF_EXHP_BOX, C_ACTUAL32));
+    shot("dpf-zamrzly-snimac");
+
+    ecu_frozen = false;
+    run_ms(12000, false);
+    check("po odezneni priznaku je rozdil zase cislem",
+          region_has(DPF_DP_BOX, C_ACTUAL32));
+
+    /* -----------------------------------------------------------------
+     * 4. PROUD BATERIE SI NESE ZNAMENKO.
+     *
+     * Vuz ma na baterii vlastni snimac proudu a rozdil mezi
+     * "dobiji se" a "nekdo bere" je prave znamenko. Predstirana
+     * jednotka proto hlasi obe strany stejne velke: +14,50 a -14,50 A.
+     * Cislice jsou v obou pripadech tytez, takze jediny rozdil, ktery
+     * muze byt na obrazovce videt, je znamenko.
+     *
+     * Tvrdi se oboji: hodnota z vrstvy ma spravne znamenko (tedy
+     * skalovani s posunem -200 A projde az z bajtu) a obrazek se
+     * opravdu zmeni. Vedle toho se meri, ze se zbytek panelu nehnul -
+     * jinak by "lisi se" mohlo znamenat cokoliv.
+     *
+     * Mutacni zkouska: v sfix() v ui.c zahodit znamenko (napr. t =
+     * labs(t) a sg = ""). Hodnoty z vrstvy zustanou spravne, ale oba
+     * obrazky budou shodne a kontrola MUSI selhat.
+     * ----------------------------------------------------------------- */
+    emm_charging = true;
+    open_tile(NAVTILE_BATT_C, NAVTILE_BATT_R);
+    run_ms(4000, false);
+
+    float i_chg = diag_poller_value(&g_dp, DIAG_CH_BATT_I);
+    check("pri nabijeni je proud kladny", i_chg > 14.0f && i_chg < 15.0f);
+    check("a je na obrazovce jako cislo", region_has(BATT_I_BOX, C_ACTUAL32));
+    check("popisky v rade baterie se nedotykaji",
+          region_uniform(BATT_GAP1) && region_uniform(BATT_GAP2) &&
+          region_uniform(BATT_GAP3));
+    unsigned i_box_chg = region_hash(BATT_I_BOX);
+    unsigned soc_chg   = region_hash(BATT_SOC_BOX);
+    shot("baterie-nabijeni");
+
+    emm_charging = false;
+    run_ms(4000, false);
+
+    float i_dis = diag_poller_value(&g_dp, DIAG_CH_BATT_I);
+    check("pri odberu je proud zaporny", i_dis < -14.0f && i_dis > -15.0f);
+    check("odber vypada na obrazovce jinak nez nabijeni",
+          region_hash(BATT_I_BOX) != i_box_chg);
+    check("a zmenil se opravdu jen proud, nic jineho",
+          region_hash(BATT_SOC_BOX) == soc_chg);
+    check("i odber je porad cislo, ne pomlcky",
+          region_has(BATT_I_BOX, C_ACTUAL32));
+    shot("baterie-odber");
+
+    /* -----------------------------------------------------------------
+     * Kdyz energetika blok odmitne, nesmi na jeho miste zustat cislo.
+     *
+     * Na rozdil od dodavatelskeho rozsahu nize je tohle odmitnuti
+     * ZPRAVA: s energetikou uz projekt mluvi kvuli konfiguraci
+     * baterie, takze "nemam" je tu prekvapeni a kresli se cervene.
+     *
+     * Znacka neoverenosti se tim ale NEVRACI, a je to tak spravne:
+     * rika "tenhle vuz na to jeste nikdy neodpovedel", a odpovedel
+     * prave pred chvili. Kdyby se vratila, neslo by uz rozeznat
+     * identifikator opsany z papiru od toho, ktery se chvilkove
+     * nedari precist.
+     * ----------------------------------------------------------------- */
+    emm_refuses = true;
+    run_ms(4000, false);
+    check("odmitnuty blok energetiky neni cislo",
+          !region_has(BATT_I_BOX, C_ACTUAL32));
+    check("odmitnuti jednotky, ktera driv odpovidala, je videt",
+          region_has(BATT_I_BOX, C_DEFICIT32));
+    check("znacka neoverenosti se po prvni odpovedi uz nevraci",
+          !region_has(BATT_I_CAP, C_PROBE32));
+    shot("baterie-odmitnuto");
+    emm_refuses = false;
+    close_panel();
+
+    /* -----------------------------------------------------------------
+     * 5. ODMITNUTY DODAVATELSKY ROZSAH JE NORMALNI STAV.
+     *
+     * FD38..FD3B je rozsah Bosch a tahle verze softwaru na nej
+     * odpovidat nemusi. "Nemam" u neceho, co jsme nikdy nemeli
+     * slibene, neni porucha - takze se na panelu nesmi objevit nic
+     * cerveneho. Cervena je v tehle aplikaci odmitnuti DIDu, ktery
+     * cekame, a to je uplne jina zprava.
+     *
+     * Mutacni zkouska: v inj_paint() v ui.c kreslit hodnoty valcu pres
+     * val_fmt(). Odmitnuti se nakresli cervene jako "7F 31" a kontrola
+     * MUSI selhat.
+     * ----------------------------------------------------------------- */
+    ecu_fbc_ok = false;
+    open_tile(NAVTILE_INJ_C, NAVTILE_INJ_R);
+    run_ms(600, false);
+
+    check("nezmereny rozptyl neni cislo",
+          !region_has(INJ_SPREAD_BOX, C_ACTUAL32));
+    check("popisek valce je oznaceny jako neovereny",
+          region_has(INJ_CYL1_CAP, C_PROBE32));
+    check("obycejny popisek vedle nej oznaceny neni",
+          !region_has(INJ_SPREAD_CAP, C_PROBE32) &&
+          region_has(INJ_SPREAD_CAP, C_LABEL32));
+    shot("vstrikovace-nemereno");
+
+    tap(INJ_BTN_CX, INJ_BTN_CY, false);
+    run_ms(3000, false);
+
+    check("odmitnute mereni opravdu probehlo",
+          diag_poller_fbc_done(&g_dp) &&
+          diag_poller_show(&g_dp, DIAG_CH_FBC1) == DIAG_SHOW_REFUSED);
+    check("odmitnuti se nekresli jako chyba",
+          !region_has(INJ_BODY, C_DEFICIT32));
+    check("a rozptyl se z niceho nedopocita",
+          !region_has(INJ_SPREAD_BOX, C_ACTUAL32));
+    shot("vstrikovace-odmitnuto");
+
+    /* -----------------------------------------------------------------
+     * 6. KDYZ JEDNOTKA ODPOVI, VYSLEDEK JE JEDNO CISLO.
+     *
+     * Ctyri korekce se znamenkem a z nich rozptyl. Druhy valec sedi na
+     * -1,85 mg, takze rozptyl je 2,27 mg - a zaporna hodnota projde az
+     * na obrazovku jen tehdy, kdyz se dvoubajtove cislo opravdu bere
+     * jako znamenkove.
+     *
+     * Mutacni zkouska: v poller.c vyhodit z radku FBC priznak F_SIGN.
+     * Druhy valec vyskoci na +653,51 mg a kontrola MUSI selhat.
+     * ----------------------------------------------------------------- */
+    ecu_fbc_ok = true;
+    tap(INJ_BTN_CX, INJ_BTN_CY, false);
+    run_ms(3000, false);
+
+    float c2 = diag_poller_value(&g_dp, DIAG_CH_FBC2);
+    check("korekce se znamenkem projde az z bajtu",
+          c2 < -1.8f && c2 > -1.9f);
+    check("rozptyl je po zmereni cislo",
+          region_has(INJ_SPREAD_BOX, C_ACTUAL32));
+    check("popisek valce uz oznaceny neni",
+          !region_has(INJ_CYL1_CAP, C_PROBE32));
+    shot("vstrikovace-zmereno");
+
+    close_panel();
+    ui_show_page(0);
+    /* Mrizka spadne sama po NAV_IDLE_MS. Nechat ji vysunutou by
+     * znamenalo, ze dalsi faze fotografuje stranky pres ni. */
+    idle_ms(7000);
 }
 
 /* ---------------------------------------------------------------------
@@ -1980,6 +2374,11 @@ int main(int argc, char **argv)
      * jednotku. Stranky se tim zaroven naplni zivymi hodnotami, takze
      * snimky nize uz ukazuji vyrobek tak, jak vypada v aute. */
     phase_hodnoty();
+
+    /* Tri nove skupiny velicin. Bezi hned po predchozi fazi, dokud
+     * stranka DPF jeste nebyla videt - prave tehdy jsou nove kanaly
+     * jeste neprectene a da se zmerit, ze je to na nich poznat. */
+    phase_nove_veliciny();
 
     /* Snimky z teto smycky se publikuji jako dokumentovany vzhled
      * vyrobku, takze u nich nestaci, ze nejsou prazdne: stranka se musi

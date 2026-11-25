@@ -75,6 +75,10 @@ static const char *const LANG_CS[] = {
     "SAZE g",
     "ZATÍŽENÍ g",
     "OD POSLEDNÍ REGENERACE",
+    "PROTITLAK mbar",
+    "ROZDÍL NA FILTRU mbar",
+    "SNÍMAČ V",
+    "ZAMRZLÝ",
     "Spuštění regenerace je zápis do jednotky (31 01 02 0D). Tenhle "
     "obraz umí jen číst, takže tu tlačítko není - viz docs/safety.md.",
     "REGENERACE",
@@ -191,6 +195,38 @@ static const char *const LANG_CS[] = {
     "PAMĚŤ A DOBA BĚHU",
     "ULOŽIT DO %s",
     "VÝCHOZÍ",
+
+    /* údaj, který je zatím jen opsaný z popisu jednotky */
+    "?  =  jen z popisu jednotky - tenhle vůz na to ještě neodpověděl",
+
+    /* stav baterie, energetika 74D */
+    "BATERIE",
+    "Baterie a dobíjení",
+    "PROUD BATERIE A",
+    "NABITÍ %",
+    "ALTERNÁTOR %",
+    "MIN PŘI STARTU V",
+    "PŘI USPÁNÍ V",
+    "Měří to vůz svým vlastním snímačem na baterii, takže znaménko je "
+    "to hlavní: jedna strana je dobíjení, druhá to, co se z baterie "
+    "bere. Se zhasnutým motorem a vším uspaným zbyde klidový odběr - "
+    "tahle deska v něm je taky.\n\n"
+    "Které znaménko znamená který směr, na tomhle voze ověřené není. "
+    "Stačí jednou nastartovat a směr dobíjení se pojmenuje sám.",
+
+    /* vyrovnání vstřikovačů - jednorázové měření */
+    "VSTŘIKOVAČE",
+    "Vyrovnání vstřikovačů",
+    "ZMĚŘIT",
+    "čtu...",
+    "ROZPTYL mg",
+    "VÁLEC %d",
+    "ještě neměřeno",
+    "Jednotka na FD38-FD3B neodpovídá (7F %02X). Je to dodavatelský "
+    "rozsah Bosch a odmítnutí je tu normální odpověď, ne porucha.",
+    "Teplý volnoběh, bez zátěže. Pod zátěží regulátor vyrovnání "
+    "neběží a ta čtyři čísla jsou spíš stará než špatná.",
+    "%s 1/min   %s C  při měření",
 };
 
 #endif /* LANG_CS_H */

@@ -75,6 +75,10 @@ static const char *const LANG_DE[] = {
     "RUSS g",
     "BELADUNG g",
     "SEIT LETZTER REGEN.",
+    "GEGENDRUCK mbar",
+    "DIFFERENZDRUCK mbar",
+    "SENSOR V",
+    "EINGEFROREN",
     "Eine Regeneration zu starten schreibt ins Steuergerät "
     "(31 01 02 0D). Dieser Stand liest nur, deshalb gibt es die Taste "
     "hier nicht - siehe docs/safety.md.",
@@ -198,6 +202,42 @@ static const char *const LANG_DE[] = {
     "SPEICHER UND LAUFZEIT",
     "IN %s SICHERN",
     "STANDARD",
+
+    /* Wert, der bisher nur aus der Steuergeraetebeschreibung stammt */
+    "?  =  nur aus der Beschreibung des Steuergeräts - dieser Wagen "
+    "hat darauf noch nie geantwortet",
+
+    /* Batterie und Ladung, Energiemodul 74D */
+    "BATTERIE",
+    "Batterie und Ladung",
+    "BATTERIESTROM A",
+    "LADUNG %",
+    "GENERATORLAST %",
+    "MIN BEIM START V",
+    "BEIM EINSCHLAFEN V",
+    "Der Wagen misst das mit seinem eigenen Batteriesensor, deshalb "
+    "ist das Vorzeichen der ganze Punkt: die eine Richtung ist Laden, "
+    "die andere das, was entnommen wird. Bei stehendem Motor und allem "
+    "im Schlaf bleibt der Ruhestrom übrig - diese Platine "
+    "eingeschlossen.\n\n"
+    "Welches Vorzeichen welche Richtung bedeutet, ist an diesem Wagen "
+    "noch nicht belegt. Einmal starten, und die Laderichtung benennt "
+    "sich selbst.",
+
+    /* Injektorabgleich - einmalige Messung */
+    "INJEKTOREN",
+    "Injektorabgleich",
+    "MESSEN",
+    "lese...",
+    "STREUUNG mg",
+    "ZYL. %d",
+    "noch nicht gemessen",
+    "Das Steuergerät antwortet nicht auf FD38-FD3B (7F %02X). Das ist "
+    "der Bosch-Lieferantenbereich; eine Ablehnung ist hier eine "
+    "normale Antwort und kein Fehler.",
+    "Warmer Leerlauf, ohne Last. Unter Last läuft der Abgleichregler "
+    "nicht und die vier Zahlen sind eher alt als falsch.",
+    "%s U/min   %s C  bei der Messung",
 };
 
 #endif /* LANG_DE_H */

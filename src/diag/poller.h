@@ -80,6 +80,47 @@
  * prepnuti do normalniho rezimu.
  *
  * ---------------------------------------------------------------
+ * Dva transporty, jedna vrstva
+ * ---------------------------------------------------------------
+ * Motor (7E0/7E8) mluvi UDS. Energetika (EMM 74D/76D) UDS neumi a
+ * odpovida jen na stary protokol Renault, tedy 10 C0 a 21 xx - proto
+ * tu vedle klienta UDS stoji jeste klient legacy s vlastnim spojem
+ * ISO-TP. Nahoru to videt neni: UI se porad pta jen na kanaly a vubec
+ * nevi, ze cast cisel prisla jinym protokolem z jine jednotky.
+ *
+ * Z EMM se cte JEDINY blok, 21 34 Read_EnergyManagement. Jedna
+ * odpoved nese celou elektrickou bilanci vcetne PROUDU BATERIE, a
+ * prave ten je duvod, proc tu EMM je: vuz ma na baterii vlastni
+ * snimac proudu, takze svuj klidovy odber zmeri sam a presneji nez
+ * cokoliv, co by se dalo pripojit zvenku. Znamenko se nikde
+ * neodstranuje - rozdil mezi nabijenim a odberem JE ta mereni hodnota.
+ *
+ * ---------------------------------------------------------------
+ * Jednorazove mereni
+ * ---------------------------------------------------------------
+ * Vyrovnani vstrikovacu (FD38..FD3B) ma smysl jen na teplem
+ * volnobehu - pod zatizenim regulator nebezi a cisla jsou stara, ne
+ * spatna. Takovy udaj do zadneho kola nepatri: cte se na vyzadani
+ * pres diag_poller_fbc_start() a pak uz se neobnovuje. Kanaly maji
+ * proto prazdnou masku pohledu a do zadne davky se samy nedostanou.
+ *
+ * ---------------------------------------------------------------
+ * Co jeste nikdo neprecetl z vozu
+ * ---------------------------------------------------------------
+ * Cast profilu pochazi JEN z popisu jednotky (ddt4all), ne z mereni
+ * na skutecnem voze. Takovy radek je v tabulce oznaceny a vrstva to
+ * rika pres diag_poller_unverified(). NENI to paty stav hodnoty:
+ * diag_show_t odpovida na otazku "jak dopadlo tohle cteni", kdezto
+ * tohle je vlastnost RADKU PROFILU, platna porad a nezavisle na tom,
+ * jestli zrovna prislo cislo, odmitnuti nebo nic. Smichat obe veci do
+ * jednoho vyctu by znamenalo, ze "neovereny a zaroven odmitnuty" se
+ * nema jak vyjadrit.
+ *
+ * diag_poller_proven() rika to druhe: jestli uz ten kanal na TOMHLE
+ * voze aspon jednou opravdu odpovedel. Dokud ne, je oznaceni na miste;
+ * jakmile ano, identifikator uz neni domnenka ze souboru.
+ *
+ * ---------------------------------------------------------------
  * Listen-only
  * ---------------------------------------------------------------
  * Dokud neni diag_poller_arm(p, true), NEODEJDE ANI JEDEN RAMEC. Neni
@@ -111,6 +152,7 @@
 #include <stdint.h>
 
 #include "can/isotp.h"
+#include "diag/legacy.h"
 #include "diag/link.h"
 #include "diag/uds.h"
 
@@ -130,6 +172,15 @@ extern "C" {
 #ifndef DIAG_SLOW_MS
 #define DIAG_SLOW_MS 10000u
 #endif
+
+/* Energetika EMM. Blok je jeden jediny a nese celou elektrickou
+ * bilanci najednou, takze se cte stejne casto jako stredni skupina -
+ * napeti a proud baterie se v klidu stojiciho vozu hybou pomalu a
+ * castejsi dotaz by jen bral misto na sbernici. */
+#ifndef DIAG_EMM_MS
+#define DIAG_EMM_MS 1000u
+#endif
+#define DIAG_EMM_BLOCK 0x34u
 
 /* Chybova pamet se sama od sebe nemeni, dokud se na ni clovek diva.
  * Cte se pri otevreni stranky a pak uz jen obcas; na vyzadani kdykoliv
@@ -185,6 +236,8 @@ typedef enum {
     DIAG_VIEW_BOOST,      /* graf zadano / skutecnost */
     DIAG_VIEW_FAULTS,     /* chybova pamet */
     DIAG_VIEW_DPF,        /* filtr pevnych castic */
+    DIAG_VIEW_BATT,       /* stav baterie z EMM */
+    DIAG_VIEW_INJ,        /* vyrovnani vstrikovacu */
     DIAG_VIEW_OTHER,      /* nastaveni a vse ostatni */
     DIAG_VIEW__COUNT
 } diag_view_t;
@@ -230,6 +283,32 @@ typedef enum {
     DIAG_CH_RGN_DUR,      /* s, delka prave bezici regenerace */
     DIAG_CH_RGN_END,      /* s, od konce posledni regenerace */
     DIAG_CH_ODO,          /* km */
+
+    /* ---- protitlak vyfuku a tlak na filtru ----
+     * Fyzikalni signal, ze ktereho jednotka odhad sazi teprve pocita.
+     * Odhad sam o sobe je model rizeny teplotou a umi se hnout o
+     * gramy bez jedine fyzicke zmeny (docs/vehicles). */
+    DIAG_CH_EXH_P,        /* mbar, pred turbinou */
+    DIAG_CH_DPF_DP,       /* mbar, rozdil na filtru */
+    DIAG_CH_DPF_DP_U,     /* V, napeti snimace rozdilu */
+    DIAG_CH_DPF_FROZEN,   /* 0/1, jednotka hlasi zamrzly signal */
+
+    /* ---- stav baterie, EMM 74D, jeden blok 21 34 ----
+     * U proudu NESMI zmizet znamenko: nabijeni a odber se lisi prave
+     * jim a tohle je jedine misto, kde se vlastni klidovy odber da
+     * zmerit bez jedineho dratu navic. */
+    DIAG_CH_BATT_I,       /* A */
+    DIAG_CH_BATT_SOC,     /* %, stav nabiti */
+    DIAG_CH_ALT_LOAD,     /* %, zatizeni alternatoru */
+    DIAG_CH_BATT_U_CRANK, /* V, nejnizsi pri startovani */
+    DIAG_CH_BATT_U_SLEEP, /* V, pri poslednim uspani */
+
+    /* ---- vyrovnani vstrikovacu, dodavatelsky rozsah Bosch ----
+     * Jen na vyzadani, viz diag_poller_fbc_start(). */
+    DIAG_CH_FBC1,         /* mg, korekce valce 1 */
+    DIAG_CH_FBC2,
+    DIAG_CH_FBC3,
+    DIAG_CH_FBC4,
     DIAG_CH__COUNT
 } diag_ch_t;
 
@@ -291,6 +370,8 @@ typedef struct {
 typedef struct {
     uint32_t      tx_id;    /* 0x7E0 - ECM na X82 */
     uint32_t      rx_id;    /* 0x7E8 */
+    uint32_t      emm_tx_id; /* 0x74D - energetika, stary protokol */
+    uint32_t      emm_rx_id; /* 0x76D */
     uint8_t       session;  /* 0x03 extended, tu MD1CS006 chce */
     uint8_t       dtc_mask; /* maska pro 19 02; 0x2F = co ma smysl ukazat */
     isotp_send_fn send;     /* povinne, jinak se nic nepta */
@@ -310,6 +391,7 @@ typedef struct {
     uint8_t  nrc;      /* platny pri DIAG_SHOW_REFUSED */
     bool     off;      /* odmitnuty DID, uz se na nej neptame */
     uint32_t t_ms;     /* kdy byla hodnota prectena */
+    bool     seen;     /* uz nekdy opravdu odpovedel, viz proven() */
     float    val;
 } diag_val_t;
 
@@ -319,6 +401,10 @@ typedef struct {
     isotp_link_t link;
     uds_client_t uds;
     diag_link_t  dl;
+
+    /* Druhy transport: EMM na 74D/76D mluvi jen 10 C0 / 21 xx. */
+    isotp_link_t emm_link;
+    legacy_t     emm;
 
     bool     armed;        /* smime vysilat? */
     bool     session_req;  /* 10 03 jeste neodeslano */
@@ -333,6 +419,13 @@ typedef struct {
     uint32_t t_retry;      /* driv se novy dotaz nezacne */
     uint32_t seen_rsp;     /* kolik odpovedi uz bylo zapocitano do link */
     bool     seen_timeout;
+    uint32_t t_emm;        /* driv nez tohle se na 21 34 neptame */
+    bool     emm_off;      /* jednotka blok odmitla, uz se neptame */
+
+    /* Jednorazove mereni vyrovnani vstrikovacu. */
+    bool     fbc_req;      /* uzivatel si rekl, jeste neodeslano */
+    bool     fbc_done;     /* mereni uz jednou dobehlo */
+    uint32_t fbc_t_ms;     /* kdy dobehlo */
 
     diag_val_t val[DIAG_CH__COUNT];
 
@@ -415,6 +508,40 @@ uint32_t diag_poller_fresh_ms(const diag_poller_t *p);
 
 /* Rychlost kanalu, podle ktere se pozna, kdy uz je hodnota stara. */
 diag_tier_t diag_poller_tier(int ch);
+
+/* Pochazi tenhle kanal JEN z popisu jednotky, bez mereni na voze?
+ * Vlastnost radku profilu, ne vysledku cteni - viz rozbor v hlavicce.
+ * Je to cista funkce tabulky, takze nepotrebuje vrstvu. */
+bool diag_poller_unverified(int ch);
+
+/* Odpovedel uz tenhle kanal na tomhle voze aspon jednou? Na rozdil od
+ * diag_poller_show() to zustava platne i potom, co hodnota zestarne
+ * nebo prestane chodit. */
+bool diag_poller_proven(const diag_poller_t *p, int ch);
+
+/* ---------------- jednorazove mereni vstrikovacu ----------------
+ *
+ * Cte FD38..FD3B. Je to dodavatelsky rozsah a jednotka ho SMI odmitnout;
+ * odmitnuti je normalni vysledek mereni, ne porucha - kanaly pak maji
+ * DIAG_SHOW_REFUSED a volajici to ma takhle i rict. */
+void diag_poller_fbc_start(diag_poller_t *p);
+
+/* Bezi prave ted dotaz na FD38..FD3B? */
+bool diag_poller_fbc_busy(const diag_poller_t *p);
+
+/* Dobehlo uz nejake mereni? Dokud ne, nesmi se tvrdit nic - prazdny
+ * vysledek a nespustene mereni vypadaji stejne jen tomu, kdo se
+ * neptal. */
+static inline bool diag_poller_fbc_done(const diag_poller_t *p)
+{
+    return p->fbc_done;
+}
+
+/* Kdy posledni mereni dobehlo. Plati jen pri fbc_done(). */
+static inline uint32_t diag_poller_fbc_at(const diag_poller_t *p)
+{
+    return p->fbc_t_ms;
+}
 
 /* ---------------- stav spoje ---------------- */
 static inline const diag_link_t *diag_poller_link(const diag_poller_t *p)

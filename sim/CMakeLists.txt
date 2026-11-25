@@ -75,6 +75,7 @@ add_executable(lv_shot
   "${FW_SRC_DIR}/i18n.c"
   "${FW_SRC_DIR}/can/isotp.c"
   "${FW_SRC_DIR}/diag/uds.c"
+  "${FW_SRC_DIR}/diag/legacy.c"
   "${FW_SRC_DIR}/diag/link.c"
   "${FW_SRC_DIR}/diag/poller.c"
   ${UI_FONTS}

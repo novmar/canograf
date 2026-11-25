@@ -19,26 +19,46 @@
  * Masky pohledu rikaji, na ktere strance je velicina opravdu videt.
  * Kanal, ktery nikdo nekresli, se nesmi objevit v zadne masce - kazdy
  * DID navic zdrzuje vsechny ostatni.
+ *
+ * Sloupec F rika, co je na radku zvlastniho. F_PROBE je ze vsech
+ * nejdulezitejsi: takovy radek je OPSANY Z POPISU JEDNOTKY a jeste
+ * nikdo ho neprecetl ze skutecneho vozu. Cislo, ktere z nej vyleze,
+ * je zatim tvrzeni souboru, ne mereni - a UI to musi rict nahlas,
+ * dokud jednotka poprve neodpovi.
  * ------------------------------------------------------------------ */
 #define V_MAIN   DIAG_VIEW_BIT(DIAG_VIEW_MAIN)
 #define V_ENG    DIAG_VIEW_BIT(DIAG_VIEW_ENGINE)
 #define V_BOOST  DIAG_VIEW_BIT(DIAG_VIEW_BOOST)
 #define V_FAULT  DIAG_VIEW_BIT(DIAG_VIEW_FAULTS)
 #define V_DPF    DIAG_VIEW_BIT(DIAG_VIEW_DPF)
+#define V_BATT   DIAG_VIEW_BIT(DIAG_VIEW_BATT)
+#define V_INJ    DIAG_VIEW_BIT(DIAG_VIEW_INJ)
 #define V_ALL    DIAG_VIEW_ALL
 
+#define F_SIGN  0x01u   /* dvojkovy doplnek; popis jednotky rika signed */
+#define F_BIT   0x02u   /* jediny bit, jeho cislo je ve sloupci bit */
+#define F_EMM   0x04u   /* EMM 74D, blok 21 34 - ne 22 <did> na ECM */
+#define F_ONCE  0x08u   /* jen na vyzadani, do zadneho kola nepatri */
+#define F_PROBE 0x10u   /* opsano z popisu jednotky, na voze neovereno */
+
 typedef struct {
-    uint16_t did;
+    uint16_t did;     /* 22 <did> na ECM; u EMM 0 */
     uint8_t  len;     /* delka dat, sloupec Bytes v profilu vozidla */
     uint8_t  tier;    /* diag_tier_t */
     uint16_t views;
     float    step;
     float    off;
+    /* Dal uz jen to, co ma vetsina radku nulove. Vynechane polozky
+     * vynuluje jazyk sam, takze puvodni radky zustaly beze zmeny. */
+    uint8_t  flags;
+    uint8_t  at;      /* EMM: index do dat bloku 21 34 */
+    uint8_t  bit;     /* jen s F_BIT; cislovani jako v popisu jednotky,
+                         tedy 0 = nejvyssi bit prvniho bajtu */
 } chan_t;
 
 static const chan_t CHAN[DIAG_CH__COUNT] = {
     /* ---- rychla skupina: bez ni je velicina k nicemu ---- */
-    [DIAG_CH_RPM]      = { 0x2002u, 2u, DIAG_TIER_FAST, V_MAIN,          0.25f,    0.0f },
+    [DIAG_CH_RPM]      = { 0x2002u, 2u, DIAG_TIER_FAST, V_MAIN | V_INJ,  0.25f,    0.0f },
     [DIAG_CH_SPEED]    = { 0x2003u, 2u, DIAG_TIER_FAST, V_MAIN,          0.01f,    0.0f },
     [DIAG_CH_BOOST]    = { 0x2401u, 2u, DIAG_TIER_FAST, V_ENG | V_BOOST, 1.0f,     0.0f },
     [DIAG_CH_BOOST_SP] = { 0x2402u, 2u, DIAG_TIER_FAST, V_ENG | V_BOOST, 1.0f,     0.0f },
@@ -65,6 +85,50 @@ static const chan_t CHAN[DIAG_CH__COUNT] = {
     [DIAG_CH_RGN_END]  = { 0x2557u, 3u, DIAG_TIER_SLOW, V_DPF,           0.1f,     0.0f },
     /* Tachometr dava smysl rozsirenym zaznamum chyb, ktere jsou v km. */
     [DIAG_CH_ODO]      = { 0x2006u, 3u, DIAG_TIER_SLOW, V_FAULT,         1.0f,     0.0f },
+
+    /* ---- protitlak vyfuku a tlakovy rozdil na filtru ----
+     * Skalovani je opsane z MD1CS006_7A00_5P0: 2448 "Pressure before
+     * turbine" (mbar, bez prepoctu), 2443 "CSF differential pressure"
+     * (mbar, offset -32768) a 2444 "CSF differential pressure sensor
+     * voltage" (0,01 V, offset -327,68). 252D je jediny bit na pozici
+     * 7 prvniho datoveho bajtu a jednotka jim sama rika, ze signal
+     * snimace prestal chodit; dokud sviti, je rozdil tlaku bezcenny.
+     * Stredni skupina: obe tlakova cisla se pri jizde hybou s plynem,
+     * priznak zamrznuti se nehybe skoro nikdy. */
+    [DIAG_CH_EXH_P]      = { 0x2448u, 2u, DIAG_TIER_MED,  V_DPF, 1.0f,       0.0f, F_PROBE },
+    [DIAG_CH_DPF_DP]     = { 0x2443u, 2u, DIAG_TIER_MED,  V_DPF, 1.0f,  -32768.0f, F_PROBE },
+    [DIAG_CH_DPF_DP_U]   = { 0x2444u, 2u, DIAG_TIER_MED,  V_DPF, 0.01f,   -327.68f, F_PROBE },
+    [DIAG_CH_DPF_FROZEN] = { 0x252Du, 1u, DIAG_TIER_SLOW, V_DPF, 1.0f,       0.0f,
+                             F_PROBE | F_BIT, 0u, 7u },
+
+    /* ---- stav baterie: EMM 74D, jediny blok 21 34 ----
+     * Indexy jsou sloupec firstbyte z EMM_EDISON_DDT2000_SW15_3
+     * zmenseny o tri: popis cisluje od jednicky a pres hlavicku
+     * 61 34, kdezto legacy_data() uz hlavicku nema.
+     *
+     * V_I_IbattSensor_flt ma offset -200 A, takze ZNAMENKO JE V
+     * SKALOVANI a nikde se neodstranuje: syrova nula je -200 A a
+     * rozdil mezi nabijenim a odberem je prave to, kvuli cemu se
+     * tenhle blok cte. */
+    [DIAG_CH_BATT_I]       = { 0u, 2u, DIAG_TIER_MED, V_BATT, 0.01f,   -200.0f,
+                               F_PROBE | F_EMM, 23u },
+    [DIAG_CH_BATT_SOC]     = { 0u, 3u, DIAG_TIER_MED, V_BATT, 0.001f,     0.0f,
+                               F_PROBE | F_EMM, 25u },
+    [DIAG_CH_ALT_LOAD]     = { 0u, 2u, DIAG_TIER_MED, V_BATT, 0.39063f,   0.0f,
+                               F_PROBE | F_EMM, 4u },
+    [DIAG_CH_BATT_U_CRANK] = { 0u, 2u, DIAG_TIER_MED, V_BATT, 0.001f,     0.0f,
+                               F_PROBE | F_EMM, 30u },
+    [DIAG_CH_BATT_U_SLEEP] = { 0u, 2u, DIAG_TIER_MED, V_BATT, 0.001f,    11.5f,
+                               F_PROBE | F_EMM, 28u },
+
+    /* ---- vyrovnani vstrikovacu: FBC_qDvtCylPhys[0..3] ----
+     * Dvoubajtove se znamenkem, deleno stem. Prazdna maska pohledu je
+     * zamer - do zadneho kola to nepatri, cte se jen na vyzadani a jen
+     * na teplem volnobehu, kde regulator vubec bezi. */
+    [DIAG_CH_FBC1] = { 0xFD38u, 2u, DIAG_TIER_SLOW, 0u, 0.01f, 0.0f, F_PROBE | F_SIGN | F_ONCE },
+    [DIAG_CH_FBC2] = { 0xFD39u, 2u, DIAG_TIER_SLOW, 0u, 0.01f, 0.0f, F_PROBE | F_SIGN | F_ONCE },
+    [DIAG_CH_FBC3] = { 0xFD3Au, 2u, DIAG_TIER_SLOW, 0u, 0.01f, 0.0f, F_PROBE | F_SIGN | F_ONCE },
+    [DIAG_CH_FBC4] = { 0xFD3Bu, 2u, DIAG_TIER_SLOW, 0u, 0.01f, 0.0f, F_PROBE | F_SIGN | F_ONCE },
 };
 
 static const uint32_t TIER_MS[DIAG_TIER__COUNT] = {
@@ -100,7 +164,9 @@ enum {
     JOB_DIDS,
     JOB_DTC,
     JOB_EXT,
-    JOB_FF
+    JOB_FF,
+    JOB_EMM,    /* 21 34 na energetice */
+    JOB_FBC     /* jednorazove FD38..FD3B */
 };
 
 /* ------------------------------------------------------------------
@@ -110,6 +176,10 @@ static int ch_by_did(uint16_t did)
 {
     int i;
 
+    /* Nula neni DID - tu maji radky, ktere na ECM vubec nepatri. */
+    if (did == 0u) {
+        return -1;
+    }
     for (i = 0; i < (int)DIAG_CH__COUNT; i++) {
         if (CHAN[i].did == did) {
             return i;
@@ -127,6 +197,33 @@ static uint32_t be_value(const uint8_t *b, uint8_t n)
         v = (v << 8) | b[i];
     }
     return v;
+}
+
+/* Syrove bajty na fyzikalni hodnotu podle jednoho radku profilu.
+ * Jedine misto, kde se skalovani provadi - at uz data prisla z 22 na
+ * ECM nebo z bloku 21 34 na energetice. */
+static float chan_scale(const chan_t *c, const uint8_t *b)
+{
+    uint32_t raw = be_value(b, c->len);
+    int32_t  s;
+    unsigned n;
+
+    if ((c->flags & F_BIT) != 0u) {
+        /* Popis jednotky cisluje bity od nejvyssiho: bit 0 je nejvyssi
+         * bit prvniho bajtu, takze se zprava posouva o zbytek. */
+        n = (unsigned)c->len * 8u;
+        raw = (raw >> (n - 1u - (unsigned)c->bit)) & 1u;
+        return (float)raw * c->step + c->off;
+    }
+
+    s = (int32_t)raw;
+    if ((c->flags & F_SIGN) != 0u) {
+        n = (unsigned)c->len * 8u;
+        if (n < 32u && (raw & (1u << (n - 1u))) != 0u) {
+            s = (int32_t)(raw | (0xFFFFFFFFu << n));
+        }
+    }
+    return (float)s * c->step + c->off;
 }
 
 static bool all_ff(const uint8_t *b, uint8_t n)
@@ -160,6 +257,8 @@ void diag_poller_cfg_default(diag_poller_cfg_t *cfg)
     cfg->tx_id    = 0x7E0u;                  /* ECM na X82 */
     cfg->rx_id    = 0x7E8u;
     cfg->session  = UDS_SESSION_EXTENDED;    /* 10 03, tu MD1CS006 chce */
+    cfg->emm_tx_id = 0x74Du;                 /* energetika EMM */
+    cfg->emm_rx_id = 0x76Du;
     cfg->dtc_mask = UDS_DTC_SHOW;            /* 0x2F, bez klidoveho 0x50 */
 }
 
@@ -180,6 +279,12 @@ void diag_poller_init(diag_poller_t *p, const diag_poller_cfg_t *cfg)
     ic.user  = cfg->user;
     isotp_init(&p->link, &ic);
     uds_init(&p->uds, &p->link);
+
+    /* Druhy spoj: tataz sbernice, jine identifikatory, jiny protokol. */
+    ic.tx_id = cfg->emm_tx_id;
+    ic.rx_id = cfg->emm_rx_id;
+    isotp_init(&p->emm_link, &ic);
+    legacy_init(&p->emm, &p->emm_link);
     diag_link_init(&p->dl);
 
     p->view    = (uint8_t)DIAG_VIEW_MAIN;
@@ -195,6 +300,7 @@ void diag_poller_arm(diag_poller_t *p, bool on)
     }
     p->armed = on;
     uds_abort(&p->uds);
+    legacy_abort(&p->emm);
     p->job = JOB_NONE;
 
     if (!on) {
@@ -210,6 +316,12 @@ void diag_poller_arm(diag_poller_t *p, bool on)
             p->val[i].nrc  = 0u;
         }
     }
+    /* Totez pro energetiku a pro jednorazove mereni: po vedomem
+     * prepnuti uz nic neplati a nic se nepamatuje jako vysledek. */
+    p->emm_off  = false;
+    p->t_emm    = p->now;
+    p->fbc_req  = false;
+    p->fbc_done = false;
     p->session_req = true;
     p->t_retry     = p->now;
     for (i = 0; i < (int)DIAG_TIER__COUNT; i++) {
@@ -245,6 +357,7 @@ void diag_poller_on_frame(diag_poller_t *p, uint32_t id, const uint8_t *data,
     diag_link_on_frame(&p->dl, id, from_us, now_ms);
     if (p->armed) {
         uds_on_frame(&p->uds, id, data, dlc, now_ms);
+        legacy_on_frame(&p->emm, id, data, dlc, now_ms);
     }
 }
 
@@ -276,10 +389,11 @@ static void harvest_dids(diag_poller_t *p)
             if (b == NULL || r->len != CHAN[ch].len) {
                 continue;   /* jina delka nez profil cekal - nerozebirat */
             }
-            v->val  = (float)be_value(b, r->len) * CHAN[ch].step + CHAN[ch].off;
+            v->val  = chan_scale(&CHAN[ch], b);
             v->t_ms = p->now;
             v->show = (uint8_t)DIAG_SHOW_LIVE;
             v->nrc  = 0u;
+            v->seen = true;
             p->n_sample++;
         } else if (r->status == (uint8_t)UDS_DID_REFUSED) {
             v->show = (uint8_t)DIAG_SHOW_REFUSED;
@@ -288,13 +402,74 @@ static void harvest_dids(diag_poller_t *p)
             /* "Tenhle DID neznam" je trvale - ptat se na nej v kazdem
              * kole by kradlo misto. Jine duvody (podminky nesplneny,
              * potreba security access) trvale nejsou, ty se zkousi dal. */
-            if (r->nrc == (uint8_t)UDS_NRC_OUT_OF_RANGE ||
-                r->nrc == (uint8_t)UDS_NRC_BAD_LENGTH) {
+            if ((CHAN[ch].flags & F_ONCE) == 0u &&
+                (r->nrc == (uint8_t)UDS_NRC_OUT_OF_RANGE ||
+                 r->nrc == (uint8_t)UDS_NRC_BAD_LENGTH)) {
                 v->off = true;
             }
         }
         /* UDS_DID_PENDING a UDS_DID_MISSING necham byt: stara hodnota
          * zustava, ale uz se neobnovila, takze zestarne sama. */
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Energetika
+ *
+ * Jedna odpoved 61 34 nese cely blok a z nej se vybiraji jednotlive
+ * polozky podle sloupce at. Kratsi odpoved se NEDOPLNUJE: polozka,
+ * ktera se do prislych dat nevesla, zustava, jak byla, a zestarne
+ * sama - vymyslet za jednotku bajty, ktere neposlala, je presne to,
+ * co se tady delat nesmi.
+ * ------------------------------------------------------------------ */
+static void harvest_emm(diag_poller_t *p)
+{
+    const uint8_t *d = legacy_data(&p->emm);
+    uint16_t       n = legacy_len(&p->emm);
+    int i;
+
+    if (d == NULL || legacy_block(&p->emm) != DIAG_EMM_BLOCK) {
+        return;
+    }
+    for (i = 0; i < (int)DIAG_CH__COUNT; i++) {
+        const chan_t *c = &CHAN[i];
+        diag_val_t   *v = &p->val[i];
+
+        if ((c->flags & F_EMM) == 0u) {
+            continue;
+        }
+        if ((uint32_t)c->at + c->len > (uint32_t)n) {
+            continue;
+        }
+        v->val  = chan_scale(c, d + c->at);
+        v->t_ms = p->now;
+        v->show = (uint8_t)DIAG_SHOW_LIVE;
+        v->nrc  = 0u;
+        v->seen = true;
+        p->n_sample++;
+    }
+}
+
+/* Blok odmitnuty jednotkou. Odmitnuti plati pro vsechny polozky z nej
+ * najednou - prisla jedna odpoved na jeden dotaz, ne pet. */
+static void harvest_emm_nrc(diag_poller_t *p, uint8_t nrc)
+{
+    int i;
+
+    for (i = 0; i < (int)DIAG_CH__COUNT; i++) {
+        if ((CHAN[i].flags & F_EMM) == 0u) {
+            continue;
+        }
+        p->val[i].show = (uint8_t)DIAG_SHOW_REFUSED;
+        p->val[i].nrc  = nrc;
+        p->val[i].t_ms = p->now;
+    }
+    /* "Tuhle sluzbu ani blok neznam" je trvale; podminky a session se
+     * zkousi dal, stejne jako u 22 na motoru. */
+    if (nrc == (uint8_t)UDS_NRC_OUT_OF_RANGE ||
+        nrc == (uint8_t)UDS_NRC_SERVICE_NOT_SUP ||
+        nrc == (uint8_t)UDS_NRC_SUBFUNC_NOT_SUP) {
+        p->emm_off = true;
     }
 }
 
@@ -421,14 +596,23 @@ static void harvest_ff(diag_poller_t *p)
 /* ------------------------------------------------------------------
  * Vyber dalsi prace
  * ------------------------------------------------------------------ */
+
+/* Patri tenhle radek do bezneho kola dotazu 22 na motor? Radky z
+ * energetiky maji vlastni transport a jednorazove mereni se spousti
+ * tlacitkem, takze ani jeden do davky nepatri. */
+static bool chan_cyclic(int i)
+{
+    return (CHAN[i].flags & (F_EMM | F_ONCE)) == 0u;
+}
+
 static bool tier_wanted(const diag_poller_t *p, uint8_t tier)
 {
     uint16_t bit = DIAG_VIEW_BIT(p->view);
     int i;
 
     for (i = 0; i < (int)DIAG_CH__COUNT; i++) {
-        if (CHAN[i].tier == tier && (CHAN[i].views & bit) != 0u &&
-            !p->val[i].off) {
+        if (chan_cyclic(i) && CHAN[i].tier == tier &&
+            (CHAN[i].views & bit) != 0u && !p->val[i].off) {
             return true;
         }
     }
@@ -472,8 +656,8 @@ static uint8_t build_batch(const diag_poller_t *p, uint8_t tier,
     int i;
 
     for (i = 0; i < (int)DIAG_CH__COUNT && n < (uint8_t)UDS_BATCH_MAX; i++) {
-        if (CHAN[i].tier != tier || (CHAN[i].views & bit) == 0u ||
-            p->val[i].off) {
+        if (!chan_cyclic(i) || CHAN[i].tier != tier ||
+            (CHAN[i].views & bit) == 0u || p->val[i].off) {
             continue;
         }
         out[n].did = CHAN[i].did;
@@ -497,6 +681,34 @@ static bool dtc_due(const diag_poller_t *p)
     return (p->now - p->t_dtc) >= DIAG_DTC_MS;
 }
 
+/* Energetika se cte jen tam, kde je opravdu videt. Je to jeden dotaz
+ * navic na sbernici a na kterekoliv jine strance by nebyl komu k
+ * uzitku. */
+static bool emm_due(const diag_poller_t *p)
+{
+    if (p->emm_off || p->view != (uint8_t)DIAG_VIEW_BATT) {
+        return false;
+    }
+    return (int32_t)(p->now - p->t_emm) >= 0;
+}
+
+/* Kolik radku ma jednorazove mereni a jake DIDy. */
+static uint8_t build_fbc(uds_did_req_t *out)
+{
+    uint8_t n = 0u;
+    int i;
+
+    for (i = 0; i < (int)DIAG_CH__COUNT && n < (uint8_t)UDS_BATCH_MAX; i++) {
+        if ((CHAN[i].flags & F_ONCE) == 0u) {
+            continue;
+        }
+        out[n].did = CHAN[i].did;
+        out[n].len = CHAN[i].len;
+        n++;
+    }
+    return n;
+}
+
 static void start_next(diag_poller_t *p)
 {
     uds_did_req_t want[UDS_BATCH_MAX];
@@ -510,6 +722,21 @@ static void start_next(diag_poller_t *p)
         } else {
             p->t_retry = p->now + DIAG_RETRY_MS;
         }
+        return;
+    }
+
+    /* Jednorazove mereni jde pred vsechno ostatni: uzivatel si o nej
+     * prave rekl a ma smysl jen v tom stavu motoru, ve kterem na
+     * tlacitko sahl. */
+    if (p->fbc_req) {
+        n = build_fbc(want);
+        if (n != 0u && uds_read_dids(&p->uds, want, n, p->now)) {
+            p->job     = JOB_FBC;
+            p->fbc_req = false;
+        } else {
+            p->t_retry = p->now + DIAG_RETRY_MS;
+        }
+        p->rtt_start = p->now;
         return;
     }
 
@@ -540,6 +767,17 @@ static void start_next(diag_poller_t *p)
         } else {
             p->t_retry = p->now + DIAG_RETRY_MS;
         }
+        return;
+    }
+    if (emm_due(p)) {
+        /* legacy_read() si session 10 C0 zalozi sam, kdyz zadna
+         * neplati, takze tady zadny vlastni krok navic neni. */
+        if (legacy_read(&p->emm, DIAG_EMM_BLOCK, p->now)) {
+            p->job = JOB_EMM;
+        } else {
+            p->t_retry = p->now + DIAG_RETRY_MS;
+        }
+        p->t_emm = p->now + DIAG_EMM_MS;
         return;
     }
 
@@ -582,6 +820,7 @@ void diag_poller_poll(diag_poller_t *p, uint32_t now_ms)
     }
 
     uds_poll(&p->uds, now_ms);
+    legacy_poll(&p->emm, now_ms);
 
     rc = uds_rsp_count(&p->uds);
     if (rc != p->seen_rsp) {
@@ -589,7 +828,30 @@ void diag_poller_poll(diag_poller_t *p, uint32_t now_ms)
         diag_link_on_reply(&p->dl, p->cfg.rx_id, now_ms);
     }
 
-    if (p->job != JOB_NONE && !uds_busy(&p->uds)) {
+    /* Energetika ma vlastniho klienta, takze se jeji dobehnuti musi
+     * hlidat zvlast - uds_busy() o ni nic nevi a bez tohohle by se
+     * dotaz na 21 34 uzavrel uz pri prvnim dalsim kole, jeste nez
+     * odpoved vubec dorazila. */
+    if (p->job == JOB_EMM) {
+        legacy_state_t ls = legacy_state(&p->emm);
+
+        if (!legacy_busy(&p->emm) &&
+            (ls == LEGACY_DONE || ls == LEGACY_FAILED)) {
+            if (ls == LEGACY_DONE) {
+                harvest_emm(p);
+                diag_link_on_reply(&p->dl, p->cfg.emm_rx_id, now_ms);
+            } else {
+                p->n_fail++;
+                if (legacy_error(&p->emm) == UDS_ERR_NRC) {
+                    harvest_emm_nrc(p, legacy_nrc(&p->emm));
+                } else if (legacy_error(&p->emm) == UDS_ERR_TIMEOUT) {
+                    diag_link_on_silence(&p->dl, now_ms);
+                }
+                p->t_retry = now_ms + DIAG_RETRY_MS;
+            }
+            p->job = JOB_NONE;
+        }
+    } else if (p->job != JOB_NONE && !uds_busy(&p->uds)) {
         uds_state_t s = uds_state(&p->uds);
 
         if (s == UDS_DONE || s == UDS_FAILED) {
@@ -621,6 +883,14 @@ void diag_poller_poll(diag_poller_t *p, uint32_t now_ms)
                     harvest_ff(p);
                 }
                 break;
+            case JOB_FBC:
+                harvest_dids(p);
+                p->rtt_ms   = now_ms - p->rtt_start;
+                /* Mereni probehlo at tak nebo tak; co z nej vyslo,
+                 * rika stav jednotlivych kanalu. */
+                p->fbc_done = true;
+                p->fbc_t_ms = now_ms;
+                break;
             default:
                 break;
             }
@@ -633,7 +903,7 @@ void diag_poller_poll(diag_poller_t *p, uint32_t now_ms)
     /* Merene cislo, ne odhad: kolik pozadavku opravdu odeslo za
      * posledni vterinu. Pocita se i tester present a 10 xx - na
      * sbernici je to stejny provoz jako dotaz na DIDy. */
-    p->n_req = p->uds.n_req_sent;
+    p->n_req = p->uds.n_req_sent + p->emm.n_req_sent;
     if ((uint32_t)(now_ms - p->win_start) >= 1000u) {
         uint32_t el = now_ms - p->win_start;
         uint32_t d  = p->n_req - p->win_req;
@@ -725,6 +995,56 @@ diag_tier_t diag_poller_tier(int ch)
         return DIAG_TIER_SLOW;
     }
     return (diag_tier_t)CHAN[ch].tier;
+}
+
+bool diag_poller_unverified(int ch)
+{
+    if (ch < 0 || ch >= (int)DIAG_CH__COUNT) {
+        return false;
+    }
+    return (CHAN[ch].flags & F_PROBE) != 0u;
+}
+
+bool diag_poller_proven(const diag_poller_t *p, int ch)
+{
+    if (p == NULL || ch < 0 || ch >= (int)DIAG_CH__COUNT) {
+        return false;
+    }
+    return p->val[ch].seen;
+}
+
+/* ------------------------------------------------------------------
+ * Jednorazove mereni vyrovnani vstrikovacu
+ * ------------------------------------------------------------------ */
+void diag_poller_fbc_start(diag_poller_t *p)
+{
+    int i;
+
+    if (p == NULL || !p->armed) {
+        return;
+    }
+    /* Nove mereni zacina od nuly, ne od toho, co zbylo po minulem -
+     * jinak by pri odpovedi jen na cast valcu zustala stara cisla
+     * vedle novych a vypadala by jako jedno mereni. */
+    for (i = 0; i < (int)DIAG_CH__COUNT; i++) {
+        if ((CHAN[i].flags & F_ONCE) == 0u) {
+            continue;
+        }
+        p->val[i].show = (uint8_t)DIAG_SHOW_NONE;
+        p->val[i].nrc  = 0u;
+        p->val[i].off  = false;
+    }
+    p->fbc_done = false;
+    p->fbc_req  = true;
+    p->t_retry  = p->now;
+}
+
+bool diag_poller_fbc_busy(const diag_poller_t *p)
+{
+    if (p == NULL) {
+        return false;
+    }
+    return p->fbc_req || p->job == JOB_FBC;
 }
 
 /* ------------------------------------------------------------------

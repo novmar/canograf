@@ -77,6 +77,10 @@ static const char *const LANG_EN[] = {
     "SOOT g",
     "LOAD g",
     "SINCE LAST REGEN",
+    "BACKPRESSURE mbar",
+    "FILTER DIFF mbar",
+    "SENSOR V",
+    "FROZEN",
     "Starting a regeneration writes to the ECU (31 01 02 0D). This "
     "build only reads, so the button is not here - see docs/safety.md.",
     "REGEN",
@@ -196,6 +200,39 @@ static const char *const LANG_EN[] = {
     "MEMORY AND UPTIME",
     "SAVE TO %s",
     "DEFAULTS",
+
+    /* a value that is still only copied out of the ECU file */
+    "?  =  from the ECU description file only - this van has never "
+    "answered it",
+
+    /* battery and charging, energy module 74D */
+    "BATTERY",
+    "Battery and charging",
+    "BATTERY CURRENT A",
+    "CHARGE %",
+    "ALTERNATOR LOAD %",
+    "CRANKING MIN V",
+    "AT LAST SLEEP V",
+    "The van measures this at its own battery sensor, so the sign is "
+    "the whole point: one way is charging, the other way is what is "
+    "being taken out. With the engine off and everything asleep, what "
+    "is left is the standing draw - this board included.\n\n"
+    "Which sign means which way is not established on this van yet. "
+    "Start the engine once and the charging direction names itself.",
+
+    /* injector balance - one-off measurement */
+    "INJECTORS",
+    "Injector balance",
+    "MEASURE",
+    "reading...",
+    "SPREAD mg",
+    "CYL %d",
+    "not measured yet",
+    "The ECU does not answer FD38-FD3B (7F %02X). That is the Bosch "
+    "supplier range and a refusal is a normal answer here, not a fault.",
+    "Warm idle, no load. Under load the balance regulator does not run "
+    "and the four numbers are stale rather than wrong.",
+    "%s rpm   %s C  at the measurement",
 };
 
 #endif /* LANG_EN_H */

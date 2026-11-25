@@ -89,6 +89,12 @@ enum {
     STR_DPF_SOOT,
     STR_DPF_LOAD,
     STR_DPF_SINCE,
+    /* Protitlak a tlakovy rozdil na filtru. Fyzikalni signal, ze
+     * ktereho jednotka odhad sazi teprve pocita. */
+    STR_DPF_EXH_P,
+    STR_DPF_DP,
+    STR_DPF_DP_U,
+    STR_DPF_FROZEN,         /* misto cisla, kdyz jednotka hlasi zamrzly signal */
     STR_DPF_REGEN_NA,       /* proc tu neni tlacitko na spusteni */
     STR_REGEN_STATE,
     STR_REGEN_OFF,
@@ -205,6 +211,36 @@ enum {
     STR_DBG_MEM,
     STR_DBG_SAVE,           /* jedno %s = jmeno profilu, do ktereho se uklada */
     STR_DBG_DEFAULT,
+
+    /* Udaj, ktery je zatim jen opsany z popisu jednotky
+     *
+     * Neni to paty stav hodnoty - stavy odpovidaji na "jak dopadlo
+     * tohle cteni", kdezto tohle je vlastnost samotne veliciny. Proto
+     * je oznaceni na POPISKU, ne na cisle, a tahle veta rika, co
+     * otaznik u popisku znamena. */
+    STR_PROBE_MARK,
+
+    /* stav baterie - energetika EMM, blok 21 34 */
+    STR_NAV_BATT,           /* popisek dlazdice */
+    STR_BATT_TITLE,
+    STR_BATT_I,
+    STR_BATT_SOC,
+    STR_BATT_ALT,
+    STR_BATT_CRANK,
+    STR_BATT_SLEEP,
+    STR_BATT_HINT,          /* co znamena znamenko a k cemu to je */
+
+    /* vyrovnani vstrikovacu - jednorazove mereni */
+    STR_NAV_INJ,            /* popisek dlazdice */
+    STR_INJ_TITLE,
+    STR_INJ_MEASURE,        /* tlacitko, ktere mereni spusti */
+    STR_INJ_BUSY,
+    STR_INJ_SPREAD,
+    STR_INJ_CYL,            /* jedno %d = cislo valce */
+    STR_INJ_NONE,           /* jeste se nemerilo */
+    STR_INJ_REFUSED,        /* jedno %02X = duvod od jednotky */
+    STR_INJ_COND,           /* za jakych podminek to ma smysl */
+    STR_INJ_STATE,          /* dve %s = otacky a teplota pri mereni */
 
     STR__COUNT
 };

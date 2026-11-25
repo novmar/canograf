@@ -37,6 +37,11 @@
 #define C_SAGE      0x68937A
 #define C_LABEL     0x65798B
 #define C_BRIGHT    0xDCE7F0
+/* Popisek veliciny, kterou tenhle vuz jeste nikdy nevydal. Vlastni
+ * barva schvalne: modra a kostena uz maji pevny vyznam (zadano /
+ * skutecnost) a cervena je odmitnuti, takze oznaceni "zatim jen z
+ * papiru" nesmi sahnout na zadnou z nich. */
+#define C_PROBE     0xB98A3C
 /* Podkres sloupce DPF pri regeneraci - C_DEFICIT primichana do pozadi.
  * Tlumena pri pokusu o spusteni, vyrazna pri blikani bezici regenerace. */
 #define C_REGEN_DIM 0x3A1D1B
@@ -116,7 +121,9 @@ static lv_obj_t *dtc_ext, *dtc_ff;
 static lv_obj_t *btn_units_v, *btn_units_t, *btn_blank, *lbl_wifi, *lbl_heap;
 static lv_obj_t *btn_bright, *btn_profile, *btn_canmode, *btn_wifi;
 /* DPF */
-static lv_obj_t *lbl_dpf[6], *lbl_regen;
+/* DPF: osm hodnot v mrizce, devata (napeti snimace) ve tretim sloupci,
+ * takze popisku je o jeden vic nez hodnot v mrizce. */
+static lv_obj_t *lbl_dpf[8], *lbl_dpf_cap[9], *lbl_dpf_u, *lbl_regen;
 /* horni lista: prepinac profilu - jmeno a tri rysky vedle sebe */
 static lv_obj_t *prof_btn, *prof_name, *prof_mark[UI_PROFILES];
 /* diagnostika: prekryv s FPS a pameti zije porad, jen byva schovany */
@@ -297,7 +304,10 @@ static const float TIER_K[DIAG_TIER__COUNT] = { 0.25f, 0.12f, 0.06f };
 static const char *const CH_NAME[DIAG_CH__COUNT] = {
     "rpm", "speed", "boost", "boost_sp", "rail", "rail_sp", "vnt",
     "maf", "maf_sp", "egr", "iat", "coolant", "dpf_up", "dpf_dn",
-    "dpf_sp", "soot", "load", "rgn_dur", "rgn_end", "odo"
+    "dpf_sp", "soot", "load", "rgn_dur", "rgn_end", "odo",
+    "exh_p", "dpf_dp", "dpf_du", "dpf_frz",
+    "batt_i", "batt_soc", "alt_load", "u_crank", "u_sleep",
+    "fbc1", "fbc2", "fbc3", "fbc4"
 };
 
 static diag_show_t ch_show(int ch)
@@ -400,6 +410,112 @@ static void val_fmt(lv_obj_t *l, int ch, uint32_t color, const char *fmt, ...)
     }
     lv_label_set_text(l, b);
     lv_obj_set_style_text_color(l, lv_color_hex(c), 0);
+}
+
+/* ---------------------------------------------------------------------
+ * Velicina, kterou tenhle vuz jeste nikdy nevydal
+ *
+ * Cast profilu je opsana z popisu jednotky (ddt4all) a na skutecnem
+ * voze ji nikdo nepotvrdil. To MUSI byt poznat - jinak cislo ze
+ * souboru vypada uplne stejne jako mereni.
+ *
+ * Oznaceni visi na POPISKU, ne na cisle, a to je zamer. Ctyri stavy
+ * hodnoty odpovidaji na jednu otazku: jak dopadlo tohle cteni. Prislo,
+ * je stare, neprislo, jednotka odmitla. "Odkud vim, co to cislo
+ * znamena" je otazka uplne jina, plati porad a nezavisle - i ve
+ * chvili, kdy prave prislo odmitnuti. Paty stav by obe otazky slepil
+ * do jedne odpovedi a dvojice "neovereny a zaroven odmitnuty" by se
+ * nemela jak vyjadrit; proto pribyla znacka u popisku a ne stav navic.
+ *
+ * Otaznik zmizi v okamziku, kdy jednotka na ten identifikator poprve
+ * odpovi - od te chvile uz to neni domnenka souboru.
+ * ------------------------------------------------------------------- */
+static bool ch_probe(int ch)
+{
+    return diag_poller_unverified(ch) &&
+           !(dp && diag_poller_proven(dp, ch));
+}
+
+static void cap_paint_text(lv_obj_t *l, const char *txt, int ch)
+{
+    if (!l) return;
+
+    char b[72];
+    bool q = ch_probe(ch);
+
+    snprintf(b, sizeof(b), "%s%s", txt, q ? "  ?" : "");
+    lv_label_set_text(l, b);
+    lv_obj_set_style_text_color(l, lv_color_hex(q ? C_PROBE : C_LABEL), 0);
+}
+
+static void cap_paint(lv_obj_t *l, int str, int ch)
+{
+    cap_paint_text(l, T(str), ch);
+}
+
+static lv_obj_t *mk_lbl(lv_obj_t *p, const char *t, const lv_font_t *f,
+                        uint32_t c, lv_coord_t x, lv_coord_t y);
+
+static lv_obj_t *mk_cap(lv_obj_t *p, int str, int ch, lv_coord_t x,
+                        lv_coord_t y)
+{
+    lv_obj_t *l = mk_lbl(p, "", UI_FONT_14, C_LABEL, x, y);
+
+    cap_paint(l, str, ch);
+    return l;
+}
+
+/* Legenda k otazniku. Zije jen po dobu otevreneho panelu a je videt
+ * jen tehdy, kdyz na nem opravdu nejaky otaznik sviti - vysvetlivka
+ * ke znacce, ktera nikde neni, je jen dalsi radek k precteni. */
+static lv_obj_t *probe_note;
+
+static void mk_probe_note(lv_obj_t *m, lv_coord_t x, lv_coord_t y)
+{
+    probe_note = mk_lbl(m, T(STR_PROBE_MARK), UI_FONT_14, C_PROBE, x, y);
+}
+
+static void probe_note_paint(const int *chs, int n)
+{
+    if (!probe_note) return;
+
+    bool any = false;
+    for (int i = 0; i < n; i++) any = any || ch_probe(chs[i]);
+
+    if (any) lv_obj_clear_flag(probe_note, LV_OBJ_FLAG_HIDDEN);
+    else     lv_obj_add_flag(probe_note, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* ---------------------------------------------------------------------
+ * Cislo s desetinnymi misty a se znamenkem
+ *
+ * "%+d.%02d" se zapornymi hodnotami tise lze: pri -0,03 A je cela cast
+ * nula, znamenko z ni vypadne a odber se nakresli jako nabijeni.
+ * Znamenko se proto tiskne zvlast a zbytek z absolutni hodnoty.
+ * Formatovani float se tu zamerne nepouziva nikde.
+ * ------------------------------------------------------------------- */
+static void sfix(char *b, size_t n, float v, int dec, bool plus)
+{
+    int scale = (dec >= 2) ? 100 : ((dec == 1) ? 10 : 1);
+    int t = (int)(v * (float)scale + (v < 0.0f ? -0.5f : 0.5f));
+    const char *sg = (t < 0) ? "-" : (plus ? "+" : "");
+
+    if (t < 0) t = -t;
+    if (scale == 1) {
+        snprintf(b, n, "%s%d", sg, t);
+    } else if (scale == 10) {
+        snprintf(b, n, "%s%d.%d", sg, t / 10, t % 10);
+    } else {
+        snprintf(b, n, "%s%d.%02d", sg, t / 100, t % 100);
+    }
+}
+
+/* Priznak se NEDOJIZDI: mezi nulou a jednickou nic neni a vyhlazena
+ * nula celou vterinu po tom, co jednotka rekla jedna, by znamenala, ze
+ * se hodnota jeste vterinu kresli jako platna. */
+static bool ch_flag(int ch)
+{
+    return dp && ch_has(ch) && diag_poller_value(dp, ch) >= 0.5f;
 }
 
 /* ---------------------------------------------------------------------
@@ -635,7 +751,16 @@ static int bl_shown = -1;           /* naposled poslany jas; -1 = nic */
  * dialogu, uklizi modal_forget() */
 static lv_obj_t *btn_bl_level[UI_PROFILES][BL_LEVELS];
 static lv_obj_t *btn_bl_prof[UI_PROFILES];
-static lv_obj_t *dbg_raw, *dbg_mem, *dbg_bus, *dbg_poll;
+static lv_obj_t *dbg_raw, *dbg_raw2, *dbg_mem, *dbg_bus, *dbg_poll;
+/* Panely, ktere si na dobu sveho zivota berou pohled vrstvy
+ * diagnostiky. Po zavreni se musi vratit ten, ktery patri strance pod
+ * nimi - jinak by vrstva dal cetla veliciny, na ktere uz se nikdo
+ * nediva. */
+static bool view_taken;
+/* Panely baterie a vyrovnani vstrikovacu. Zijou jen po dobu, co je
+ * dialog otevreny; obsah se stavi az u nich (batt_cb, inj_cb). */
+static lv_obj_t *batt_cap[5], *batt_val[5];
+static lv_obj_t *inj_spread, *inj_cap[4], *inj_val[4], *inj_state, *inj_msg;
 static lv_obj_t *dbg_perf_btn, *dbg_save_btn;
 #define DIM_STEPS 4
 static lv_obj_t *btn_dim_time[DIM_STEPS], *btn_dim_lvl[BL_LEVELS];
@@ -852,6 +977,12 @@ uint32_t ui_bl_duty(int percent, uint32_t duty_max)
  * diagnostika je nastroj, ne hlavni funkce, takze nepatri na misto, na
  * ktere padne oko jako na prvni. Index je radek * sloupce + sloupec. */
 #define NAV_TILE_DEBUG ((NAV_TILE_ROWS - 1) * NAV_TILE_COLS + NAV_TILE_COLS - 2)
+/* Dva nastroje, ktere se pouzivaji u stojiciho vozu: stav baterie a
+ * vyrovnani vstrikovacu. Jsou v HORNI rade vlevo, tedy na miste, kam
+ * oko padne jako na prvni - na rozdil od diagnostiky je to to, kvuli
+ * cemu clovek mrizku otevira. */
+#define NAV_TILE_BATT 0
+#define NAV_TILE_INJ  1
 
 _Static_assert(NAV_TILE_H >= 120,
                "dlazdice klesly pod dotykovy cil 14 mm, lista je prilis vysoka");
@@ -1179,6 +1310,17 @@ static void modal_forget(void)
     dbg_poll    = NULL;
     dbg_perf_btn = NULL;
     dbg_save_btn = NULL;
+    dbg_raw2     = NULL;
+    probe_note   = NULL;
+    inj_spread   = NULL;
+    inj_state    = NULL;
+    inj_msg      = NULL;
+    for (int i = 0; i < 5; i++) batt_val[i] = batt_cap[i] = NULL;
+    for (int i = 0; i < 4; i++) inj_val[i] = inj_cap[i] = NULL;
+    if (view_taken) {
+        view_taken = false;
+        if (dp) diag_poller_set_view(dp, PAGE_VIEW[cur_page]);
+    }
     for (int m = 0; m < UI_PROFILES; m++) {
         btn_bl_prof[m] = NULL;
         for (int i = 0; i < BL_LEVELS; i++) btn_bl_level[m][i] = NULL;
@@ -2610,25 +2752,51 @@ static void build_chyby(lv_obj_t *scr)
     dtc_ff = mk_lbl(p, "", UI_FONT_16, C_BRIGHT, DTC_COL2, 176);
 }
 
-/* DPF: sest hodnot ve dvou sloupcich, vpravo stav regenerace a
- * vysvetleni, proc tu neni tlacitko na jeji spusteni. */
+/* ---------------------------------------------------------------------
+ * DPF
+ *
+ * Osm hodnot ve dvou sloupcich, vpravo stav regenerace, napeti snimace
+ * a vysvetleni, proc tu neni tlacitko na spusteni regenerace.
+ *
+ * Ctvrta rada je novy par: protitlak pred turbinou a tlakovy rozdil na
+ * filtru. Ty dve cisla jsou duvod, proc ma smysl se na tuhle stranku
+ * divat - odhad sazi nad nimi je model rizeny teplotou, kdezto tohle
+ * je signal, ze ktereho jednotka ten model pocita.
+ *
+ * Kdyz jednotka hlasi zamrzly signal snimace (252D), NEUKAZE SE na
+ * miste tlakoveho rozdilu zadne cislo. Zamrzly snimac porad posila
+ * posledni hodnotu a ta vypada uplne vericne; prave proto to jednotka
+ * rika zvlast a prave proto se to tady musi poslechnout.
+ * ------------------------------------------------------------------- */
 #define DPF_C1   20
 #define DPF_C2   215
 #define DPF_C3   420
-#define DPF_RY(r) (6 + (r) * 68)
+#define DPF_RY(r) (4 + (r) * 64)
+#define DPF_VALS 8
+
+_Static_assert(DPF_RY(3) + 18 + 34 <= PAGE_H - NAV_BAR_H,
+               "ctvrta rada DPF by zmizela pod vysunutou listou");
+
+static const int DPF_CAP[DPF_VALS] = {
+    STR_DPF_TEMP_IN, STR_DPF_TEMP_OUT, STR_DPF_TEMP_TARGET,
+    STR_DPF_SOOT, STR_DPF_LOAD, STR_DPF_SINCE,
+    STR_DPF_EXH_P, STR_DPF_DP
+};
+
+static const int DPF_CH[DPF_VALS] = {
+    DIAG_CH_DPF_UP, DIAG_CH_DPF_DN, DIAG_CH_DPF_SP,
+    DIAG_CH_SOOT, DIAG_CH_CSF_LOAD, DIAG_CH_RGN_END,
+    DIAG_CH_EXH_P, DIAG_CH_DPF_DP
+};
 
 static void build_dpf(lv_obj_t *scr)
 {
-    static const int CAP[6] = {
-        STR_DPF_TEMP_IN, STR_DPF_TEMP_OUT, STR_DPF_TEMP_TARGET,
-        STR_DPF_SOOT, STR_DPF_LOAD, STR_DPF_SINCE
-    };
     lv_obj_t *p = page[PG_DPF] = mk_page(scr);
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < DPF_VALS; i++) {
         lv_coord_t x = (i & 1) ? DPF_C2 : DPF_C1;
         lv_coord_t y = DPF_RY(i / 2);
-        mk_lbl(p, T(CAP[i]), UI_FONT_14, C_LABEL, x, y);
+        lbl_dpf_cap[i] = mk_cap(p, DPF_CAP[i], DPF_CH[i], x, y);
         lbl_dpf[i] = mk_lbl(p, VAL_NONE, UI_FONT_32, C_ACTUAL, x, y + 18);
     }
 
@@ -2636,10 +2804,21 @@ static void build_dpf(lv_obj_t *scr)
     lbl_regen = mk_lbl(p, T(STR_REGEN_OFF), UI_FONT_32, C_LABEL,
                        DPF_C3, DPF_RY(0) + 18);
 
-    lv_obj_t *na = mk_lbl(p, T(STR_DPF_REGEN_NA), UI_FONT_16, C_LABEL,
-                          DPF_C3, DPF_RY(1) + 10);
+    /* Vysvetleni je mezi stavem regenerace a napetim snimace, takze
+     * mensi pismo nez driv: ctvrta rada pod nim uz je obsazena a text
+     * se do ni nesmi rozrust ani v nemcine. */
+    lv_obj_t *na = mk_lbl(p, T(STR_DPF_REGEN_NA), UI_FONT_14, C_LABEL,
+                          DPF_C3, DPF_RY(1) + 4);
     lv_label_set_long_mode(na, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(na, 290);
+
+    /* Napeti snimace patri hned k tlakovemu rozdilu vedle: snimac
+     * mimo kalibraci je videt prave z dvojice "skoro nulovy rozdil a
+     * napeti mimo svuj dolni konec". */
+    lbl_dpf_cap[8] = mk_cap(p, STR_DPF_DP_U, DIAG_CH_DPF_DP_U,
+                            DPF_C3, DPF_RY(3));
+    lbl_dpf_u = mk_lbl(p, VAL_NONE, UI_FONT_32, C_ACTUAL,
+                       DPF_C3, DPF_RY(3) + 18);
 }
 
 /* Nastaveni ma tri rady. Prvni ctyri tlacitka prepinaji jednu hodnotu
@@ -2988,11 +3167,15 @@ static void prof_build(lv_obj_t *bar)
  * neukazat.
  * ------------------------------------------------------------------- */
 #define PERF_WIN_MS 1000
-/* Tri sloupce: vlevo hodnoty vsech kanalu, uprostred sbernice a merena
- * rychlost vycitani, vpravo pamet a prepinac prekryvu s FPS. */
-#define DBG_C1 30
-#define DBG_C2 260
-#define DBG_C3 500
+/* Ctyri sloupce: hodnoty kanalu ve dvou uzkych sloupcich vlevo (na
+ * jeden uz se tricet tri kanalu nevejde a utnout tabulku by znamenalo
+ * schovat prave ty veliciny, kvuli kterym se do ni clovek diva),
+ * uprostred sbernice a merena rychlost vycitani, vpravo pamet a
+ * prepinac prekryvu s FPS. */
+#define DBG_C1  20
+#define DBG_C1B 152
+#define DBG_C2  290
+#define DBG_C3  530
 
 static void perf_monitor_cb(lv_disp_drv_t *drv, uint32_t time, uint32_t px)
 {
@@ -3110,20 +3293,12 @@ static void dbg_btn_paint(void)
     lv_obj_set_style_border_width(dbg_save_btn, PROF.perf == perf_on ? 1 : 3, 0);
 }
 
-/* Syrove hodnoty: stav kanalu a cislo v setinach, jak ho UI drzi.
- * Jmena jsou vyvojarska, ne pro uzivatele - stejne jako nazvy citacu
- * sbernice o kus dal - takze nejdou pres i18n.
- *
- * Stav je jedno pismeno a je to to nejdulezitejsi na cele tabulce:
+/* Stav kanalu jednim pismenem. Je to to nejdulezitejsi na cele
+ * tabulce syrovych hodnot:
  *   -  nic neprislo       L  ziva
  *   S  stara              X  jednotka DID odmitla
  * Kdyz je na strance pomlcka, musi tu byt '-'; kdyz je na strance
  * cislo, musi tu byt L nebo S. Jinak UI kresli neco, co nezmerilo. */
-static const char *const DBG_CH_NAME[DIAG_CH__COUNT] = {
-    "rpm", "speed", "boost", "boost_sp", "rail", "rail_sp", "vnt",
-    "maf", "maf_sp", "egr", "iat", "coolant", "dpf_up", "dpf_dn",
-    "dpf_sp", "soot", "load", "rgn_dur", "rgn_end", "odo"
-};
 
 static char dbg_show_char(int ch)
 {
@@ -3139,14 +3314,21 @@ static void dbg_paint(void)
 {
     if (!dbg_raw) return;
 
-    char b[768];
+    char b[640];
     int n = (int)sizeof(b);
     int at = str_add(b, 0, n, "page %d  nav %d\n", cur_page, nav_state);
+    const int half = (DIAG_CH__COUNT + 1) / 2;
 
-    for (int ch = 0; ch < DIAG_CH__COUNT; ch++)
-        at = str_add(b, at, n, "%-8s %c %d\n", DBG_CH_NAME[ch],
+    for (int ch = 0; ch < half; ch++)
+        at = str_add(b, at, n, "%-8s %c %d\n", CH_NAME[ch],
                      dbg_show_char(ch), (int)(v_shown[ch] * 100.0f));
     lv_label_set_text(dbg_raw, b);
+
+    at = 0;
+    for (int ch = half; ch < DIAG_CH__COUNT; ch++)
+        at = str_add(b, at, n, "%-8s %c %d\n", CH_NAME[ch],
+                     dbg_show_char(ch), (int)(v_shown[ch] * 100.0f));
+    lv_label_set_text(dbg_raw2, b);
 
     if (dbg_bus) {
         char s[256];
@@ -3206,6 +3388,7 @@ static void debug_cb(lv_event_t *e)
 
     mk_lbl(m, T(STR_DBG_RAW), UI_FONT_14, C_LABEL, DBG_C1, 96);
     dbg_raw = mk_lbl(m, "", UI_FONT_14, C_BRIGHT, DBG_C1, 114);
+    dbg_raw2 = mk_lbl(m, "", UI_FONT_14, C_BRIGHT, DBG_C1B, 114);
 
     mk_lbl(m, T(STR_DBG_BUS), UI_FONT_14, C_LABEL, DBG_C2, 96);
     dbg_bus = mk_lbl(m, "", UI_FONT_16, C_BRIGHT, DBG_C2, 114);
@@ -3230,6 +3413,257 @@ static void debug_cb(lv_event_t *e)
     mk_button(m, DBG_C3 + 136, 356, 128, 100, T(STR_DBG_DEFAULT), UI_FONT_16,
               C_DEFICIT, dbg_default_cb, NULL);
     dbg_paint();
+}
+
+/* ---------------------------------------------------------------------
+ * Stav baterie (dlazdice BATERIE)
+ *
+ * PROC TO NENI STRANKA. Lista stranek je sestkrat 129 px a sedme
+ * tlacitko by se do 800 px uz neveslo; hlavne ale tohle neni udaj,
+ * ktery clovek sleduje za jizdy. Je to MERENI, ktere se dela u
+ * stojiciho vozu: zhasnout, zamknout, pockat, az vsechno usne, a
+ * divat se, kolik zbyde. Presne na tyhle nastroje je mrizka dlazdic -
+ * stejne jako diagnostika o kus vys.
+ *
+ * Panel si na dobu, co je otevreny, bere pohled DIAG_VIEW_BATT. Diky
+ * tomu se 21 34 cte prave a jen tehdy, kdyz se na nej nekdo diva, a
+ * na zadne strance to nebere misto ostatnim velicinam.
+ *
+ * Proud je nahore a velkym pismem i se znamenkem. Znamenko je cela
+ * podstata: snimac proudu na baterii vi, kterym smerem proud tece, a
+ * rozdil mezi "dobiji se" a "nekdo bere" je prave to, kvuli cemu se
+ * tenhle blok cte. Absolutni hodnota by z merice udelala ukazatel.
+ * ------------------------------------------------------------------- */
+#define BATT_ROW2   228
+#define BATT_PITCH  185
+#define BATT_X(i)   (20 + (i) * BATT_PITCH)
+
+_Static_assert(BATT_X(3) + 180 <= 800,
+               "ctvrty sloupec baterie by prelezl pravou hranu");
+
+static const int BATT_STR[5] = {
+    STR_BATT_I, STR_BATT_SOC, STR_BATT_ALT, STR_BATT_CRANK, STR_BATT_SLEEP
+};
+
+static const int BATT_CH[5] = {
+    DIAG_CH_BATT_I, DIAG_CH_BATT_SOC, DIAG_CH_ALT_LOAD,
+    DIAG_CH_BATT_U_CRANK, DIAG_CH_BATT_U_SLEEP
+};
+
+/* Kolik desetinnych mist ma ktera hodnota. Proud dve - klidovy odber
+ * se pocita v setinach ampery a zaokrouhlit ho na cele by znamenalo
+ * nezmerit nic. */
+static const int BATT_DEC[5] = { 2, 1, 1, 2, 2 };
+
+static void batt_paint(void)
+{
+    if (!batt_val[0]) return;
+
+    for (int i = 0; i < 5; i++) {
+        char b[24];
+
+        /* Znamenko se tiskne jen u proudu: u napeti a procent zadny
+         * druhy smer neni, takze by plus nic nerikalo. */
+        sfix(b, sizeof(b), ch_val(BATT_CH[i]), BATT_DEC[i], i == 0);
+        val_fmt(batt_val[i], BATT_CH[i], C_ACTUAL, "%s", b);
+        cap_paint(batt_cap[i], BATT_STR[i], BATT_CH[i]);
+    }
+    probe_note_paint(BATT_CH, 5);
+}
+
+static void batt_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *m = modal_open(T(STR_BATT_TITLE), C_SAGE);
+
+    batt_cap[0] = mk_cap(m, BATT_STR[0], BATT_CH[0], BATT_X(0), 100);
+    batt_val[0] = mk_lbl(m, VAL_NONE, UI_FONT_48, C_ACTUAL, BATT_X(0), 122);
+
+    for (int i = 1; i < 5; i++) {
+        lv_coord_t x = BATT_X(i - 1);
+        batt_cap[i] = mk_cap(m, BATT_STR[i], BATT_CH[i], x, BATT_ROW2);
+        batt_val[i] = mk_lbl(m, VAL_NONE, UI_FONT_32, C_ACTUAL,
+                             x, BATT_ROW2 + 18);
+    }
+
+    lv_obj_t *h = mk_lbl(m, T(STR_BATT_HINT), UI_FONT_16, C_LABEL,
+                         BATT_X(0), 310);
+    lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(h, 740);
+
+    mk_probe_note(m, BATT_X(0), 440);
+
+    view_taken = true;
+    if (dp) diag_poller_set_view(dp, DIAG_VIEW_BATT);
+    batt_paint();
+}
+
+/* ---------------------------------------------------------------------
+ * Vyrovnani vstrikovacu (dlazdice VSTRIKOVACE)
+ *
+ * Jednorazove mereni, ne dalsi radek v kole. Korekce po valcich maji
+ * smysl jen na teplem volnobehu bez zateze - jinde regulator vyrovnani
+ * vubec nebezi a ta ctyri cisla jsou stara, ne spatna. Cist to porad
+ * by tedy neznamenalo cist to casteji, ale cist nesmysl.
+ *
+ * ODMITNUTI JE NORMALNI VYSLEDEK. FD38..FD3B je dodavatelsky rozsah
+ * Bosch a tahle verze softwaru na nej odpovidat nemusi. Proto se
+ * nekresli cervene "7F 31" jako u DIDu, ktery ocekavame, ale klidna
+ * veta v barve popisku: mereni probehlo a dopadlo takhle.
+ *
+ * Z ctyr cisel se dela jedno: rozptyl, tedy rozdil nejvetsi a
+ * nejmensi korekce. Nula je dokonale vyrovnany motor, rostouci cislo
+ * je opotrebeni - a ktery valec sedi na kraji, rikaji cisla pod tim.
+ * Rozptyl se ukaze JEN kdyz jsou vsechny ctyri; ze tri valcu se
+ * rozptyl ctyr spocitat neda.
+ * ------------------------------------------------------------------- */
+#define INJ_BTN_X   30
+#define INJ_COL_X   330
+#define INJ_CYL_X(i) (INJ_COL_X + (i) * 104)
+#define INJ_ROW2    226
+
+_Static_assert(INJ_CYL_X(3) + 100 <= 800,
+               "ctvrty valec by prelezl pravou hranu");
+
+/* Podminky zachycene v okamziku, kdy mereni dobehlo. Bez nich je
+ * vysledek jen cislo bez souvislosti - a souvislost je tu to, co
+ * rozhoduje, jestli se na nej smi spolehnout. */
+static char inj_rpm[12] = VAL_NONE, inj_cool[12] = VAL_NONE;
+static bool inj_was_busy;
+
+/* Bezi vzdycky, ne jen pri otevrenem panelu: mereni muze dobehnout i
+ * potom, co ho clovek zavrel. */
+static void inj_tick(void)
+{
+    bool busy = dp && diag_poller_fbc_busy(dp);
+
+    if (inj_was_busy && !busy) {
+        if (ch_has(DIAG_CH_RPM))
+            snprintf(inj_rpm, sizeof(inj_rpm), "%d", (int)ch_val(DIAG_CH_RPM));
+        else
+            snprintf(inj_rpm, sizeof(inj_rpm), VAL_NONE);
+        if (ch_has(DIAG_CH_COOLANT))
+            snprintf(inj_cool, sizeof(inj_cool), "%d",
+                     (int)ch_val(DIAG_CH_COOLANT));
+        else
+            snprintf(inj_cool, sizeof(inj_cool), VAL_NONE);
+    }
+    inj_was_busy = busy;
+}
+
+static void inj_paint(void)
+{
+    if (!inj_spread) return;
+
+    char b[256];
+    int  have = 0, refused = 0;
+    float lo = 0.0f, hi = 0.0f;
+
+    for (int i = 0; i < 4; i++) {
+        int ch = DIAG_CH_FBC1 + i;
+        char t[24];
+
+        if (ch_has(ch)) {
+            float v = ch_val(ch);
+            if (have == 0 || v < lo) lo = v;
+            if (have == 0 || v > hi) hi = v;
+            have++;
+        } else if (ch_show(ch) == DIAG_SHOW_REFUSED) {
+            refused++;
+        }
+        /* Zamerne NE val_fmt(): ten kresli odmitnuti cervene jako
+         * "7F 31", protoze u DIDu, ktery ocekavame, je odmitnuti
+         * zprava. Tenhle rozsah jsme nikdy slibeny nemeli, takze
+         * odmitnuti vypada stejne jako "nemereno" a vetu k tomu rekne
+         * radek pod valci. */
+        if (ch_has(ch)) {
+            sfix(t, sizeof(t), ch_val(ch), 2, true);
+            lv_label_set_text(inj_val[i], t);
+            lv_obj_set_style_text_color(inj_val[i], lv_color_hex(
+                ch_show(ch) == DIAG_SHOW_STALE ? C_LABEL : C_ACTUAL), 0);
+        } else {
+            lv_label_set_text(inj_val[i], VAL_NONE);
+            lv_obj_set_style_text_color(inj_val[i], lv_color_hex(C_LABEL), 0);
+        }
+        snprintf(b, sizeof(b), T(STR_INJ_CYL), i + 1);
+        cap_paint_text(inj_cap[i], b, ch);
+    }
+
+    if (have == 4) {
+        sfix(b, sizeof(b), hi - lo, 2, false);
+        lv_label_set_text(inj_spread, b);
+        lv_obj_set_style_text_color(inj_spread, lv_color_hex(C_ACTUAL), 0);
+    } else {
+        lv_label_set_text(inj_spread, VAL_NONE);
+        lv_obj_set_style_text_color(inj_spread, lv_color_hex(C_LABEL), 0);
+    }
+
+    if (dp && diag_poller_fbc_busy(dp)) {
+        lv_label_set_text(inj_msg, T(STR_INJ_BUSY));
+    } else if (!dp || !diag_poller_fbc_done(dp)) {
+        lv_label_set_text(inj_msg, T(STR_INJ_NONE));
+    } else if (refused == 4) {
+        snprintf(b, sizeof(b), T(STR_INJ_REFUSED),
+                 diag_poller_nrc(dp, DIAG_CH_FBC1));
+        lv_label_set_text(inj_msg, b);
+    } else {
+        lv_label_set_text(inj_msg, "");
+    }
+
+    if (dp && diag_poller_fbc_done(dp)) {
+        snprintf(b, sizeof(b), T(STR_INJ_STATE), inj_rpm, inj_cool);
+        lv_label_set_text(inj_state, b);
+    } else {
+        lv_label_set_text(inj_state, "");
+    }
+
+    static const int FBC_CH[4] = {
+        DIAG_CH_FBC1, DIAG_CH_FBC2, DIAG_CH_FBC3, DIAG_CH_FBC4
+    };
+    probe_note_paint(FBC_CH, 4);
+}
+
+static void inj_start_cb(lv_event_t *e)
+{
+    (void)e;
+    if (dp) diag_poller_fbc_start(dp);
+    inj_paint();
+}
+
+static void inj_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *m = modal_open(T(STR_INJ_TITLE), C_SAGE);
+
+    mk_button(m, INJ_BTN_X, 100, 240, 100, T(STR_INJ_MEASURE), UI_FONT_24,
+              C_ACTUAL, inj_start_cb, NULL);
+    lv_obj_t *c = mk_lbl(m, T(STR_INJ_COND), UI_FONT_14, C_LABEL,
+                         INJ_BTN_X, 214);
+    lv_label_set_long_mode(c, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(c, 270);
+
+    mk_lbl(m, T(STR_INJ_SPREAD), UI_FONT_14, C_LABEL, INJ_COL_X, 100);
+    inj_spread = mk_lbl(m, VAL_NONE, UI_FONT_48, C_LABEL, INJ_COL_X, 122);
+
+    for (int i = 0; i < 4; i++) {
+        char b[32];
+        snprintf(b, sizeof(b), T(STR_INJ_CYL), i + 1);
+        inj_cap[i] = mk_lbl(m, b, UI_FONT_14, C_LABEL, INJ_CYL_X(i), INJ_ROW2);
+        inj_val[i] = mk_lbl(m, VAL_NONE, UI_FONT_32, C_ACTUAL,
+                            INJ_CYL_X(i), INJ_ROW2 + 18);
+    }
+
+    inj_state = mk_lbl(m, "", UI_FONT_16, C_LABEL, INJ_COL_X, 300);
+
+    inj_msg = mk_lbl(m, "", UI_FONT_16, C_LABEL, INJ_BTN_X, 350);
+    lv_label_set_long_mode(inj_msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(inj_msg, 740);
+
+    mk_probe_note(m, INJ_BTN_X, 440);
+
+    view_taken = true;
+    if (dp) diag_poller_set_view(dp, DIAG_VIEW_INJ);
+    inj_paint();
 }
 
 /* ---------------------------------------------------------------------
@@ -3528,10 +3962,23 @@ static void build_chrome(lv_obj_t *scr)
     for (int r = 0; r < NAV_TILE_ROWS; r++)
         for (int c = 0; c < NAV_TILE_COLS; c++) {
             lv_coord_t x = NAV_BTN_X(c), y = NAV_TILE_Y(r);
-            if (r * NAV_TILE_COLS + c == NAV_TILE_DEBUG) {
+            int idx = r * NAV_TILE_COLS + c;
+            if (idx == NAV_TILE_DEBUG) {
                 mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
                           T(STR_NAV_DEBUG), UI_FONT_20, C_DEMAND,
                           debug_cb, NULL);
+                continue;
+            }
+            if (idx == NAV_TILE_BATT) {
+                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
+                          T(STR_NAV_BATT), UI_FONT_20, C_SAGE,
+                          batt_cb, NULL);
+                continue;
+            }
+            if (idx == NAV_TILE_INJ) {
+                mk_button(navpanel, x, y, NAV_BTN_W, NAV_TILE_H,
+                          T(STR_NAV_INJ), UI_FONT_20, C_SAGE,
+                          inj_cb, NULL);
                 continue;
             }
             /* zatim prazdne misto; dotek na nem patri panelu, takze se
@@ -3797,6 +4244,28 @@ static void dpf_paint(void)
             load / 10, load % 10);
     val_fmt(lbl_dpf[5], DIAG_CH_RGN_END, C_ACTUAL, "%d",
             (int)(ch_val(DIAG_CH_RGN_END) / 60.0f));
+    val_fmt(lbl_dpf[6], DIAG_CH_EXH_P, C_ACTUAL, "%d",
+            (int)ch_val(DIAG_CH_EXH_P));
+
+    /* Zamrzly signal: jednotka sama rika, ze snimac prestal menit
+     * hodnotu. Tlakovy rozdil z nej uz neni mereni, takze se na jeho
+     * miste NESMI objevit zadne cislo - ani to posledni, ktere vypada
+     * naprosto vericne. */
+    if (ch_flag(DIAG_CH_DPF_FROZEN)) {
+        lv_label_set_text(lbl_dpf[7], T(STR_DPF_FROZEN));
+        lv_obj_set_style_text_color(lbl_dpf[7], lv_color_hex(C_DEFICIT), 0);
+    } else {
+        val_fmt(lbl_dpf[7], DIAG_CH_DPF_DP, C_ACTUAL, "%d",
+                (int)ch_val(DIAG_CH_DPF_DP));
+    }
+
+    char du[24];
+    sfix(du, sizeof(du), ch_val(DIAG_CH_DPF_DP_U), 2, false);
+    val_fmt(lbl_dpf_u, DIAG_CH_DPF_DP_U, C_ACTUAL, "%s", du);
+
+    for (int i = 0; i < DPF_VALS; i++)
+        cap_paint(lbl_dpf_cap[i], DPF_CAP[i], DPF_CH[i]);
+    cap_paint(lbl_dpf_cap[8], STR_DPF_DP_U, DIAG_CH_DPF_DP_U);
 
     if (!ch_has(DIAG_CH_RGN_DUR)) {
         lv_label_set_text(lbl_regen, VAL_NONE);
@@ -3911,7 +4380,13 @@ void ui_tick(void)
 
     wifi_poll();
     perf_tick(now);
-    dbg_paint();        /* jen kdyz je otevrena diagnostika */
+    /* Vsechny tri jsou "jen kdyz je ten panel otevreny"; inj_tick()
+     * naopak bezi porad, protoze mereni muze dobehnout i potom, co se
+     * panel zavrel. */
+    dbg_paint();
+    inj_tick();
+    batt_paint();
+    inj_paint();
 
     /* Lista i dlazdice spadnou samy zpet na uchyt, aby nekradly plochu.
      * Dotek kamkoliv po obrazovce odpocet resetuje. */
