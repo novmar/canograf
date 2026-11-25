@@ -23,11 +23,17 @@
 #include "can/twai.h"
 #include "sleep_test.h"
 #if CANOGRAF_MOD_WEB
-/* Cela sluzba je v src/net/ a pri CANOGRAF_MOD_WEB=0 se do obrazu vubec
- * neprelozi - skript konfigurace vyradi cely adresar, viz
+/* Cela sluzba je v src/net/server.c a pri CANOGRAF_MOD_WEB=0 se do
+ * obrazu vubec neprelozi - skript konfigurace ten soubor vyradi, viz
  * config/README.md. Tenhle soubor je jedine misto, kde se server potka
  * se siti; sam o ni nevi. */
 #include "net/server.h"
+#endif
+#if CANOGRAF_MOD_ELM327
+/* Emulace ELM327 pro cizi diagnosticke nastroje, src/net/elm.c. Totez
+ * pravidlo: pri CANOGRAF_MOD_ELM327=0 se neprelozi a deska ten port
+ * otevrit neumi. Jen cte - rozbor filtru sluzeb je v net/elm.h. */
+#include "net/elm.h"
 #endif
 
 #include <WiFi.h>
@@ -616,6 +622,12 @@ static unsigned host_psram_kb(void) { return (unsigned)(ESP.getFreePsram() / 102
  * ------------------------------------------------------------------- */
 static diag_poller_t g_diag;
 static uint32_t      g_diag_cursor = 0;
+#if CANOGRAF_MOD_ELM327
+/* Emulace ELM327 je dalsi ctenar, takze ma SVUJ kurzor. Bez nej by si
+ * s vrstvou diagnostiky brali ramce navzajem a obe by obcas cekaly na
+ * odpoved, ktera uz probehla. */
+static uint32_t      g_elm_cursor = 0;
+#endif
 
 static void diag_pump(void)
 {
@@ -626,44 +638,55 @@ static void diag_pump(void)
         diag_poller_on_frame(&g_diag, f.id, f.data, f.dlc, f.tx, f.ts_ms);
     diag_poller_arm(&g_diag, can_mode() == CAN_MODE_NORMAL);
     diag_poller_poll(&g_diag, can_now_ms());
+
+#if CANOGRAF_MOD_ELM327
+    while (can_next(&g_elm_cursor, &f))
+        elm_net_on_frame(f.id, f.data, f.dlc, f.ts_ms);
+    elm_net_tick(can_now_ms());
+#endif
 }
 
 /* ---------------------------------------------------------------------
- * Server se zivymi hodnotami
+ * Vzdalene konce: server se zivymi hodnotami a emulace ELM327
  *
- * Cela sluzba je v src/net/ a do obrazu se prelozi jen pri
- * CANOGRAF_MOD_WEB=1 (config/README.md). Pri vypnutem modulu tu
- * nezustane ani prepinac: UI_HOST.web_* jsou nullptr a rozhrani server
- * vubec nenabidne, takze deska nema cim port otevrit a da se to overit
- * na elf souboru.
+ * Oba moduly ziji v src/net/ a do obrazu se prelozi jen pri
+ * CANOGRAF_MOD_WEB=1, resp. CANOGRAF_MOD_ELM327=1 (config/README.md).
+ * Pri vypnutem modulu tu nezustane ani prepinac: prislusne polozky
+ * UI_HOST jsou nullptr, rozhrani tlacitko vubec nenabidne, deska nema
+ * cim port otevrit a da se to overit na elf souboru.
  *
- * Tenhle soubor je JEDINE misto, kde se potkava server se siti. Server
+ * Tenhle soubor je JEDINE misto, kde se oba potkavaji se siti. Server
  * sam o WiFi nevi a vedet nemuze: dostane jen report_net_t, ve kterem
  * ZADNE HESLO NENI a nebude - ani k cizi siti, ani k vlastnimu
- * pristupovemu bodu. Viz net/report.h.
+ * pristupovemu bodu. Viz net/report.h. Emulace ELM327 o siti nevi uz
+ * vubec; soket si drzi sama a dostane jen transport na sbernici.
  *
- * Port zustava zavreny, dokud ho nekdo nezapne v nastaveni. Volba
- * prezije restart: kdo nechal server bezet, ceka, ze po restartu zase
+ * Porty zustavaji zavrene, dokud je nekdo nezapne v nastaveni. Volba
+ * prezije restart: kdo nechal sluzbu bezet, ceka, ze po restartu zase
  * nabehne.
  * ------------------------------------------------------------------- */
-#if CANOGRAF_MOD_WEB
+#if CANOGRAF_MOD_WEB || CANOGRAF_MOD_ELM327
 
-static char web_addr_buf[20];
+static char net_addr_buf[20];
 
 /* Adresa, na ktere je deska k nalezeni - bez "http://" a bez portu.
  * Je to to, co clovek opravdu napise do telefonu. */
-static const char *web_addr(void)
+static const char *net_addr(void)
 {
     if (WiFi.getMode() & WIFI_MODE_AP) {
-        snprintf(web_addr_buf, sizeof(web_addr_buf), "%s",
+        snprintf(net_addr_buf, sizeof(net_addr_buf), "%s",
                  WiFi.softAPIP().toString().c_str());
-        return web_addr_buf;
+        return net_addr_buf;
     }
     if (WiFi.status() != WL_CONNECTED) return "";
-    snprintf(web_addr_buf, sizeof(web_addr_buf), "%s",
+    snprintf(net_addr_buf, sizeof(net_addr_buf), "%s",
              WiFi.localIP().toString().c_str());
-    return web_addr_buf;
+    return net_addr_buf;
 }
+
+#endif /* CANOGRAF_MOD_WEB || CANOGRAF_MOD_ELM327 */
+
+#if CANOGRAF_MOD_WEB
 
 /* Vsechno, co se server o siti dozvi. Heslo tu nema polozku, takze ho
  * nema jak poslat dal - je to stavba, ne opatrnost. */
@@ -679,7 +702,7 @@ static void web_net_info(report_net_t *out)
     snprintf(out->ssid, sizeof(out->ssid), "%s",
              ap ? host_wifi_ap_ssid()
                 : (out->sta ? WiFi.SSID().c_str() : ""));
-    snprintf(out->ip, sizeof(out->ip), "%s", web_addr());
+    snprintf(out->ip, sizeof(out->ip), "%s", net_addr());
 }
 
 /* Bezi? Pta se SLUZBY, ne nasi predstavy o ni. Kdyz se port nepodarilo
@@ -707,10 +730,75 @@ static void host_web_set(bool on)
  * adresu nema - "server bezi" bez adresy je polovina informace. */
 static const char *host_web_url(void)
 {
-    return net_server_running() ? web_addr() : "";
+    return net_server_running() ? net_addr() : "";
 }
 
 #endif /* CANOGRAF_MOD_WEB */
+
+#if CANOGRAF_MOD_ELM327
+
+/* Bezi? Pta se SLUZBY, ne nasi predstavy o ni - stejne jako u serveru. */
+static bool host_elm_enabled(void) { return elm_net_running(); }
+
+/* Smi emulace vubec vysilat? Jedina pravda o rezimu je radic. V
+ * listen-only se tim pozadavek zastavi jeste driv, nez se zacne
+ * skladat; druha pojistka je can_send(), ktery ho v tom rezimu odmitne
+ * taky. Obe jsou schvalne, viz net/elm.h. */
+static bool elm_tx_allowed(void *user)
+{
+    (void)user;
+    return can_mode() == CAN_MODE_NORMAL;
+}
+
+static void elm_start(void)
+{
+    elm_net_cfg_t c = {};
+    c.send       = can_isotp_send;
+    c.tx_allowed = elm_tx_allowed;
+    /* NAPETI NEMAME. Z VIN, VBUS, 5V ani VBAT nevede na teto desce
+     * zadny delic na pin s prevodnikem (docs/findings.md) a vrstva
+     * diagnostiky zadny kanal s PRAVE PLATNYM napetim palubni site
+     * nema - 21 34 vraci napeti pri startovani a pri poslednim uspani,
+     * tedy historii, ne ted. Proto nullptr: ATRV pak poctive odpovi, ze
+     * udaj nemame. Az takovy kanal vznikne, zapoji se presne sem; do te
+     * doby by cokoliv jineho bylo cislo, ktere nikdo nezmeril. */
+    c.volts      = nullptr;
+    c.tx_id      = CANOGRAF_ECU_TX_ID;
+    c.rx_id      = CANOGRAF_ECU_RX_ID;
+    c.bitrate    = CANOGRAF_CAN_BITRATE;
+    c.port       = CANOGRAF_ELM_PORT;
+    if (!elm_net_start(&c)) Serial.println("elm327: nerozjelo se");
+}
+
+static void host_elm_set(bool on)
+{
+    prefs.begin("talento", false);
+    prefs.putBool("elmon", on);
+    prefs.end();
+    if (on) elm_start();
+    else    elm_net_stop();
+}
+
+/* Adresa i PORT. Bez portu je to polovina informace - do nastroje se
+ * opisuje oboji a 35000 nikdo neuhadne. Prazdno, kdyz emulace stoji
+ * nebo kdyz deska zadnou adresu nema. */
+static const char *host_elm_url(void)
+{
+    static char buf[28];
+    const char *ip;
+
+    if (!elm_net_running()) return "";
+    ip = net_addr();
+    if (!ip[0]) return "";
+    snprintf(buf, sizeof(buf), "%s:%u", ip, (unsigned)elm_net_port());
+    return buf;
+}
+
+/* Visi na portu nastroj? "Port otevreny" a "nekdo se pripojil" jsou dve
+ * ruzne veci a clovek ma videt obe. */
+static bool host_elm_client(void) { return elm_net_client(); }
+
+#endif /* CANOGRAF_MOD_ELM327 */
 
 /* Neni const: kdyz se PWM nerozjede, musi se bl_set_percent za behu
  * vynulovat, at UI stmivani nenabizi.
@@ -756,6 +844,18 @@ static ui_host_t UI_HOST = {
     .web_enabled        = nullptr,
     .web_set            = nullptr,
     .web_url            = nullptr,
+#endif
+#if CANOGRAF_MOD_ELM327
+    .elm_enabled        = host_elm_enabled,
+    .elm_set            = host_elm_set,
+    .elm_url            = host_elm_url,
+    .elm_client         = host_elm_client,
+#else
+    /* Totez pro emulaci ELM327: bez modulu tlacitko vubec nevznikne. */
+    .elm_enabled        = nullptr,
+    .elm_set            = nullptr,
+    .elm_url            = nullptr,
+    .elm_client         = nullptr,
 #endif
     .can_stats          = host_can_stats,
     .can_stats_reset    = host_can_stats_reset,
@@ -883,6 +983,13 @@ void setup()
     bool want_web = prefs.getBool("webon", false);
     prefs.end();
 #endif
+#if CANOGRAF_MOD_ELM327
+    /* Totez pro emulaci ELM327. Port se otevre az za WiFi nize - bez
+     * adresy by se stejne nemel kdo pripojit. */
+    prefs.begin("talento", true);
+    bool want_elm = prefs.getBool("elmon", false);
+    prefs.end();
+#endif
 
     saved_load();
 
@@ -905,6 +1012,9 @@ void setup()
     }
 #if CANOGRAF_MOD_WEB
     if (want_web) web_start();
+#endif
+#if CANOGRAF_MOD_ELM327
+    if (want_elm) elm_start();
 #endif
 
     ArduinoOTA.setHostname("talento-hmi");

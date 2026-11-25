@@ -283,6 +283,13 @@ enum {
     STR_WEB_STALE,
     STR_WEB_REFUSED,
 
+    /* ---- emulace ELM327 ----
+     * Prepinac zije v dialogu WiFi, protoze treti rada nastaveni je
+     * plna; rozbor je u elm_btn() v ui.c. */
+    STR_ELM_TITLE,          /* popisek prepinace a nadpis potvrzeni */
+    STR_ELM_HINT,           /* co se tim otevre a co to NEUMI */
+    STR_ELM_NOADDR,         /* bezi, ale deska nema adresu */
+
     STR__COUNT
 };
 

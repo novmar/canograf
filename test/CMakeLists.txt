@@ -7,6 +7,7 @@
 #   cmake --build test/build
 #   ./test/build/isotp_test        # nebo: ctest --test-dir test/build
 #   ./test/build/uds_test
+#   ./test/build/elm_test
 #
 # Navratovy kod 0 = vse proslo.
 
@@ -45,3 +46,18 @@ target_include_directories(uds_test PRIVATE "${SRC_DIR}")
 target_compile_options(uds_test PRIVATE -Wall -Wextra -Werror)
 
 add_test(NAME uds COMMAND uds_test)
+
+# Emulace ELM327 pro cizi diagnosticke nastroje. Prekladaji se jen
+# elm.c a isotp.c - soket ani UI tu nejsou, protoze cely automat
+# prikazu je cista logika s casem v parametru. CANOGRAF_MOD_ELM327 se
+# schvalne NEdefinuje: hostitelsky preklad tim vynecha sitovou cast
+# souboru a testuje presne to, co se da testovat bez desky.
+add_executable(elm_test
+  "${CMAKE_CURRENT_SOURCE_DIR}/elm_test.c"
+  "${SRC_DIR}/net/elm.c"
+  "${CAN_DIR}/isotp.c"
+)
+target_include_directories(elm_test PRIVATE "${SRC_DIR}")
+target_compile_options(elm_test PRIVATE -Wall -Wextra -Werror)
+
+add_test(NAME elm COMMAND elm_test)

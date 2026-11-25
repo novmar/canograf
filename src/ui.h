@@ -177,6 +177,30 @@ typedef struct {
     void        (*web_set)(bool on);
     const char *(*web_url)(void);
 
+    /* ---- emulace ELM327 pro cizi diagnosticke nastroje ----
+     *
+     * Totez pravidlo jako u serveru: port zustava zavreny, dokud ho
+     * nekdo nezapne tady, a zapnuti je za potvrzenim drzenim, protoze
+     * otevira port do site (docs/safety.md).
+     *
+     * Emulace JEN CTE. Mezi pripojenym nastrojem a sbernici stoji bily
+     * seznam sluzeb a v listen-only neodejde ramec vubec - rozbor je v
+     * net/elm.h. UI o tom nerozhoduje a rozhodovat nema; jen to rekne.
+     *
+     * elm_url() vraci adresu I PORT ("192.168.4.1:35000"), protoze do
+     * nastroje se opisuje oboji a port nikdo neuhadne. "" znamena, ze
+     * neni kde - emulace stoji, nebo deska nema adresu.
+     *
+     * elm_client() rika, jestli na portu nekdo opravdu visi. Otevreny
+     * port a pripojeny nastroj jsou dve ruzne veci a clovek, kteremu to
+     * v aplikaci nejede, ma videt, ve ktere z nich je.
+     *
+     * NULL znamena, ze firmware emulaci nema - UI ji pak nenabidne. */
+    bool        (*elm_enabled)(void);
+    void        (*elm_set)(bool on);
+    const char *(*elm_url)(void);
+    bool        (*elm_client)(void);
+
     /* Citace sbernice. Ukazatel plati porad a struktura se sama
      * obnovuje, takze si ho UI nemusi obnovovat; NULL znamena, ze deska
      * CAN nema a UI nulovani citacu vubec nenabidne. */

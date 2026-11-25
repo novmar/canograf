@@ -227,6 +227,36 @@ static const char *host_web_url(void)
     return s ? s : "";
 }
 
+/* ---- emulace ELM327 ----
+ *
+ * Tataz stavba jako u serveru a ze stejneho duvodu: host_elm() rika,
+ * jestli firmware emulaci vubec ma, a jestli bezi, se UI pta te
+ * emulace, ne vlastni promenne. */
+static bool host_elm(void)
+{
+    return host && host->elm_enabled && host->elm_set;
+}
+
+static bool host_elm_on(void)
+{
+    return host_elm() ? host->elm_enabled() : false;
+}
+
+/* Adresa I PORT, nebo "" kdyz neni kde. Do nastroje se opisuje oboji -
+ * port 35000 nikdo neuhadne. */
+static const char *host_elm_url(void)
+{
+    const char *s = (host && host->elm_url) ? host->elm_url() : NULL;
+    return s ? s : "";
+}
+
+/* Visi na portu nastroj? Otevreny port a pripojena aplikace jsou dve
+ * ruzne veci a clovek, kteremu to nejede, ma videt, ve ktere z nich je. */
+static bool host_elm_client(void)
+{
+    return (host && host->elm_client) ? host->elm_client() : false;
+}
+
 static unsigned host_heap_kb(void)
 {
     return (host && host->heap_kb) ? host->heap_kb() : 0u;
@@ -1352,6 +1382,7 @@ static lv_obj_t *modal = NULL;
 /* stav, ktery zije jen po dobu otevreneho dialogu */
 static lv_obj_t *wifi_list, *wifi_ta, *wifi_kb;
 static lv_obj_t *ap_addr, *ap_clients;  /* dialog pristupoveho bodu */
+static lv_obj_t *btn_elm, *lbl_elm;     /* prepinac emulace ELM327 */
 static int scan_state;                  /* 0 klid, 1 bezi sken, 2 dobehl */
 static uint32_t scan_started_ms;
 static lv_obj_t *hold_panel, *hold_ring, *hold_num;
@@ -1367,6 +1398,8 @@ static void modal_forget(void)
     wifi_kb    = NULL;
     ap_addr    = NULL;
     ap_clients = NULL;
+    btn_elm    = NULL;
+    lbl_elm    = NULL;
     scan_state = 0;
     hold_panel = NULL;
     hold_ring  = NULL;
@@ -1766,6 +1799,104 @@ static void wifi_mode_btn(lv_obj_t *m, bool in_ap)
               UI_FONT_20, C_SAGE, wifi_mode_cb, NULL);
 }
 
+/* ---------------------------------------------------------------------
+ * Emulace ELM327 pro cizi diagnosticke nastroje
+ *
+ * PROC JE TEN PREPINAC TADY, a ne na strance nastaveni. Treti rada
+ * nastaveni je plna (SERVER / adresa a pamet / ZHASNOUT / UDRZBA) a
+ * mezi 20 a 716 px uz se zadny dalsi dotykovy cil nevejde - od 736 px
+ * zacina pravy sloupec DPF. Volba tedy nebyla "kam se to hodi", ale
+ * "co musi zmizet", a nic z te rady zmizet nemelo.
+ *
+ * Dialog WiFi je zaroven misto, kde to dava smysl: emulace je dostupna
+ * JEN po siti, takze clovek, ktery ji zapina, prave resi sit. A hlavne
+ * tady uz stoji adresa - v rezimu pristupoveho bodu i jmeno a heslo
+ * site. Adresa a port jsou presne to, co se odsud opisuje do telefonu,
+ * takze patri vedle sebe a ne na dve obrazovky.
+ *
+ * Zapnuti je za potvrzenim drzenim, stejne jako u serveru a ze stejneho
+ * duvodu: otevira port do site (docs/safety.md). Vypnuti jde rovnou -
+ * zavrit port se musi dat okamzite.
+ * ------------------------------------------------------------------- */
+static void elm_paint(void)
+{
+    char s[64];
+
+    if (btn_elm) {
+        bool on = host_elm_on();
+        lv_obj_t *l = lv_obj_get_child(btn_elm, 0);
+
+        snprintf(s, sizeof(s), "%s\n%s", T(STR_ELM_TITLE),
+                 T(on ? STR_ON : STR_OFF));
+        lv_label_set_text(l, s);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    if (!lbl_elm) return;
+
+    /* Co se ukaze pod tlacitkem:
+     *
+     *   stoji              nic - zavreny port nema adresu
+     *   bezi bez adresy    rekne se to; "bezi" bez adresy je polovina
+     *                      informace a clovek by ji hledal v telefonu
+     *   bezi               adresa:port, a fajfka, kdyz uz nekdo visi */
+    if (!host_elm_on()) {
+        lv_label_set_text(lbl_elm, "");
+        return;
+    }
+    {
+        const char *u = host_elm_url();
+
+        if (!u[0]) {
+            lv_label_set_text(lbl_elm, T(STR_ELM_NOADDR));
+            lv_obj_set_style_text_color(lbl_elm, lv_color_hex(C_LABEL), 0);
+            return;
+        }
+        snprintf(s, sizeof(s), "%s%s", u,
+                 host_elm_client() ? "  " LV_SYMBOL_OK : "");
+        lv_label_set_text(lbl_elm, s);
+        lv_obj_set_style_text_color(lbl_elm, lv_color_hex(C_SAGE), 0);
+    }
+}
+
+static void elm_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    if (host_elm()) host->elm_set(true);
+    /* Dialog se postavi znovu, uz s otevrenym portem a adresou - stejne
+     * jako po zmene hesla pristupoveho bodu. Ktery z dvojice to bude,
+     * rozhodne zase radic. */
+    wifi_cb(NULL);
+}
+
+static void elm_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!host_elm()) return;
+    if (host_elm_on()) {
+        host->elm_set(false);
+        elm_paint();
+        return;
+    }
+    show_confirm(T(STR_ELM_TITLE), T(STR_ELM_HINT), C_DEMAND, elm_ok_cb);
+}
+
+/* Tlacitko i radek s adresou. Umisteni dodava volajici: v obou
+ * dialozich je volne jine misto a tlacitko ma byt tam, kde nic
+ * neprekryva. Kdyz firmware emulaci nema, nevznikne nic - prepinac,
+ * ktery nic nezapne, je horsi nez zadny. */
+static void elm_btn(lv_obj_t *m, lv_coord_t x, lv_coord_t y, lv_coord_t w,
+                    lv_coord_t lbl_x, lv_coord_t lbl_y, lv_coord_t lbl_w)
+{
+    if (!host_elm()) return;
+
+    btn_elm = mk_dlg_button(m, x, y, w, 120, "", UI_FONT_20, C_DEMAND,
+                            elm_cb, NULL);
+    lbl_elm = mk_lbl(m, "", UI_FONT_20, C_SAGE, lbl_x, lbl_y);
+    lv_label_set_long_mode(lbl_elm, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_elm, lbl_w);
+    elm_paint();
+}
+
 static void wifi_save_connect(const char *ssid, const char *pass)
 {
     if (host && host->wifi_connect) host->wifi_connect(ssid, pass);
@@ -1897,6 +2028,10 @@ static void wifi_scan_cb(lv_event_t *e)
               C_ACTUAL, wifi_scan_cb, NULL);
     wifi_mode_btn(m, false);
     mk_lbl(m, T(STR_WIFI_SAVED), UI_FONT_16, C_LABEL, 30, 392);
+    /* Pod tlacitkem ZNOVU je volno az k dolni hrane, takze prepinac
+     * emulace stoji ve stejnem sloupci a adresa s portem pod seznamem,
+     * kde je na ni sirka. */
+    elm_btn(m, 660, 290, 124, 30, 414, 600);
 
     wifi_msg(STR_WIFI_SEARCHING);
     if (host && host->wifi_scan_start) host->wifi_scan_start();
@@ -1976,11 +2111,20 @@ static void wifi_ap_cb(lv_event_t *e)
     if (host && host->wifi_ap_newpass)
         mk_dlg_button(m, 30, 350, 300, 120, T(STR_AP_NEWPASS), UI_FONT_20,
                       C_DEFICIT, ap_newpass_cb, NULL);
+
+    /* Vpravo dole, vedle noveho hesla. Adresa s portem stoji nad
+     * tlacitkem, tedy ve stejnem sloupci - v tomhle rezimu se odsud
+     * opisuje do telefonu uplne vsechno: jmeno site, heslo, adresa. */
+    elm_btn(m, 400, 350, 300, 400, 322, 370);
 }
 
 static void ap_poll(void)
 {
     if (ap_addr) ap_paint();
+    /* Prepinac emulace zije v OBOU dialozich WiFi, takze se obnovuje
+     * zvlast: adresa i to, jestli uz nekdo na portu visi, se meni za
+     * otevreneho dialogu. */
+    if (btn_elm) elm_paint();
 }
 
 static void wifi_poll(void)

@@ -138,7 +138,7 @@ the reasoning behind every decision it makes is in
 
 | key | default | meaning |
 |---|---|---|
-| `CANOGRAF_MOD_WEB` | `on` | `off`: `src/net/` is **not compiled into the image at all**, so the board cannot open a port. `on`: the server is in the image but **stopped** - it is switched on in the settings and the choice is kept in NVS |
+| `CANOGRAF_MOD_WEB` | `on` | `off`: `net/server.c` and `net/report.c` are **not compiled into the image at all**, so the board cannot serve a page. `on`: the server is in the image but **stopped** - it is switched on in the settings and the choice is kept in NVS |
 | `CANOGRAF_WEB_LOG_ROWS` | `7200` | session log capacity, in rows |
 | `CANOGRAF_WEB_LOG_MS` | `500` | one row every this many milliseconds |
 
@@ -153,9 +153,12 @@ else ever appears in the handler table, and neither `net/server.c` nor
 it ever does. The network password never reaches a response either, because
 `report_net_t` has no field to put it in.
 
-With `CANOGRAF_MOD_WEB=off` the script appends `-<net/>` to `build_src_filter`,
-exactly like write protection does, so "not compiled in" is literally true and
-can be checked on the `.elf` with `nm`.
+With `CANOGRAF_MOD_WEB=off` the script appends `-<net/server.c> -<net/report.c>`
+to `build_src_filter`, exactly like write protection does, so "not compiled in"
+is literally true and can be checked on the `.elf` with `nm`. The filter names
+files rather than the directory because `src/net/` holds two independent
+modules - the web server and the ELM327 emulation - and switching one off must
+not take the other with it.
 
 `7200` rows at `500` ms is **one hour** of driving for about 1 MB of the 8 MB
 of PSRAM. A longer log costs more PSRAM, which is shared with the panel
@@ -165,15 +168,42 @@ The log lives in PSRAM and not on the microSD card because this board's card
 select hangs off the CH422G expander, so every transaction costs a round trip
 over the same I2C bus that carries the touch controller.
 
-### Optional modules
+### ELM327 emulation
 
-Reserved, off, neither exists yet. They are here so the names are settled
-before the code arrives.
+An existing diagnostic app (Car Scanner, Torque, OBD Auto Doctor) connects to
+the board over TCP and uses it as its interface to the vehicle. The code is in
+[`src/net/elm.c`](../src/net/elm.c); every decision behind it, including where
+it deliberately behaves **better** than a real ELM327, is in
+[`src/net/elm.h`](../src/net/elm.h).
 
 | key | default | meaning |
 |---|---|---|
-| `CANOGRAF_MOD_ELM327` | `off` | ELM327 emulation for existing diagnostic apps |
+| `CANOGRAF_MOD_ELM327` | `on` | `off`: `net/elm.c` is **not compiled into the image at all**, so the board cannot open that port. `on`: the emulation is in the image but **stopped** - it is switched on in the settings and the choice is kept in NVS |
+| `CANOGRAF_ELM_PORT` | `35000` | TCP port; this is what network ELM327 adapters use, so tools have it pre-filled |
+
+It **only reads**. Between the client and the bus there is exactly one gate,
+`elm_service_allowed()`, and it is a whitelist: services `01`, `09`, `10` with
+subfunction `01`/`03`/`C0`, `19`, `21`, `22` and `3E` pass, everything else is
+refused with `WRITE PROTECTED` and never reaches the bus. Writing, clearing
+fault memory, routine control and ECU reset do not get through no matter what
+header they are sent on. Listen-only mode is checked twice and independently:
+before the request is assembled and again when the frame is handed to the
+controller.
+
+One client at a time. The emulated device is a single serial line with a
+single state, and two tools would overwrite each other's settings and read
+each other's answers; a second connection is accepted, told why in one line,
+and closed.
+
+### Optional modules
+
+Reserved, off, does not exist yet. It is here so the name is settled before
+the code arrives.
+
+| key | default | meaning |
+|---|---|---|
 | `CANOGRAF_MOD_SDLOG` | `off` | logging to the microSD card |
+
 
 ### Idle current measurement
 

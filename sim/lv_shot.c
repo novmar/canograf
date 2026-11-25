@@ -257,6 +257,28 @@ static const char *fake_web_url(void)
     return fake_web_on ? fake_ip() : "";
 }
 
+/* ---- emulace ELM327 ----
+ *
+ * Totez: predstirana deska zadny soket neotevira, drzi se jen prepinac,
+ * adresa s portem a to, jestli na nem nekdo visi. Vlastni automat
+ * prikazu a filtr sluzeb maji svoje testy v test/elm_test.c; tady jde
+ * o to, ze se port neda otevrit tuknutim a ze je adresa videt. */
+static bool fake_elm_on = false;
+static bool fake_elm_tool = false;
+
+static bool fake_elm_enabled(void) { return fake_elm_on; }
+static void fake_elm_set(bool on) { fake_elm_on = on; }
+static bool fake_elm_client(void) { return fake_elm_tool; }
+
+static const char *fake_elm_url(void)
+{
+    static char buf[28];
+
+    if (!fake_elm_on || !fake_ip()[0]) return "";
+    snprintf(buf, sizeof(buf), "%s:35000", fake_ip());
+    return buf;
+}
+
 /* Rezim sbernice. Predstirana deska se chova jako radic: po startu je v
  * listen-only a do normalniho rezimu se dostane jen tim, ze o to nekdo
  * rekne. Kontroly se na tuhle promennou divaji, takze "v listen-only se
@@ -316,6 +338,10 @@ static const ui_host_t FAKE_HOST = {
     .web_enabled        = fake_web_enabled,
     .web_set            = fake_web_set,
     .web_url            = fake_web_url,
+    .elm_enabled        = fake_elm_enabled,
+    .elm_set            = fake_elm_set,
+    .elm_url            = fake_elm_url,
+    .elm_client         = fake_elm_client,
     .can_stats          = fake_can_stats,
     .can_stats_reset    = fake_can_reset,
     .can_is_normal      = fake_can_is_normal,
@@ -353,6 +379,10 @@ static const ui_host_t FAKE_HOST_NODIM = {
     .web_enabled        = fake_web_enabled,
     .web_set            = fake_web_set,
     .web_url            = fake_web_url,
+    .elm_enabled        = fake_elm_enabled,
+    .elm_set            = fake_elm_set,
+    .elm_url            = fake_elm_url,
+    .elm_client         = fake_elm_client,
     .can_stats          = fake_can_stats,
     .can_stats_reset    = fake_can_reset,
     .can_is_normal      = fake_can_is_normal,
@@ -2690,6 +2720,106 @@ static void phase_web(void)
     phase_web_report();
 }
 
+/* ---------------------------------------------------------------------
+ * Emulace ELM327
+ *
+ * Prepinac nestoji v nastaveni, ale v dialogu WiFi - treti rada
+ * nastaveni je plna a emulace je stejne dostupna jen po siti, takze
+ * patri k adrese. Je v OBOU dialozich, protoze deska bud hleda cizi
+ * sit, nebo sit sama dela, a v obou pripadech se k ni nastroj pripojuje
+ * stejne.
+ *
+ * Meri se tu to, co se na obrazovce da tise rozbit:
+ *
+ *   1. PORT SE NEOTEVRE TUKNUTIM. Otevira port do site, takze zapnuti
+ *      je za potvrzenim drzenim, stejne jako u serveru.
+ *      Mutace: v elm_cb() v ui.c volat host->elm_set(true) rovnou misto
+ *      show_confirm(). Kontrola "tuknuti emulaci nezapne" MUSI selhat.
+ *   2. ADRESA A PORT JSOU VIDET. Do nastroje se opisuje oboji a 35000
+ *      nikdo neuhadne.
+ *      Mutace: v elm_paint() v ui.c psat do lbl_elm jen T(STR_ON).
+ *      Kontrola na adresu MUSI selhat.
+ * ------------------------------------------------------------------- */
+#define ELM_STA_X  (660 + 62)       /* dialog seznamu siti */
+#define ELM_STA_Y  (290 + 60)
+#define ELM_AP_X   (400 + 150)      /* dialog pristupoveho bodu */
+#define ELM_AP_Y   (350 + 60)
+
+static void phase_elm(void)
+{
+    ui_show_page(5);
+    run_ms(200, false);
+    check("emulace ELM327 po startu stoji", !fake_elm_on);
+
+    /* V rezimu stanice vede tlacitko WIFI na seznam siti. */
+    tap(SET_WIFI_X, SET_ROW2_Y, false);
+    run_ms(1600, false);                    /* sken dobehne */
+    shot("elm-vypnuto");
+
+    tap(ELM_STA_X, ELM_STA_Y, false);       /* prepinac ELM327 */
+    run_ms(200, false);
+    shot("elm-potvrzeni");
+    tap(HOLD_X, HOLD_Y, false);
+    check("tuknuti emulaci nezapne", !fake_elm_on);
+
+    hold_confirm();
+    check("podrzeni emulaci zapne", fake_elm_on);
+    run_ms(400, false);
+    check("adresa i port emulace jsou na displeji",
+          fake_elm_url()[0] &&
+          screen_has_text(lv_scr_act(), fake_elm_url()));
+    shot("elm-zapnuto");
+
+    /* Zavrit port se musi dat okamzite, bez odpoctu. */
+    tap(ELM_STA_X, ELM_STA_Y, false);
+    run_ms(400, false);
+    check("tuknuti emulaci vypne", !fake_elm_on);
+    check("po vypnuti neni adresa portu na displeji",
+          !screen_has_text(lv_scr_act(), "192.168.4.1:35000"));
+
+    /* ---- totez v rezimu pristupoveho bodu ----
+     * V garazi, kde zadna sit neni, je tohle jediny zpusob, jak se k
+     * desce s telefonem dostat - takze tam prepinac MUSI byt taky. */
+    tap(400 + 120, 14 + 35, false);         /* PRISTUPOVY BOD */
+    run_ms(3400, false);
+    check("deska je v rezimu pristupoveho bodu", fake_ap());
+
+    tap(ELM_AP_X, ELM_AP_Y, false);
+    run_ms(200, false);
+    tap(HOLD_X, HOLD_Y, false);
+    check("tuknuti emulaci nezapne ani v rezimu AP", !fake_elm_on);
+    hold_confirm();
+    check("podrzeni emulaci zapne i v rezimu AP", fake_elm_on);
+    run_ms(400, false);
+    check("v rezimu AP je vedle hesla i adresa s portem",
+          screen_has_text(lv_scr_act(), fake_elm_url()));
+    shot("elm-ap");
+
+    /* Pripojeny nastroj je videt. Otevreny port a bezici aplikace jsou
+     * dve ruzne veci a clovek, kteremu to nejede, ma poznat, ve ktere z
+     * nich je.
+     *
+     * Mutace: v elm_paint() v ui.c vynechat host_elm_client() z
+     * popisku. Posledni kontrola teto faze MUSI selhat. */
+    unsigned no_tool = region_hash(400, 310, 770, 346);
+    fake_elm_tool = true;
+    run_ms(400, false);
+    check("pripojeny nastroj je na displeji poznat",
+          no_tool != region_hash(400, 310, 770, 346));
+    shot("elm-nastroj");
+
+    /* Zpatky na stanici a port zavrit - dalsi faze maji zacit tam, kde
+     * zacinaly dosud. */
+    fake_elm_tool = false;
+    tap(ELM_AP_X, ELM_AP_Y, false);
+    run_ms(200, false);
+    check("emulace jde zavrit i v rezimu AP", !fake_elm_on);
+    tap(400 + 120, 14 + 35, false);         /* SIT */
+    run_ms(600, false);
+    swipe(120, 240, 700, 250, 8, false, false);
+    run_ms(400, false);
+}
+
 /* Deska bez dratku z GPIO6 na plosku BL stmivat neumi a nesmi se tvarit,
  * ze ano. Postavi se cela UI znovu nad hostitelem, ktery bl_set_percent
  * nema, a misto tlacitka jasu musi byt v nastaveni vysvetleni, proc to
@@ -2889,6 +3019,7 @@ int main(int argc, char **argv)
     phase_profily();
     phase_reset();
     phase_web();
+    phase_elm();
     phase_bez_dratku();     /* posledni - stavi UI nad jinym hostitelem */
 
     free(rgb);

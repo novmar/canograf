@@ -282,6 +282,17 @@ static const char *const LANG_DE[] = {
     "live",
     "alt",
     "abgelehnt",
+
+    /* ELM327-Emulation; der Schalter sitzt im WLAN-Dialog */
+    "ELM327",
+    "Eine OBD-App auf dem Telefon verbindet sich über das Netz mit der "
+    "Platine und nutzt sie als Schnittstelle zum Fahrzeug - und bekommt "
+    "mehrrahmige Antworten fertig zusammengesetzt, was ein echter "
+    "ELM327 nicht kann.\n\n"
+    "Sie liest nur: Schreiben, Löschen des Fehlerspeichers und "
+    "Routinen erreichen den Bus nie, egal was die App verlangt. Im "
+    "Nur-Hören-Modus geht gar nichts hinaus. Immer nur ein Werkzeug.",
+    "läuft, aber die Platine hat noch keine Adresse",
 };
 
 #endif /* LANG_DE_H */

@@ -287,6 +287,16 @@ def drop_dir(name):
     env.Replace(SRC_FILTER="%s -<%s%s>" % (src_filter, name, os.sep))
 
 
+def drop_file(path):
+    """Vylouci jeden soubor z prekladu. Totez co drop_dir, jen jemneji:
+    v src/net/ ziji DVA nezavisle moduly (web a emulace ELM327) a
+    vypnuty jeden nesmi odnest druhy."""
+    src_filter = env.get("SRC_FILTER") or "+<*>"
+    if isinstance(src_filter, (list, tuple)):
+        src_filter = " ".join(src_filter)
+    env.Replace(SRC_FILTER="%s -<%s>" % (src_filter, path.replace("/", os.sep)))
+
+
 def apply_to_env(merged):
     defines = []
     for key in sorted(merged):
@@ -304,11 +314,18 @@ def apply_to_env(merged):
     if merged.get("CANOGRAF_ALLOW_WRITE", (None, "0", None))[1] == "0":
         drop_dir("write")
 
-    # Vypnuty web neznamena jen zhasle tlacitko: src/net/ se do obrazu
-    # vubec neprelozi, takze deska zadny port otevrit NEUMI. Hlida to
-    # tyz filtr jako u zapisu a da se to overit na elf souboru.
+    # Vypnuty modul neznamena jen zhasle tlacitko: jeho zdrojaky se do
+    # obrazu vubec neprelozi, takze deska zadny takovy port otevrit NEUMI.
+    # Hlida to tyz filtr jako u zapisu a da se to overit na elf souboru.
+    #
+    # Po souborech, ne po adresarich: v src/net/ ziji dva nezavisle moduly
+    # a vypnuty web nesmi odnest emulaci ELM327 ani naopak.
     if merged.get("CANOGRAF_MOD_WEB", (None, "0", None))[1] == "0":
-        drop_dir("net")
+        drop_file("net/server.c")
+        drop_file("net/report.c")
+
+    if merged.get("CANOGRAF_MOD_ELM327", (None, "0", None))[1] == "0":
+        drop_file("net/elm.c")
 
 
 main()

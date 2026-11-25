@@ -277,6 +277,16 @@ static const char *const LANG_EN[] = {
     "live",
     "old",
     "refused",
+
+    /* the ELM327 emulation; the switch lives in the WiFi dialog */
+    "ELM327",
+    "An OBD app on the phone connects to the board over the network and "
+    "uses it as its interface to the vehicle - with multi-frame answers "
+    "assembled, which a real ELM327 cannot do.\n\n"
+    "It only reads: writing, clearing fault memory and routines never "
+    "reach the bus, whatever the app asks for. In listen-only mode "
+    "nothing is sent at all. One tool at a time.",
+    "running, but the board has no address yet",
 };
 
 #endif /* LANG_EN_H */

@@ -269,6 +269,16 @@ static const char *const LANG_CS[] = {
     "živá",
     "stará",
     "odmítnuta",
+
+    /* emulace ELM327; prepinac zije v dialogu WiFi */
+    "ELM327",
+    "Diagnostická aplikace v telefonu se k desce připojí po síti a "
+    "použije ji jako rozhraní k vozu - a dostane i víceramcové "
+    "odpovědi složené, což skutečný ELM327 neumí.\n\n"
+    "Jen čte: zápis, mazání paměti závad ani rutiny se na sběrnici "
+    "nedostanou, ať si aplikace řekne o cokoliv. V režimu poslechu "
+    "neodejde vůbec nic. Vždy jen jeden nástroj.",
+    "běží, ale deska zatím nemá adresu",
 };
 
 #endif /* LANG_CS_H */
