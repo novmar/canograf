@@ -228,3 +228,32 @@ backlight already.
   settles it, bottom side. `[open]`
 - Eye-to-panel distance in the intended mounting position, which sets the
   smallest legible tile. `[open]`
+
+---
+
+## Added after the first full day
+
+- **Deep sleep does not bring USB back.** After the measurement firmware ended
+  in `esp_deep_sleep_start()`, the board stayed enumerated as
+  `303a:1001 Espressif USB JTAG/serial debug unit` but never created a serial
+  node again - 48 s of polling found nothing. A hard reset fixed it. In the
+  vehicle this does not matter; it does mean no USB debugging after a wake.
+  `[meas]`
+- **The serial node is not always `ttyACM0`.** It came up as `ttyACM1` and a
+  flash aimed at `ttyACM0` failed with "device not connected" while the board
+  was sitting there connected. Never assume the number - the same mistake was
+  already fixed once in `talento_monitor.py` and then repeated by hand. `[meas]`
+- **A clean `pio run` says nothing about files PlatformIO never saw.** The
+  whole `src/net/` layer compiled to nothing for two rounds because the
+  directory was in no build - not the firmware, not the host build. The check
+  that actually answers the question is `ls .pio/build/*/src/<dir>/` for the
+  object files. `[meas]`
+- **A guard belongs in the `.c`, not the header.** An `#error` meant to stop a
+  layer from reaching the CAN driver sat in `net/report.h` and `net/server.h`,
+  where it fired on every consumer including `main.cpp`, which is supposed to
+  drive the bus. Right idea, wrong file: in the header it is an assertion about
+  everyone, in the `.c` it is an assertion about that one layer. `[meas]`
+- **A limit belongs with the code that enforces it.** `NET_AP_CLIENTS_MAX`
+  lived in `net/server.h`, which is not compiled when the web module is off -
+  but the access point still works in that build, so the limit disappeared
+  with the module. `[meas]`
