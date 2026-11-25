@@ -515,9 +515,23 @@ static const ecu_did_t *ecu_find(uint16_t did)
     return NULL;
 }
 
+/* Nejvetsi odpoved, kterou predstirana jednotka slozi. Je to zaroven
+ * velikost bufferu v unit_rx() - jedno cislo, aby se ty dve veci
+ * nemohly rozejit. */
+#define ECU_RSP_MAX 80
+
+/* Zapise `len` bajtu hodnoty `v` od pozice `*at`, ale NIKDY za konec
+ * bufferu. Bez te meze nema funkce jak poznat, kde pole konci, a
+ * prekladac na to opravnene upozornuje: `len` je uint8_t, takze z jeho
+ * pohledu jde o zapis az 255 bajtu do pole o 80. Dnes zadna cesta tak
+ * daleko nejde, ale pretekly buffer v samotne zkousce by byl ten
+ * nejhorsi druh chyby - zkouska by lhala o tom, co jednotka poslala. */
 static void ecu_put(uint8_t *b, int *at, uint32_t v, uint8_t len)
 {
-    for (int i = len - 1; i >= 0; i--) b[(*at)++] = (uint8_t)(v >> (8 * i));
+    for (int i = len - 1; i >= 0; i--) {
+        if (*at < 0 || *at >= ECU_RSP_MAX) return;
+        b[(*at)++] = (uint8_t)(v >> (8 * i));
+    }
 }
 
 /* Slozi odpoved na jeden pozadavek. Vraci jeji delku, 0 = mlcet. */
@@ -713,7 +727,7 @@ static void unit_rx(isotp_link_t *link,
                     int (*reply)(const uint8_t *, int, uint8_t *),
                     const busf_t *f, uint32_t now)
 {
-    uint8_t rsp[80];
+    uint8_t rsp[ECU_RSP_MAX];
     int qn, rn;
 
     /* Flow control patri odesilacimu spoji jednotky. */
